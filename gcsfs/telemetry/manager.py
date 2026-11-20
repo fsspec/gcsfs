@@ -123,6 +123,16 @@ class UsageMetricsTracker:
 
         return None
 
+    def encode_features(self) -> Optional[str]:
+        """Return web-safe base64 encoded GcsfsFeatures for active telemetry state."""
+        tokens_map = self.collect_tokens_map(call_scoped_only=False)
+        if not any(tokens_map.values()):
+            return None
+
+        from gcsfs.telemetry import schema as telemetry_schema
+
+        return telemetry_schema.encode_features(tokens_map)
+
 
 # Default singleton instance pre-configured with standard detectors
 default_usage_tracker = UsageMetricsTracker(

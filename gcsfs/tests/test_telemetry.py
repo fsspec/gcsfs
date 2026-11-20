@@ -3,24 +3,35 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import inspect
 import io
+import logging
 import os
 import sys
 import threading
 import time
 import types
+from unittest import mock
 
 import aiohttp
 import fsspec.asyn
 import fsspec.spec
+import grpc
+import grpc.aio
 import pytest
+import pytest_asyncio
 from google.auth.transport import DEFAULT_RETRYABLE_STATUS_CODES
+from google.cloud import storage_control_v2
+from google.longrunning import operations_pb2, operations_pb2_grpc
 
 import gcsfs.telemetry.detector as environment_module
 import gcsfs.telemetry.manager as manager_mod
+from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+from gcsfs.telemetry import schema as telemetry_schema
 from gcsfs.telemetry.context import (
+    GRPC_METADATA_KEY,
     Dimension,
     get_telemetry_context,
     reset_telemetry_context,
@@ -32,6 +43,13 @@ from gcsfs.telemetry.detector import (
     EnvironmentDetector,
     FrameworkDetector,
 )
+from gcsfs.telemetry.features_proto import (
+    GcsfsEnvironment,
+    GcsfsFeatures,
+    GcsfsFramework,
+    GcsfsMethod,
+)
+from gcsfs.telemetry.grpc import ControlPlaneTelemetryInterceptor
 from gcsfs.telemetry.manager import UsageMetricsTracker
 from gcsfs.telemetry.wrapper import (
     _gcs_async_wrapper,
@@ -1153,7 +1171,7 @@ def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
     """
     Across a Rapid (zonal) file's whole life (open -> read -> seek -> read -> info ->
     close), the caller framework is detected exactly once, on the caller thread, and
-    every operation runs with it.
+    every operation (including MRD/AAOW stream opens) runs with it.
 
     Opening for read issues a JSON API `_info` request from `ZonalFile.__init__` (MRD
     pool setup) before `GCSFile.__init__` caches `caller_framework`, so `_open` must scope
@@ -1164,7 +1182,9 @@ def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
     from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
     from gcsfs.tests import layouts
 
-    fw = "test-zonal-lifecycle"
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    fw = "pandas"
     data = b"0123456789"
     detector = _CallerThreadOnlyDetector(fw)
     monkeypatch.setattr(
@@ -1173,6 +1193,8 @@ def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
     user_agents = []
     # (operation, framework in the active telemetry context) for gRPC-side operations
     grpc_ops = []
+    mrd_md = []
+    aaow_md = []
 
     async def fake_call(self, method, path, *args, **kwargs):
         user_agents.append(self._get_headers(kwargs.get("headers"))["User-Agent"])
@@ -1188,27 +1210,50 @@ def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
     async def fake_lookup_bucket_layout(self, bucket):
         return layouts.ZONAL_HIERARCHICAL
 
-    async def fake_mrd_pool_initialize(self):
-        return None
+    async def fake_get_grpc_client(self):
+        self._grpc_client = object()
+        return self._grpc_client
+
+    async def fake_create_mrd(
+        grpc_client, bucket_name, object_name, generation=None, **kwargs
+    ):
+        mrd_md.append(kwargs.get("metadata"))
+        return types.SimpleNamespace(persisted_size=len(data), close=mock.AsyncMock())
+
+    orig_mrd_pool_close = zb_hns_utils.MRDPool.close
 
     async def fake_mrd_pool_close(self):
         grpc_ops.append(("mrd_pool.close", get_telemetry_context().get("fw")))
+        await orig_mrd_pool_close(self)
 
     async def fake_cat_file(self, path, start=None, end=None, **kwargs):
         # Zonal reads go through the gRPC MRD path; record the context they run with
         grpc_ops.append(("_cat_file", get_telemetry_context().get("fw")))
         return data[start:end]
 
+    async def fake_aaow_open(**kwargs):
+        aaow_md.append(kwargs.get("metadata"))
+
+    fake_writer = types.SimpleNamespace(
+        open=fake_aaow_open,
+        flush=mock.AsyncMock(),
+        close=mock.AsyncMock(),
+        _is_stream_open=True,
+    )
+
     monkeypatch.setattr(CoreGCSFileSystem, "_call", fake_call)
     monkeypatch.setattr(
         ExtendedGcsFileSystem, "_lookup_bucket_layout", fake_lookup_bucket_layout
     )
-    monkeypatch.setattr(ExtendedGcsFileSystem, "_cat_file", fake_cat_file)
-    monkeypatch.setattr(zb_hns_utils.MRDPool, "initialize", fake_mrd_pool_initialize)
-    monkeypatch.setattr(zb_hns_utils.MRDPool, "close", fake_mrd_pool_close)
+    monkeypatch.setattr(ExtendedGcsFileSystem, "_get_grpc_client", fake_get_grpc_client)
     monkeypatch.setattr(
-        zb_hns_utils.MRDPool, "persisted_size", len(data), raising=False
+        zb_hns_utils.AsyncMultiRangeDownloader, "create_mrd", fake_create_mrd
     )
+    monkeypatch.setattr(
+        zb_hns_utils, "AsyncAppendableObjectWriter", lambda **kwargs: fake_writer
+    )
+    monkeypatch.setattr(ExtendedGcsFileSystem, "_cat_file", fake_cat_file)
+    monkeypatch.setattr(zb_hns_utils.MRDPool, "close", fake_mrd_pool_close)
 
     fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
     f = fs.open("zonal-bucket/obj", "rb", cache_type="none")
@@ -1237,6 +1282,15 @@ def test_zonal_file_lifecycle_detects_framework_once(monkeypatch):
     assert all(
         ctx_fw == fw for _, ctx_fw in grpc_ops
     ), f"zonal operations ran without the framework context: {grpc_ops}"
+
+    with fs.open("zonal-bucket/obj", "wb"):
+        pass
+
+    assert detector.thread_names == [threading.current_thread().name] * 2
+    assert mrd_md == [
+        [("x-goog-api-client", "cache_type/none:e"), (GRPC_METADATA_KEY, "EAE=")]
+    ]
+    assert aaow_md == [[(GRPC_METADATA_KEY, "EAE=")]]
     assert get_telemetry_context() == {}
 
 
@@ -2613,3 +2667,494 @@ def test_non_linux_non_windows_platform_skips_probe(fake_host, monkeypatch):
     assert detector.detect() == "oth"
     assert fake_host.dmi_reads == []
     assert fake_host.opened_sessions == 0
+
+
+# ============================================================================
+# 8. Structured Feature Encoding Tests
+# ============================================================================
+
+
+def _decode_features(encoded):
+    return GcsfsFeatures.deserialize(base64.urlsafe_b64decode(encoded))
+
+
+def test_encode_features_wire_parity(monkeypatch):
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    full_tokens = {
+        Dimension.METHOD.value: "cat",
+        Dimension.FRAMEWORK.value: "pandas",
+        Dimension.ENVIRONMENT.value: "gke",
+        Dimension.METHOD_PARAMS.value: "recursive,detail,withdirs,prefix,cache_options",
+    }
+
+    ls_enc = telemetry_schema.encode_features({Dimension.METHOD.value: "ls"})
+    fw_enc = telemetry_schema.encode_features({Dimension.FRAMEWORK.value: "pandas"})
+    env_enc = telemetry_schema.encode_features({Dimension.ENVIRONMENT.value: "oth"})
+    full_enc = telemetry_schema.encode_features(full_tokens)
+    reversed_mp = "cache_options.prefix.withdirs.detail.recursive"
+    reordered = telemetry_schema.encode_features({**full_tokens, "mp": reversed_mp})
+    single_mp = telemetry_schema.encode_features({"mp": "cache_options"})
+    unknown_mp = telemetry_schema.encode_features({"fw": "pandas", "mp": ",.unknown.,"})
+    empty_map = telemetry_schema.encode_features({})
+    empty_mp = telemetry_schema.encode_features({"mp": ""})
+    non_str = telemetry_schema.encode_features({"fw": 123, "mp": ["recursive"]})
+    token = set_telemetry_context({"fw": "pandas", "mp": ""})
+    try:
+        tracker_encoded = manager_mod.default_usage_tracker.encode_features()
+    finally:
+        reset_telemetry_context(token)
+
+    full_dec = _decode_features(full_enc)
+    single_mp_dec = _decode_features(single_mp)
+    mp = full_dec.method_params
+    assert f"{Dimension.FRAMEWORK}" == "fw"
+    assert str(Dimension.METHOD_PARAMS) == "mp"
+    assert GRPC_METADATA_KEY == "x-goog-storage-gcsfs-features"
+    assert (ls_enc, fw_enc, env_enc) == ("CAE=", "EAE=", "GAM=")
+    assert reordered == full_enc
+    assert unknown_mp == "EAE="
+    assert tracker_encoded == "EAE="
+    assert empty_map is None
+    assert empty_mp is None
+    assert non_str is None
+    assert "method_params" not in _decode_features(unknown_mp)
+    assert full_dec.method == GcsfsMethod.GCSFS_METHOD_CAT
+    assert full_dec.framework == GcsfsFramework.GCSFS_FRAMEWORK_PANDAS
+    assert full_dec.environment == GcsfsEnvironment.GCSFS_ENVIRONMENT_GKE
+    assert "method_params" in full_dec
+    assert (mp.recursive, mp.detail, mp.withdirs, mp.prefix, mp.cache_options) == (
+        True,
+    ) * 5
+    assert single_mp_dec.method_params.cache_options is True
+    assert "recursive" not in single_mp_dec.method_params
+
+
+def test_encode_features_opt_out_and_cache(monkeypatch):
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    cache = telemetry_schema._serialize_features
+    cache.cache_clear()
+    enc = telemetry_schema.encode_features
+    tracker = manager_mod.default_usage_tracker
+    unknown = {"fw": "unknown_lib", "mp": "bogus", "env": "", "m": "unspecified"}
+    opt_out_results = []
+    opt_out_hits = []
+    reenabled_results = []
+    token = set_telemetry_context(Dimension.FRAMEWORK, "pandas")
+
+    try:
+        unknown_before = enc(unknown)
+        size_before = cache.cache_info().currsize
+        first = tracker.encode_features()
+        second = tracker.encode_features()
+        info_warm = cache.cache_info()
+        unknown_warm = enc({"fw": "unknown_lib", "mp": "bogus", "env": ""})
+        size_after_warm_unknown = cache.cache_info().currsize
+        for env_var, env_val in (("DO_NOT_TRACK", "1"), ("GCSFS_NO_TELEMETRY", "true")):
+            monkeypatch.setenv(env_var, env_val)
+            opt_out_results.append(tracker.encode_features())
+            opt_out_hits.append(cache.cache_info().hits)
+            monkeypatch.delenv(env_var, raising=False)
+            reenabled_results.append(tracker.encode_features())
+    finally:
+        reset_telemetry_context(token)
+
+    assert unknown_before is None
+    assert size_before == 0
+    assert (first, second) == ("EAE=", "EAE=")
+    assert (info_warm.misses, info_warm.hits, info_warm.currsize) == (1, 1, 1)
+    assert unknown_warm is None
+    assert size_after_warm_unknown == 1
+    assert opt_out_results == [None, None]
+    assert opt_out_hits == [info_warm.hits, info_warm.hits + 1]
+    assert reenabled_results == ["EAE=", "EAE="]
+
+
+def _max_token(enum_cls, prefix):
+    members = (m for m in enum_cls if not m.name.endswith("_UNSPECIFIED"))
+    member = max(members, key=int)
+    return member, member.name.removeprefix(prefix).lower()
+
+
+def test_encode_features_worst_case_bounds():
+    max_method, m_tok = _max_token(GcsfsMethod, "GCSFS_METHOD_")
+    max_fw, fw_tok = _max_token(GcsfsFramework, "GCSFS_FRAMEWORK_")
+    max_env, env_tok = _max_token(GcsfsEnvironment, "GCSFS_ENVIRONMENT_")
+    tokens = {
+        Dimension.METHOD.value: m_tok,
+        Dimension.FRAMEWORK.value: fw_tok,
+        Dimension.ENVIRONMENT.value: env_tok,
+        Dimension.METHOD_PARAMS.value: "recursive,detail,withdirs,prefix,cache_options",
+    }
+
+    encoded = telemetry_schema.encode_features(tokens)
+
+    assert encoded is not None
+    decoded_bytes = base64.urlsafe_b64decode(encoded)
+    assert len(decoded_bytes) <= 256
+    assert len(encoded) <= 256
+    decoded = GcsfsFeatures.deserialize(decoded_bytes)
+    mp = decoded.method_params
+    assert decoded.method == max_method
+    assert decoded.framework == max_fw
+    assert decoded.environment == max_env
+    assert (mp.recursive, mp.detail, mp.withdirs, mp.prefix, mp.cache_options) == (
+        True,
+    ) * 5
+
+
+def test_tracker_encode_features_includes_process_scoped_env():
+    tracker = _tracker_with(_ProcessScopedEnvDetector("gke"))
+
+    token = set_telemetry_context(tracker.collect_tokens_map(call_scoped_only=True))
+    try:
+        snapshot = get_telemetry_context()
+        encoded = tracker.encode_features()
+    finally:
+        reset_telemetry_context(token)
+
+    assert snapshot == {"fw": "pandas"}
+    assert encoded == "EAEYAg=="
+
+
+def test_detector_tokens_map_to_schema_enums():
+    framework_tokens = sorted(set(FrameworkDetector.KNOWN_FRAMEWORKS.values()))
+    env_tokens = sorted(
+        {
+            value
+            for name, value in vars(environment_module).items()
+            if name.startswith("ENV_") and isinstance(value, str)
+        }
+    )
+
+    encoded_frameworks = {
+        token: telemetry_schema.encode_features({Dimension.FRAMEWORK.value: token})
+        for token in framework_tokens
+    }
+    encoded_envs = {
+        token: telemetry_schema.encode_features({Dimension.ENVIRONMENT.value: token})
+        for token in env_tokens
+    }
+
+    assert set(env_tokens) >= {
+        environment_module.ENV_GCE,
+        environment_module.ENV_GKE,
+        environment_module.ENV_OTHER,
+    }
+    for token, encoded in encoded_frameworks.items():
+        assert encoded is not None, f"Unmapped framework token: {token}"
+        decoded = _decode_features(encoded)
+        assert "framework" in decoded
+        assert decoded.framework != GcsfsFramework.GCSFS_FRAMEWORK_UNSPECIFIED
+    for token, encoded in encoded_envs.items():
+        assert encoded is not None, f"Unmapped environment token: {token}"
+        decoded = _decode_features(encoded)
+        assert "environment" in decoded
+        assert decoded.environment != GcsfsEnvironment.GCSFS_ENVIRONMENT_UNSPECIFIED
+
+
+# ============================================================================
+# 9. gRPC Control Plane Telemetry Interceptor Tests
+# ============================================================================
+
+_CONTROL_LAYOUT_NAME = "projects/_/buckets/b/storageLayout"
+_CONTROL_OP_NAME = "projects/_/buckets/b/operations/op1"
+
+
+@pytest_asyncio.fixture
+async def control_plane_loopback(monkeypatch):
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    counting = _CountingDetector("pandas")
+    monkeypatch.setattr(
+        manager_mod, "default_usage_tracker", UsageMetricsTracker(detectors=[counting])
+    )
+    recorded_calls = []
+
+    async def get_storage_layout(request, context):
+        recorded_calls.append(("GetStorageLayout", list(context.invocation_metadata())))
+        return storage_control_v2.StorageLayout(name=request.name, location_type="zone")
+
+    async def create_folder(request, context):
+        recorded_calls.append(("CreateFolder", list(context.invocation_metadata())))
+        return storage_control_v2.Folder(
+            name=f"{request.parent}/folders/{request.folder_id}"
+        )
+
+    class OperationsServicer(operations_pb2_grpc.OperationsServicer):
+        async def GetOperation(self, request, context):
+            recorded_calls.append(("GetOperation", list(context.invocation_metadata())))
+            return operations_pb2.Operation(name=request.name, done=True)
+
+    def _unary(fn, req_cls, resp_cls):
+        return grpc.unary_unary_rpc_method_handler(
+            fn,
+            request_deserializer=req_cls.deserialize,
+            response_serializer=resp_cls.serialize,
+        )
+
+    server = grpc.aio.server()
+    svc = storage_control_v2
+    server.add_generic_rpc_handlers(
+        (
+            grpc.method_handlers_generic_handler(
+                "google.storage.control.v2.StorageControl",
+                {
+                    "GetStorageLayout": _unary(
+                        get_storage_layout,
+                        svc.GetStorageLayoutRequest,
+                        svc.StorageLayout,
+                    ),
+                    "CreateFolder": _unary(
+                        create_folder, svc.CreateFolderRequest, svc.Folder
+                    ),
+                },
+            ),
+        )
+    )
+    operations_pb2_grpc.add_OperationsServicer_to_server(OperationsServicer(), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    instances = []
+
+    try:
+        transport_cls = svc.StorageControlAsyncClient.get_transport_class(
+            "grpc_asyncio"
+        )
+        orig_create_channel = transport_cls.create_channel
+        monkeypatch.setattr(
+            transport_cls,
+            "create_channel",
+            lambda **kwargs: orig_create_channel(
+                ssl_credentials=grpc.local_channel_credentials(), **kwargs
+            ),
+        )
+        ExtendedGcsFileSystem.clear_instance_cache()
+        endpoint = f"http://127.0.0.1:{port}"
+
+        def make_fs(**kwargs):
+            inst = ExtendedGcsFileSystem(token="anon", endpoint_url=endpoint, **kwargs)
+            instances.append(inst)
+            return inst
+
+        fs = make_fs()
+        client = await fs._get_control_plane_client()
+
+        def metadata_values(metadata, key=GRPC_METADATA_KEY):
+            return [v for k, v in metadata if k == key]
+
+        yield types.SimpleNamespace(
+            endpoint=endpoint,
+            fs=fs,
+            make_fs=make_fs,
+            client=client,
+            ops=client.transport.operations_client,
+            counting=counting,
+            recorded_calls=recorded_calls,
+            metadata_values=metadata_values,
+        )
+    finally:
+        for instance in {id(i): i for i in instances}.values():
+            await instance._close_resources()
+        ExtendedGcsFileSystem.clear_instance_cache()
+        await server.stop(0)
+
+
+@pytest.mark.asyncio
+async def test_control_plane_interceptor_attaches_metadata_on_unary_and_lro(
+    control_plane_loopback,
+):
+    fs_cached = control_plane_loopback.make_fs()
+
+    layout = await control_plane_loopback.client.get_storage_layout(
+        name=_CONTROL_LAYOUT_NAME
+    )
+    op = await control_plane_loopback.ops.get_operation(_CONTROL_OP_NAME)
+
+    assert fs_cached is control_plane_loopback.fs
+    assert layout.location_type == "zone"
+    assert op.name == _CONTROL_OP_NAME and op.done is True
+    assert [name for name, _ in control_plane_loopback.recorded_calls] == [
+        "GetStorageLayout",
+        "GetOperation",
+    ]
+    for _, md in control_plane_loopback.recorded_calls:
+        assert control_plane_loopback.metadata_values(md) == ["EAE="]
+        assert control_plane_loopback.metadata_values(md, "x-goog-request-params")
+    first_val = control_plane_loopback.metadata_values(
+        control_plane_loopback.recorded_calls[0][1]
+    )[0]
+    assert _decode_features(first_val).framework == (
+        GcsfsFramework.GCSFS_FRAMEWORK_PANDAS
+    )
+
+
+@pytest.mark.asyncio
+async def test_control_plane_interceptor_caller_override_and_debug_logging(
+    control_plane_loopback,
+):
+    caller_md = [(GRPC_METADATA_KEY, "caller-val")]
+    grpc_logger = logging.getLogger(
+        "google.cloud.storage_control_v2.services.storage_control.transports.grpc_asyncio"
+    )
+    log_records: list[logging.LogRecord] = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record):
+            log_records.append(record)
+
+    log_handler = _ListHandler(logging.DEBUG)
+    orig_level = grpc_logger.level
+
+    grpc_logger.setLevel(logging.DEBUG)
+    grpc_logger.addHandler(log_handler)
+    try:
+        await control_plane_loopback.client.get_storage_layout(
+            name=_CONTROL_LAYOUT_NAME
+        )
+        await control_plane_loopback.client.get_storage_layout(
+            name=_CONTROL_LAYOUT_NAME, metadata=caller_md
+        )
+    finally:
+        grpc_logger.removeHandler(log_handler)
+        grpc_logger.setLevel(orig_level)
+
+    logged_features = [
+        record.metadata.get(GRPC_METADATA_KEY)
+        for record in log_records
+        if "Sending request" in record.getMessage()
+        and isinstance(getattr(record, "metadata", None), dict)
+    ]
+    wire_features = [
+        control_plane_loopback.metadata_values(md)
+        for _, md in control_plane_loopback.recorded_calls
+    ]
+    assert wire_features == [["EAE="], ["caller-val"]]
+    assert logged_features == ["EAE=", "caller-val"]
+    assert all(
+        control_plane_loopback.metadata_values(md, "x-goog-request-params")
+        for _, md in control_plane_loopback.recorded_calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_control_plane_interceptor_loopback_and_opt_out(
+    control_plane_loopback, monkeypatch
+):
+    caller_md = [(GRPC_METADATA_KEY, "caller-val")]
+    client = control_plane_loopback.client
+    ops = control_plane_loopback.ops
+
+    await client.get_storage_layout(name=_CONTROL_LAYOUT_NAME)
+    calls_before_opt_out = len(control_plane_loopback.counting.calls)
+    monkeypatch.setenv("DO_NOT_TRACK", "1")
+    await client.get_storage_layout(name=_CONTROL_LAYOUT_NAME)
+    await client.get_storage_layout(name=_CONTROL_LAYOUT_NAME, metadata=caller_md)
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.setenv("GCSFS_NO_TELEMETRY", "true")
+    await ops.get_operation(_CONTROL_OP_NAME)
+    calls_during_opt_out = len(control_plane_loopback.counting.calls)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    await client.get_storage_layout(name=_CONTROL_LAYOUT_NAME)
+
+    wire_features = [
+        control_plane_loopback.metadata_values(md)
+        for _, md in control_plane_loopback.recorded_calls
+    ]
+    assert wire_features == [["EAE="], [], ["caller-val"], [], ["EAE="]]
+    assert all(
+        control_plane_loopback.metadata_values(md, "x-goog-request-params")
+        for _, md in control_plane_loopback.recorded_calls
+    )
+    assert calls_during_opt_out == calls_before_opt_out
+
+
+@pytest.mark.asyncio
+async def test_control_plane_interceptor_attaches_metadata_on_sync_mkdir(
+    control_plane_loopback, monkeypatch
+):
+    from gcsfs.tests import layouts
+
+    fs_sync = control_plane_loopback.make_fs(skip_instance_cache=True)
+    fs_sync._storage_layout_cache["b"] = layouts.STANDARD_HIERARCHICAL
+    monkeypatch.setattr(fs_sync, "_info", mock.AsyncMock(side_effect=FileNotFoundError))
+
+    await asyncio.to_thread(fs_sync.mkdir, "b/sub")
+
+    assert [
+        (name, control_plane_loopback.metadata_values(md))
+        for name, md in control_plane_loopback.recorded_calls
+    ] == [("CreateFolder", ["EAE="])]
+    assert all(
+        control_plane_loopback.metadata_values(md, "x-goog-request-params")
+        for _, md in control_plane_loopback.recorded_calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_control_plane_interceptor_preserves_caller_header_and_call_details(
+    monkeypatch,
+):
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    interceptor = ControlPlaneTelemetryInterceptor()
+    seen_calls = []
+
+    async def spy_next(details, request):
+        seen_calls.append((details, request))
+        return "spy-result"
+
+    call_creds = grpc.metadata_call_credentials(lambda ctx, cb: cb((), None))
+
+    def _details(md, timeout=12.5):
+        return grpc.aio.ClientCallDetails(
+            b"/google.storage.control.v2.StorageControl/GetStorageLayout",
+            timeout,
+            md,
+            call_creds,
+            True,
+        )
+
+    req = object()
+    md_req = ("x-goog-request-params", "bucket=b")
+    details_md = _details(grpc.aio.Metadata(md_req))
+    details_mixed = _details((md_req, ("X-Goog-Storage-Gcsfs-Features", "CallerMixed")))
+    details_none = _details(None, timeout=5.0)
+    results = []
+
+    for fw, details in (
+        ("pandas", details_md),
+        ("pandas", details_mixed),
+        ("pandas", details_none),
+        ("unknown_lib", details_md),
+    ):
+        token = set_telemetry_context(Dimension.FRAMEWORK, fw)
+        try:
+            results.append(
+                await interceptor.intercept_unary_unary(spy_next, details, req)
+            )
+        finally:
+            reset_telemetry_context(token)
+
+    def _meta(d):
+        return (d.method, d.timeout, d.credentials, d.wait_for_ready)
+
+    forwarded_attached, attached_req = seen_calls[0]
+    forwarded_empty_md, _ = seen_calls[2]
+    assert results == ["spy-result"] * 4
+    assert attached_req is req and forwarded_attached is not details_md
+    assert _meta(forwarded_attached) == (details_md.method, 12.5, call_creds, True)
+    assert isinstance(forwarded_attached.metadata, grpc.aio.Metadata)
+    assert tuple(forwarded_attached.metadata) == (
+        md_req,
+        ("x-goog-storage-gcsfs-features", "EAE="),
+    )
+    assert tuple(details_md.metadata) == (md_req,)
+    assert seen_calls[1][0] is details_mixed
+    assert _meta(forwarded_empty_md) == (details_none.method, 5.0, call_creds, True)
+    assert isinstance(forwarded_empty_md.metadata, grpc.aio.Metadata)
+    assert tuple(forwarded_empty_md.metadata) == (
+        ("x-goog-storage-gcsfs-features", "EAE="),
+    )
+    assert seen_calls[3][0] is details_md

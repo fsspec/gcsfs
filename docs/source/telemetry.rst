@@ -69,14 +69,23 @@ server cannot be reached or does not answer as a Google metadata server, ``gcsfs
 from local signals only (the hardware product name above and whether the process runs in a
 Kubernetes pod).
 
+gRPC Metadata
+~~~~~~~~~~~~~
+
+Because gRPC channels use a ``User-Agent`` fixed when the client is created, ``gcsfs`` instead attaches the encoded ``x-goog-storage-gcsfs-features`` metadata header (a web-safe base64-encoded ``GcsfsFeatures`` protobuf payload) when active attribution dimensions are present:
+
+- **Storage Control Unary RPCs:** Every unary call (including LRO operations, bucket layout lookups, and HNS folder operations such as ``mkdir``, ``rmdir``, and ``mv``) attaches ``x-goog-storage-gcsfs-features`` per RPC.
+- **Rapid (Zonal) and Rapid Cache Ultra Stream Opens:** Initial read (``MRD``) stream opens, and appendable write stream opens (Rapid zonal writes, and Rapid Cache Ultra writes when ``rcu_rapid_write=True``), attach ``x-goog-storage-gcsfs-features`` at open time.
+
+Caller-supplied ``x-goog-storage-gcsfs-features`` metadata is preserved verbatim (case-insensitively) without being overwritten, and the header is omitted when no recognized attribution dimensions are active.
+
+.. code-block:: text
+
+   x-goog-storage-gcsfs-features: EAE=
+
 .. note::
 
-   Telemetry tokens are attached to JSON API (HTTP) requests only. gRPC requests use a ``User-Agent`` fixed
-   when the gRPC client is created and do not yet carry telemetry tokens. This includes Rapid (zonal) reads
-   and writes, Rapid Cache Ultra reads (and writes when ``rcu_rapid_write=True``), and Storage Control API calls
-   (bucket layout lookups and HNS folder operations such as ``mkdir``, ``rmdir`` and ``mv``). Operations on
-   those buckets that use the JSON API over HTTP (such as object metadata lookups, listings, and deletions)
-   continue to include telemetry tokens.
+   Pooled ``MRD`` read streams retain stream-opener attribution across subsequent pooled reads, and internal mid-stream SDK reconnects omit initial open-time metadata.
 
 Privacy & Security Guarantees
 -----------------------------
@@ -95,7 +104,7 @@ How It Works
 
 1. **Zero Configuration:** Upstream libraries do not need any code changes or special configuration. Detection occurs transparently when a filesystem is created and filesystem methods (e.g. ``fs.ls``, ``fs.cat_file``, ``fs.open``, ``df.to_parquet``, ``torch.load``) are called.
 2. **Thread Boundary Crossing:** In ``fsspec``, synchronous operations dispatch coroutines to a background asyncio event loop thread (``fsspecIO`` by default). ``gcsfs`` captures the calling framework on the user's thread and safely propagates it to the background event loop via Python ``contextvars``.
-3. **Performance & Caching:** Framework detection uses lightweight stack frame inspection (via ``sys._getframe()``) capped at 64 frames, and runs once per call on the caller's thread (never on the background event loop thread for synchronous calls). Compute environment detection runs once per process (querying the metadata server in the background when needed) and caches its result in memory. Active ``GCSFile`` instances cache the framework detected at ``open()`` (including when none is detected) so subsequent chunk reads, writes, and background prefetching execute with zero stack-walking overhead (``O(1)``); ``ZonalFile`` likewise reuses that cached attribution for subsequent HTTP metadata lookups after ``open()`` (gRPC bidi reads and writes do not yet emit telemetry tokens).
+3. **Performance & Caching:** Framework detection uses lightweight stack frame inspection (via ``sys._getframe()``) capped at 64 frames, and runs once per call on the caller's thread (never on the background event loop thread for synchronous calls). Compute environment detection runs once per process (querying the metadata server in the background when needed) and caches its result in memory. Active ``GCSFile`` instances cache the framework detected at ``open()`` (including when none is detected) so subsequent chunk reads, writes, and background prefetching execute with zero stack-walking overhead (``O(1)``); ``ZonalFile`` likewise reuses that cached attribution for subsequent HTTP metadata lookups and initial gRPC stream opens.
 
 Disabling Telemetry
 -------------------
@@ -129,5 +138,6 @@ The setting is read on every call, so it can be set (or changed) at any time bef
 When disabled:
 
 - All stack frame inspections and detector evaluations are skipped immediately.
-- Outgoing ``User-Agent`` headers omit ``fw/`` and ``env/`` telemetry tokens.
+- Outgoing ``User-Agent`` headers omit ``fw/`` and ``env/`` telemetry tokens, and gRPC calls omit ``x-goog-storage-gcsfs-features`` metadata.
 - ``gcsfs`` sends no requests to the metadata server.
+- Caller-supplied metadata (such as explicit ``x-goog-storage-gcsfs-features`` entries) is preserved untouched.
