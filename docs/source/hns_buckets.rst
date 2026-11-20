@@ -84,8 +84,14 @@ Bucket Type Detection and Caching
 Before routing directory-level or file-level operations, the ``ExtendedGcsFileSystem`` performs a bucket type detection query via the Cloud Storage Control API's ``get_storage_layout`` method to determine if the bucket is HNS-enabled or Zonal.
 
 * **Success Caching:** Once the bucket type is successfully determined, the filesystem caches this layout type to avoid repeated API lookup overhead for subsequent operations.
-* **Non-Caching of UNKNOWN:** If the bucket type detection returns ``UNKNOWN`` (for instance, due to transient network failures), it is **intentionally not cached**. This ensures that transient lookup failures do not permanently degrade HNS or Zonal performance.
-* **Fallback Behavior:** If the bucket type is flagged as ``UNKNOWN``, the filesystem gracefully falls back to standard flat-namespace GCS operations without raising an error. The filesystem will retry the lookup on subsequent requests, allowing it to automatically adopt HNS/Zonal optimizations if the issue resolves.
+* **Fallback Behavior:** The filesystem uses standard flat-namespace operations (``UNKNOWN``) only when the layout definitively cannot be known, and remembers that for the filesystem instance:
+
+  * The endpoint is plain ``http://`` (for example an emulator such as fake-gcs-server). The lookup always uses TLS, so it is not attempted.
+  * The endpoint is not the default ``https://storage.googleapis.com`` (or ``https://storage.<universe>``), and it does not answer the lookup in one attempt. Such endpoints, e.g. regional endpoints, may not serve the Storage Control API.
+  * The caller may not read the layout. It needs ``storage.objects.list`` on the bucket.
+
+  Call ``invalidate_storage_layout_cache()`` to check again, for example after granting the permission. A bucket that does not exist is looked up again on the next operation.
+* **Transient Failures:** On the default endpoint, a lookup that still fails after retries (for example during a Storage Control outage) raises the error instead of falling back. Falling back would silently change the result of HNS operations: ``mv`` of a folder would move nothing, and ``makedirs`` would create no folder.
 
 Waiting for Folder Renames
 --------------------------

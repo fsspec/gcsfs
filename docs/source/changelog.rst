@@ -7,6 +7,21 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
+* **Bucket layout lookup failures no longer change HNS results or slow down
+  emulators.** Previously any failed ``get_storage_layout`` lookup silently
+  fell back to flat-bucket behavior and was repeated on every operation:
+  against fake-gcs-server and other ``http://`` endpoints each operation
+  spent 30-100 s retrying a lookup that can never succeed there, and on HNS
+  buckets a transient failure made ``mv`` of a folder move nothing,
+  ``makedirs`` and ``rmdir`` do nothing, and ``rm -r`` leave folders behind.
+  Now ``http://`` endpoints skip the lookup; other non-default endpoints try
+  once; on the default endpoint, answers that retrying will not change (such
+  as a missing ``storage.objects.list`` permission) fall back, and every
+  fallback is remembered per filesystem instance
+  (``invalidate_storage_layout_cache()`` checks again). A lookup that still
+  fails after retries on the default endpoint now raises: during a Storage
+  Control outage, the first operation on a bucket fails after about 60 s
+  instead of silently using flat semantics (#1110).
 * ``sign()`` now works with credentials that have no private key, such as
   Compute Engine and GKE Workload Identity credentials. When the credentials
   cannot sign, the URL is signed through the IAM Credentials ``signBlob`` API
