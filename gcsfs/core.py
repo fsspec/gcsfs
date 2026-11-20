@@ -1840,6 +1840,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         if_generation_match=None,
     ):
         # enforce blocksize should be a multiple of 2**18
+        if content_type is None:
+            content_type = "application/octet-stream"
         consistency = consistency or self.consistency
         bucket, key, generation = self.split_path(path)
         if_generation_match = _resolve_generation_match(mode, if_generation_match)

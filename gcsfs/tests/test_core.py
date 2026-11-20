@@ -273,6 +273,18 @@ def test_simple_upload_rejects_crlf_in_content_type(
         mock_call.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [b"hello", b"x" * (2**18)],
+    ids=["below_chunksize", "at_chunksize"],
+)
+def test_pipe_file_none_content_type(gcs, skip_if_zonal, payload):
+    fn = f"{TEST_BUCKET}/none_content_type"
+    gcs.pipe_file(fn, payload, content_type=None, chunksize=2**18)
+    assert gcs.cat_file(fn) == payload
+    assert gcs.info(fn)["contentType"] == "application/octet-stream"
+
+
 def test_simple_upload_with_kms(gcs):
     if not gcs.on_google:
         pytest.skip("emulator does not support kmsKeyName")
