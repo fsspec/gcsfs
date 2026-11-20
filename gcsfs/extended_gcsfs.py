@@ -39,9 +39,11 @@ from gcsfs.core import (
     _get_prefetcher_and_cache_config,
     _location,
     _resolve_generation_match,
+    _validate_rm_concurrency,
 )
 from gcsfs.poller import poll_lro, unwrap_operation_result
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
+from gcsfs.telemetry.grpc import ControlPlaneTelemetryInterceptor
 from gcsfs.telemetry.wrapper import (
     _gcs_sync_wrapper,
     mirror_gcs_methods,
@@ -56,6 +58,15 @@ logger = logging.getLogger("gcsfs")
 USER_AGENT = "python-gcsfs"
 STORAGE_CONTROL_RPC_TIMEOUT = 30.0
 _HNS_RENAME_FOLDER_LRO_TIMEOUT = 300.0
+
+# Default maximum number of batch delete requests that a recursive ``rm`` keeps
+# in flight on HNS buckets (including zonal buckets, which are hierarchical).
+# HNS buckets support a higher initial request rate than standard buckets
+# (https://cloud.google.com/storage/docs/hns-overview), so they get a higher
+# default than DEFAULT_RM_CONCURRENCY while still keeping deletes well below
+# that higher rate, leaving headroom for other writes to the same bucket.
+# Callers can override it with ``concurrency``.
+DEFAULT_HNS_RM_CONCURRENCY = 15
 
 
 class StorageClass(Enum):
@@ -372,6 +383,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 "credentials": self.credential,
                 "options": [("grpc.primary_user_agent", f"{USER_AGENT}/{version}")],
                 "quota_project_id": self._user_project,
+                # Prepend before transport_cls(channel=...) appends its logging interceptor.
+                "interceptors": [ControlPlaneTelemetryInterceptor()],
             }
             if self._grpc_location:
                 # Extract host:port safely (strips protocol and trailing URL paths if any).
@@ -1967,7 +1980,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             raise FileNotFoundError(path)
         return out
 
-    async def _rm(self, path, recursive=False, maxdepth=None, batchsize=100):
+    async def _rm(
+        self, path, recursive=False, maxdepth=None, batchsize=100, concurrency=None
+    ):
         """
         Deletes files and directories.
 
@@ -1987,7 +2002,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             recursive (bool): If True, deletes directories and their contents.
             maxdepth (int, optional): The maximum depth to traverse for deletion.
             batchsize (int): The number of files to delete in a single batch request.
+            concurrency (int, optional): The maximum number of batch delete
+                requests in flight at once (a positive integer). None (default)
+                uses ``DEFAULT_HNS_RM_CONCURRENCY`` for HNS (including zonal)
+                buckets and ``DEFAULT_RM_CONCURRENCY`` for standard buckets.
         """
+        _validate_rm_concurrency(concurrency)
         # Normalize to a list so single-path and multi-path inputs share a
         # single code path.
         if isinstance(path, str):
@@ -2014,6 +2034,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     recursive=recursive,
                     maxdepth=maxdepth,
                     batchsize=batchsize,
+                    concurrency=concurrency,
                 )
                 for bucket, bucket_paths in grouped.items()
             ],
@@ -2039,13 +2060,28 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         return results
 
     async def _rm_bucket_paths(
-        self, bucket, path, recursive=False, maxdepth=None, batchsize=100
+        self,
+        bucket,
+        path,
+        recursive=False,
+        maxdepth=None,
+        batchsize=100,
+        *,
+        concurrency,
     ):
         """Helper method to handle the rm operation for paths within a single bucket."""
         if not await self._is_bucket_hns_enabled(bucket):
+            # concurrency=None makes the parent use DEFAULT_RM_CONCURRENCY.
             return await super()._rm(
-                path, recursive=recursive, maxdepth=maxdepth, batchsize=batchsize
+                path,
+                recursive=recursive,
+                maxdepth=maxdepth,
+                batchsize=batchsize,
+                concurrency=concurrency,
             )
+
+        if concurrency is None:
+            concurrency = DEFAULT_HNS_RM_CONCURRENCY
 
         paths = await self._expand_path_with_details(
             path, recursive=recursive, maxdepth=maxdepth, detail=True
@@ -2087,10 +2123,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             dirs,
             path,
             batchsize=batchsize,
+            concurrency=concurrency,
             delete_placeholder=not (recursive and maxdepth is None),
         )
 
-    async def _perform_rm(self, files, dirs, path, batchsize, delete_placeholder=True):
+    async def _perform_rm(
+        self, files, dirs, path, batchsize, *, concurrency, delete_placeholder=True
+    ):
         """
         Helper method to perform the deletion of files and directories.
 
@@ -2100,6 +2139,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                               deepest to shallowest.
             path (str): The original path for the rm operation, for error reporting.
             batchsize (int): The number of files to delete in a single batch request.
+            concurrency (int): The maximum number of batch delete requests for
+                files in flight at once.
             delete_placeholder (bool): Whether `_hns_rmdir` should attempt to delete
                 each directory's placeholder object before deleting the folder.
 
@@ -2110,7 +2151,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if not files and not dirs:
             raise FileNotFoundError(path)
 
-        exs = await self._delete_files(files, batchsize)
+        exs = await self._delete_files(files, batchsize, concurrency=concurrency)
         # For directories, we must delete them from deepest to shallowest
         # to avoid race conditions where a parent is deleted before its child.
         # We group directories by depth and delete them level by level.

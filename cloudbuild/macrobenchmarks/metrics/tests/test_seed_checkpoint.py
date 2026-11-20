@@ -16,6 +16,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from .test_rcu_scripts import HELM_STUB
+
 REPO = Path(__file__).resolve().parents[4]
 STEPS = {
     step["id"]: step
@@ -67,7 +69,7 @@ def env(tmp_path):
     for name, body in {
         "gcloud": GCLOUD_STUB,
         "kubectl": KUBECTL_STUB,
-        "helm": _stub('echo "helm $*" >> "$STUB_LOG"'),
+        "helm": HELM_STUB,
         "curl": _stub('echo "curl $*" >> "$STUB_LOG"'),
         "sleep": _stub('echo "sleep $*" >> "$STUB_LOG"'),
     }.items():

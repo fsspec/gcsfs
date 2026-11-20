@@ -89,7 +89,6 @@ from typing import Any
 
 from gcsfs.telemetry import manager
 from gcsfs.telemetry.context import (
-    ALL_DIMENSIONS,
     Dimension,
     get_telemetry_context,
     has_telemetry_context,
@@ -203,7 +202,7 @@ def _telemetry_context(tokens_map: dict[str, str] | None = None):
 
 def _disabled_tokens_map() -> dict[str, str]:
     """Return negative-cache sentinels for all dimensions and registered detectors."""
-    out = {d.value: "" for d in ALL_DIMENSIONS}
+    out = {d.value: "" for d in Dimension}
     for det in manager.default_usage_tracker.detectors:
         key = det.name.value if isinstance(det.name, Dimension) else str(det.name)
         out[key] = ""

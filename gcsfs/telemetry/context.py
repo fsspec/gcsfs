@@ -18,9 +18,11 @@ class Dimension(StrEnum):
     FRAMEWORK = "fw"
     ENVIRONMENT = "env"
     METHOD = "m"
+    METHOD_PARAMS = "mp"
 
 
-ALL_DIMENSIONS: frozenset[Dimension] = frozenset(Dimension)
+GRPC_METADATA_KEY = "x-goog-storage-gcsfs-features"
+HTTP_HEADER_KEY = "X-Goog-Storage-Gcsfs-Features"
 USER_AGENT_DIMENSIONS: frozenset[Dimension] = frozenset(
     {Dimension.ENVIRONMENT, Dimension.FRAMEWORK}
 )

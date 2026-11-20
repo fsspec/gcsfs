@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 
 from gcsfs.telemetry.context import (
-    ALL_DIMENSIONS,
+    USER_AGENT_DIMENSIONS,
     Dimension,
     get_telemetry_context,
     sanitize_token,
@@ -46,7 +47,7 @@ class UsageMetricsTracker:
 
     def collect_tokens_map(
         self,
-        dimensions: frozenset[Dimension] = ALL_DIMENSIONS,
+        dimensions: frozenset[Dimension | str] | None = None,
         *,
         call_scoped_only: bool,
         method: str | None = None,
@@ -57,8 +58,9 @@ class UsageMetricsTracker:
 
         Parameters
         ----------
-        dimensions : frozenset[Dimension], optional
-            Dimensions to collect and return. Defaults to ALL_DIMENSIONS.
+        dimensions : frozenset[Dimension | str] | None, optional
+            Dimensions to collect and return, or None to include all active
+            dimensions.
         call_scoped_only : bool
             Required. True leaves out process-wide dimensions such as ``env``
             unless they are already set in the context (use it for the per-call
@@ -77,10 +79,10 @@ class UsageMetricsTracker:
             return {}
 
         tokens = get_telemetry_context()
-        if method is not None and Dimension.METHOD in dimensions:
+        if method is not None and (
+            dimensions is None or Dimension.METHOD in dimensions
+        ):
             tokens.setdefault(Dimension.METHOD.value, method)
-
-        include_custom = dimensions == ALL_DIMENSIONS
 
         # Run registered detectors for any requested dimensions not already set
         for detector in self.detectors:
@@ -91,10 +93,7 @@ class UsageMetricsTracker:
                 if isinstance(detector.name, Dimension)
                 else str(detector.name)
             )
-            if dim_key in ALL_DIMENSIONS:
-                if dim_key not in dimensions:
-                    continue
-            elif not include_custom:
+            if dimensions is not None and dim_key not in dimensions:
                 continue
             if dim_key not in tokens:
                 try:
@@ -103,38 +102,43 @@ class UsageMetricsTracker:
                 except Exception:
                     tokens[dim_key] = ""
 
-        return {
-            k: v
-            for k, v in tokens.items()
-            if k in dimensions or (include_custom and k not in ALL_DIMENSIONS)
-        }
+        if dimensions is None:
+            return tokens
+        return {k: v for k, v in tokens.items() if k in dimensions}
 
     def get_tokens(
         self,
-        dimensions: frozenset[Dimension] = ALL_DIMENSIONS,
+        dimensions: frozenset[Dimension | str] | None = None,
+        tokens_map: Mapping[str, str] | None = None,
     ) -> list[str]:
         """
-        Return formatted `<dim>/<val>` telemetry tokens for `dimensions`.
+        Return sanitized formatted telemetry tokens for the requested dimensions.
 
         Parameters
         ----------
-        dimensions : frozenset[Dimension], optional
-            Dimensions to format and return. Defaults to ALL_DIMENSIONS.
+        dimensions : frozenset[Dimension | str] | None, optional
+            Dimensions to include, or None to include all active dimensions.
+        tokens_map : Mapping[str, str] | None, optional
+            Optional mapping already returned by ``collect_tokens_map()``; used
+            as is without re-running detectors or re-checking opt-out.
 
         Returns
         -------
         list[str]
             List of sanitized formatted token strings, e.g. ['fw/pandas', 'env/gke'].
         """
-        # Include process-wide dimensions (e.g. env), read fresh per request.
-        token_map = self.collect_tokens_map(
-            dimensions=dimensions, call_scoped_only=False
-        )
+        if tokens_map is None:
+            # Include process-wide dimensions (e.g. env), read fresh per request.
+            tokens_map = self.collect_tokens_map(
+                dimensions=dimensions, call_scoped_only=False
+            )
+
         out = []
-        for dim_key, val in token_map.items():
-            clean_val = sanitize_token(val)
-            if clean_val:
-                out.append(f"{dim_key}/{clean_val}")
+        for dim_key, val in tokens_map.items():
+            if dimensions is None or dim_key in dimensions:
+                clean_val = sanitize_token(val)
+                if clean_val:
+                    out.append(f"{dim_key}/{clean_val}")
         return out
 
     def get_dimension(self, dimension: Dimension) -> str | None:
@@ -145,6 +149,40 @@ class UsageMetricsTracker:
             dimensions=frozenset({dimension}), call_scoped_only=False
         )
         return sanitize_token(token_map.get(dimension.value))
+
+    def encode_features(
+        self, tokens_map: Mapping[str, str] | None = None
+    ) -> str | None:
+        """Return web-safe base64 encoded GcsfsFeatures for active telemetry state."""
+        if tokens_map is None:
+            tokens_map = self.collect_tokens_map(call_scoped_only=False)
+        if not any(tokens_map.values()):
+            return None
+
+        from gcsfs.telemetry import schema as telemetry_schema
+
+        return telemetry_schema.encode_features(tokens_map)
+
+    def get_http_telemetry(
+        self,
+        *,
+        include_tokens: bool = True,
+        include_features: bool = True,
+    ) -> tuple[list[str], str | None]:
+        """Collect HTTP User-Agent tokens and encoded GcsfsFeatures in one lookup."""
+        if not (include_tokens or include_features):
+            return [], None
+
+        tokens_map = self.collect_tokens_map(call_scoped_only=False)
+        ua_tokens = (
+            self.get_tokens(dimensions=USER_AGENT_DIMENSIONS, tokens_map=tokens_map)
+            if include_tokens
+            else []
+        )
+        encoded = (
+            self.encode_features(tokens_map=tokens_map) if include_features else None
+        )
+        return ua_tokens, encoded
 
 
 # Default singleton instance pre-configured with standard detectors
