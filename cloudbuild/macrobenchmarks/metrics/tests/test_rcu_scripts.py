@@ -87,6 +87,19 @@ def _stub(body):
     return f"#!/usr/bin/env bash\n{body}\n"
 
 
+# Reports the pinned version, so lib.sh's install_helm skips the download.
+PINNED_HELM_VERSION = re.search(
+    r'^HELM_VERSION="([^"]+)"',
+    (REPO / "cloudbuild/macrobenchmarks/scripts/lib.sh").read_text(),
+    re.M,
+).group(1)
+HELM_STUB = _stub(
+    'echo "helm $*" >> "$STUB_LOG"\n'
+    f'[[ "$1" == version ]] && echo "{PINNED_HELM_VERSION}"\n'
+    "exit 0"
+)
+
+
 @pytest.fixture
 def env(tmp_path):
     """Stub plumbing plus default substitution values."""
@@ -95,7 +108,7 @@ def env(tmp_path):
     for name, body in {
         "gcloud": GCLOUD_STUB,
         "kubectl": KUBECTL_STUB,
-        "helm": _stub('echo "helm $*" >> "$STUB_LOG"'),
+        "helm": HELM_STUB,
         "curl": _stub('echo "curl $*" >> "$STUB_LOG"'),
         "sleep": _stub('echo "sleep $*" >> "$STUB_LOG"'),
         "python3": _stub('echo "python3 is not in the gcloud image" >&2; exit 1'),
