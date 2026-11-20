@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from typing import Dict, List, Optional
 
-from gcsfs.telemetry.context import Dimension, get_telemetry_context, sanitize_token
+from gcsfs.telemetry.context import (
+    USER_AGENT_DIMENSIONS,
+    Dimension,
+    get_telemetry_context,
+    sanitize_token,
+)
 from gcsfs.telemetry.detector import (
     BaseDetector,
     EnvironmentDetector,
@@ -80,21 +86,36 @@ class UsageMetricsTracker:
 
         return tokens
 
-    def get_tokens(self) -> List[str]:
+    def get_tokens(
+        self,
+        dimensions: Optional[frozenset[Dimension]] = None,
+        tokens_map: Optional[Mapping[str, str]] = None,
+    ) -> List[str]:
         """
-        Return a list of all active telemetry tokens to be included in HTTP User-Agent.
+        Return sanitized formatted telemetry tokens for the requested dimensions.
+
+        Parameters
+        ----------
+        dimensions:
+            Dimensions to include, or None to include all active dimensions.
+        tokens_map:
+            Optional mapping already returned by ``collect_tokens_map()``; used
+            as is without re-running detectors or re-checking opt-out.
 
         Returns
         -------
         List[str]: List of sanitized formatted token strings, e.g. ['fw/pandas', 'env/gke'].
         """
-        # Include process-wide dimensions (e.g. env), read fresh per request.
-        token_map = self.collect_tokens_map(call_scoped_only=False)
+        if tokens_map is None:
+            # Include process-wide dimensions (e.g. env), read fresh per request.
+            tokens_map = self.collect_tokens_map(call_scoped_only=False)
+
         out = []
-        for dim_key, val in token_map.items():
-            clean_val = sanitize_token(val)
-            if clean_val:
-                out.append(f"{dim_key}/{clean_val}")
+        for dim_key, val in tokens_map.items():
+            if dimensions is None or dim_key in dimensions:
+                clean_val = sanitize_token(val)
+                if clean_val:
+                    out.append(f"{dim_key}/{clean_val}")
         return out
 
     def get_dimension(self, dimension: Dimension) -> Optional[str]:
@@ -123,15 +144,39 @@ class UsageMetricsTracker:
 
         return None
 
-    def encode_features(self) -> Optional[str]:
+    def encode_features(
+        self, tokens_map: Optional[Mapping[str, str]] = None
+    ) -> Optional[str]:
         """Return web-safe base64 encoded GcsfsFeatures for active telemetry state."""
-        tokens_map = self.collect_tokens_map(call_scoped_only=False)
+        if tokens_map is None:
+            tokens_map = self.collect_tokens_map(call_scoped_only=False)
         if not any(tokens_map.values()):
             return None
 
         from gcsfs.telemetry import schema as telemetry_schema
 
         return telemetry_schema.encode_features(tokens_map)
+
+    def get_http_telemetry(
+        self,
+        *,
+        include_tokens: bool = True,
+        include_features: bool = True,
+    ) -> tuple[List[str], Optional[str]]:
+        """Collect HTTP User-Agent tokens and encoded GcsfsFeatures in one lookup."""
+        if not (include_tokens or include_features):
+            return [], None
+
+        tokens_map = self.collect_tokens_map(call_scoped_only=False)
+        ua_tokens = (
+            self.get_tokens(dimensions=USER_AGENT_DIMENSIONS, tokens_map=tokens_map)
+            if include_tokens
+            else []
+        )
+        encoded = (
+            self.encode_features(tokens_map=tokens_map) if include_features else None
+        )
+        return ua_tokens, encoded
 
 
 # Default singleton instance pre-configured with standard detectors

@@ -13,12 +13,15 @@ What is Collected
 
 When an operation is executed, ``gcsfs`` identifies the name of the top-level calling framework and the compute environment, and appends an anonymous brand identifier token and an environment token to the HTTP ``User-Agent`` header of outgoing requests to Google Cloud Storage.
 
+Outgoing HTTP JSON requests also emit the encoded ``X-Goog-Storage-Gcsfs-Features`` header alongside ``User-Agent`` (matching ``x-goog-storage-gcsfs-features`` on gRPC), honoring caller-supplied overrides case-insensitively and omitting the header when no attribution dimensions are active.
+
 Example Header
 ~~~~~~~~~~~~~~
 
 .. code-block:: text
 
    User-Agent: python-gcsfs/2026.3.0 fw/pandas env/gke
+   X-Goog-Storage-Gcsfs-Features: EAEYAg==
 
 Recognized Frameworks
 ~~~~~~~~~~~~~~~~~~~~~
@@ -138,6 +141,6 @@ The setting is read on every call, so it can be set (or changed) at any time bef
 When disabled:
 
 - All stack frame inspections and detector evaluations are skipped immediately.
-- Outgoing ``User-Agent`` headers omit ``fw/`` and ``env/`` telemetry tokens, and gRPC calls omit ``x-goog-storage-gcsfs-features`` metadata.
+- Outgoing ``User-Agent`` headers omit ``fw/`` and ``env/`` telemetry tokens, HTTP requests omit ``X-Goog-Storage-Gcsfs-Features``, and gRPC calls omit ``x-goog-storage-gcsfs-features`` metadata.
 - ``gcsfs`` sends no requests to the metadata server.
-- Caller-supplied metadata (such as explicit ``x-goog-storage-gcsfs-features`` entries) is preserved untouched.
+- Caller-supplied overrides (such as explicit HTTP ``X-Goog-Storage-Gcsfs-Features`` headers or gRPC ``x-goog-storage-gcsfs-features`` metadata) are preserved untouched.

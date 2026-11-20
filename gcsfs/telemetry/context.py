@@ -22,6 +22,10 @@ class Dimension(StrEnum):
 
 
 GRPC_METADATA_KEY = "x-goog-storage-gcsfs-features"
+HTTP_HEADER_KEY = "X-Goog-Storage-Gcsfs-Features"
+USER_AGENT_DIMENSIONS: frozenset[Dimension] = frozenset(
+    {Dimension.ENVIRONMENT, Dimension.FRAMEWORK}
+)
 
 
 def sanitize_token(token: Optional[str], max_len: int = 64) -> Optional[str]:
