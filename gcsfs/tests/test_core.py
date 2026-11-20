@@ -22,6 +22,7 @@ import google.auth.compute_engine
 import pytest
 import requests
 from fsspec.asyn import sync
+from fsspec.caching import BackgroundBlockCache
 from fsspec.prefetcher import BackgroundPrefetcher
 from fsspec.utils import seek_delimiter
 
@@ -4026,11 +4027,17 @@ def test_gcsfile_failed_read_init_closes_file_and_prefetcher(gcs):
     ) as prefetcher_close:
         # An invalid fixed_key_metadata fails after AbstractBufferedFile.__init__ built the cache.
         with pytest.raises(TypeError):
-            f.__init__(gcs, f"{TEST_BUCKET}/nested/file1", "rb", fixed_key_metadata=123)
+            f.__init__(
+                gcs,
+                f"{TEST_BUCKET}/nested/file1",
+                "rb",
+                cache_type="adaptive",
+                fixed_key_metadata=123,
+            )
 
     assert f.closed is True
     prefetcher_close.assert_called_once()
-    assert f.cache._prefetcher is None
+    assert f.cache is None
 
 
 def test_gcsfile_failed_read_init_preserves_exception_when_prefetcher_close_fails(
@@ -4051,29 +4058,117 @@ def test_gcsfile_failed_read_init_preserves_exception_when_prefetcher_close_fail
         ) as prefetcher_close,
         pytest.raises(TypeError),
     ):
-        f.__init__(gcs, f"{TEST_BUCKET}/nested/file1", "rb", fixed_key_metadata=123)
+        f.__init__(
+            gcs,
+            f"{TEST_BUCKET}/nested/file1",
+            "rb",
+            cache_type="adaptive",
+            fixed_key_metadata=123,
+        )
 
     assert f.closed is True
     prefetcher_close.assert_called_once()
-    assert f.cache._prefetcher is None
+    assert f.cache is None
     assert any(
         r.levelno == logging.WARNING and "prefetcher close boom" in r.message
         for r in caplog.records
     )
 
 
-def test_gcsfile_failed_write_init_is_marked_closed(gcs):
-    """A failed write-mode open is marked closed, so close() and __del__ never flush it."""
+@pytest.mark.parametrize("cache_type", ["background", "mmap"])
+def test_gcsfile_failed_read_init_drops_non_adaptive_cache(gcs, cache_type):
+    """A failed read open does not leave a non-adaptive cache attached to the file."""
     f = GCSFile.__new__(GCSFile)
 
     with pytest.raises(TypeError):
-        f.__init__(gcs, f"{TEST_BUCKET}/failed_open", "wb", fixed_key_metadata=123)
+        f.__init__(
+            gcs,
+            f"{TEST_BUCKET}/nested/file1",
+            "rb",
+            cache_type=cache_type,
+            fixed_key_metadata=123,
+        )
 
-    # AbstractBufferedFile.__init__ already set _closed = False, so this is not the default.
+    assert f.closed is True
+    assert f.cache is None
+
+
+def test_gcsfile_failed_read_init_preserves_exception_when_cache_close_fails(
+    gcs, caplog
+):
+    """If cache.close() fails during failed __init__, log a warning and propagate the init error."""
+    f = GCSFile.__new__(GCSFile)
+    real_close = BackgroundBlockCache.close
+
+    def failing_close(self):
+        real_close(self)
+        raise RuntimeError("cache close boom")
+
+    with (
+        caplog.at_level(logging.WARNING, logger="gcsfs"),
+        mock.patch.object(
+            BackgroundBlockCache, "close", autospec=True, side_effect=failing_close
+        ) as cache_close,
+        pytest.raises(TypeError),
+    ):
+        f.__init__(
+            gcs,
+            f"{TEST_BUCKET}/nested/file1",
+            "rb",
+            cache_type="background",
+            fixed_key_metadata=123,
+        )
+
+    assert f.closed is True
+    cache_close.assert_called_once()
+    assert f.cache is None
+    assert any(
+        r.levelno == logging.WARNING and "cache close boom" in r.message
+        for r in caplog.records
+    )
+
+
+def test_gcsfile_failed_write_init_is_marked_closed(gcs):
+    """A failed write-mode open is marked closed, so close() and __del__ never flush it."""
+    import gc
+    import threading
+    import warnings
+
+    from gcsfs.core import GCS_MIN_BLOCK_SIZE
+
+    small_path = f"{TEST_BUCKET}/small_blocksize_ok"
+    with pytest.warns(UserWarning, match="Setting block size to minimum value"):
+        with gcs.open(small_path, "wb", block_size=1024) as f_ok:
+            assert f_ok.blocksize == GCS_MIN_BLOCK_SIZE
+            f_ok.write(b"ok")
+    assert gcs.cat(small_path) == b"ok"
+
+    existing = f"{TEST_BUCKET}/existing_not_clobbered"
+    phantom = f"{TEST_BUCKET}/failed_open"
+    gcs.pipe(existing, b"keep-me")
+
+    f = GCSFile.__new__(GCSFile)
+    with pytest.raises(TypeError):
+        f.__init__(gcs, phantom, "wb", fixed_key_metadata=123)
     assert f.closed is True
     with mock.patch.object(GCSFile, "flush") as flush:
         f.close()
     flush.assert_not_called()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        with pytest.raises(UserWarning, match="Setting block size to minimum value"):
+            gcs.open(existing, "wb", block_size=1024)
+        with pytest.raises(UserWarning, match="Setting block size to minimum value"):
+            gcs.open(phantom, "wb", block_size=1024)
+
+    gc.collect()
+    done = threading.Event()
+    gcsfs.core._deferred_close_queue.put(done.set)
+    assert done.wait(timeout=5)
+
+    assert gcs.cat(existing) == b"keep-me"
+    assert not gcs.exists(phantom)
 
 
 def test_gcsfile_prefetch_sequential_integrity(gcs):

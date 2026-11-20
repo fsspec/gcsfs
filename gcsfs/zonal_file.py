@@ -189,7 +189,7 @@ class ZonalFile(GCSFile):
                 handoff["aborted"] = True
                 if self.mrd_pool is None:
                     self.mrd_pool = handoff["pool"]
-            self.closed = True
+            self._abort_open()
             if self.mrd_pool is not None:
                 pool, self.mrd_pool = self.mrd_pool, None
                 try:

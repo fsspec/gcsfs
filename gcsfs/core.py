@@ -2850,19 +2850,35 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                     self.blocksize = GCS_MIN_BLOCK_SIZE
                 self.location = None
         except BaseException:
-            self.closed = True
-            cache = getattr(self, "cache", None)
-            prefetcher = getattr(cache, "_prefetcher", None)
-            if prefetcher is not None:
-                cache._prefetcher = None
-                try:
-                    prefetcher.close()
-                except Exception as e:
-                    logger.warning(
-                        "Failed to close prefetcher during failed initialization cleanup: %s",
-                        e,
-                    )
+            self._abort_open()
             raise
+
+    def _abort_open(self):
+        """Mark a failed open as closed and release any cache resources it started."""
+        self.closed = True
+        cache = getattr(self, "cache", None)
+        self.cache = None
+        if cache is None:
+            return
+        prefetcher = getattr(cache, "_prefetcher", None)
+        if prefetcher is not None:
+            cache._prefetcher = None
+            try:
+                prefetcher.close()
+            except Exception as e:
+                logger.warning(
+                    "Failed to close prefetcher during failed initialization cleanup: %s",
+                    e,
+                )
+        close = getattr(cache, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as e:
+                logger.warning(
+                    "Failed to close cache during failed initialization cleanup: %s",
+                    e,
+                )
 
     def _reopen_kwargs(self):
         """Keyword arguments that reopen this file with the options it was opened with."""
