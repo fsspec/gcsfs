@@ -575,6 +575,30 @@ async def test_init_aaow_rcu_open_failure_lookup_unknown_reraises(rcu_fs, open_e
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "lookup_error",
+    [
+        api_exceptions.RetryError("budget exhausted", cause=None),
+        api_exceptions.NotFound("bucket gone"),
+    ],
+)
+async def test_init_aaow_rcu_refresh_lookup_error_keeps_open_error(
+    rcu_fs, open_error, lookup_error
+):
+    """A re-check lookup that raises surfaces the original open error."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+    init_aaow.side_effect = open_error
+    fs._get_bucket_layout.side_effect = lookup_error
+
+    with pytest.raises(type(open_error)) as excinfo:
+        await fs._init_aaow(BUCKET, "key")
+
+    assert excinfo.value is open_error
+    assert fs._storage_layout_cache[BUCKET] == layouts.STANDARD_RCU
+
+
+@pytest.mark.asyncio
 async def test_init_aaow_zonal_open_failure_skips_recheck(rcu_fs, open_error):
     """Open failures on zonal buckets surface without a layout re-check."""
     fs, init_aaow = rcu_fs
