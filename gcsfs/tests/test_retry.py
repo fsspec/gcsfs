@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import multiprocessing
 import os
 import pickle
@@ -463,3 +465,164 @@ async def test_retry_request_outcomes():
         with pytest.raises(HttpError):
             await wrapped_500()
         assert call_count_retriable == 3
+
+
+@contextlib.asynccontextmanager
+async def _local_server(respond):
+    """An HTTP server on loopback that answers each request with ``respond``.
+
+    Yields the server's URL and the list of accepted connections.
+    """
+    connections = []
+    stop = asyncio.Event()
+
+    async def on_connect(reader, writer):
+        connections.append(writer)
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            await respond(writer, stop)
+        except (ConnectionError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(on_connect, "127.0.0.1", 0)
+    try:
+        yield f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}", connections
+    finally:
+        stop.set()
+        server.close()
+        await server.wait_closed()
+
+
+async def _never_reply(writer, stop):
+    # A request that was received but whose response never comes.
+    await stop.wait()
+
+
+async def _reply_one_byte_at_a_time(writer, stop):
+    body = b"0123456789abcdefghijklmno"
+    writer.write(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+        b"Content-Length: %d\r\n\r\n" % len(body)
+    )
+    for byte in body:
+        await writer.drain()
+        # A loop timer rather than asyncio.sleep, which retry tests patch out.
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop.wait(), 0.04)
+        writer.write(bytes([byte]))
+    await writer.drain()
+
+
+def _local_fs(url, **kwargs):
+    from gcsfs.core import GCSFileSystem
+
+    return GCSFileSystem(
+        token="anon",
+        endpoint_url=url,
+        asynchronous=True,
+        skip_instance_cache=True,
+        **kwargs,
+    )
+
+
+@pytest.fixture
+def short_default_timeout(monkeypatch):
+    import aiohttp
+
+    import gcsfs.core
+
+    monkeypatch.setattr(
+        gcsfs.core,
+        "DEFAULT_REQUESTS_TIMEOUT",
+        aiohttp.ClientTimeout(sock_connect=0.2, sock_read=0.2),
+    )
+
+
+@pytest.mark.asyncio
+async def test_default_timeout_bounds_lost_response(short_default_timeout):
+    import aiohttp
+    import fsspec
+
+    async with _local_server(_never_reply) as (url, connections):
+        # fsspec.filesystem("gs") is the class users get, which also serves
+        # HNS and zonal buckets.
+        fs = fsspec.filesystem(
+            "gs",
+            token="anon",
+            endpoint_url=url,
+            asynchronous=True,
+            skip_instance_cache=True,
+        )
+        with mock.patch("gcsfs.retry.asyncio.sleep", new_callable=mock.AsyncMock):
+            with pytest.raises(aiohttp.ServerTimeoutError):
+                await asyncio.wait_for(fs._cat_file("bucket/key"), 10)
+    # Each attempt timed out and was retried, rather than waiting forever.
+    assert len(connections) == 6
+
+
+@pytest.mark.asyncio
+async def test_default_timeout_bounds_get_file(short_default_timeout, tmp_path):
+    import aiohttp
+
+    async with _local_server(_never_reply) as (url, _):
+        fs = _local_fs(url)
+        with mock.patch("gcsfs.retry.asyncio.sleep", new_callable=mock.AsyncMock):
+            with pytest.raises(aiohttp.ServerTimeoutError):
+                await asyncio.wait_for(
+                    fs._get_file("bucket/key", str(tmp_path / "out"), concurrency=1),
+                    10,
+                )
+
+
+@pytest.mark.asyncio
+async def test_session_kwargs_timeout_is_honored():
+    # https://github.com/fsspec/gcsfs/issues/633
+    import aiohttp
+
+    async with _local_server(_never_reply) as (url, _):
+        fs = _local_fs(
+            url, session_kwargs={"timeout": aiohttp.ClientTimeout(sock_read=0.2)}
+        )
+        with mock.patch("gcsfs.retry.asyncio.sleep", new_callable=mock.AsyncMock):
+            with pytest.raises(aiohttp.ServerTimeoutError):
+                await asyncio.wait_for(fs._cat_file("bucket/key"), 10)
+
+
+@pytest.mark.asyncio
+async def test_session_kwargs_timeout_none_keeps_the_default(short_default_timeout):
+    # aiohttp reads ClientSession(timeout=None) as "use the default", so a
+    # wrapper forwarding an unset timeout must not disable request timeouts.
+    import aiohttp
+
+    async with _local_server(_never_reply) as (url, _):
+        fs = _local_fs(url, session_kwargs={"timeout": None})
+        with mock.patch("gcsfs.retry.asyncio.sleep", new_callable=mock.AsyncMock):
+            with pytest.raises(aiohttp.ServerTimeoutError):
+                await asyncio.wait_for(fs._cat_file("bucket/key"), 10)
+
+
+@pytest.mark.asyncio
+async def test_explicit_requests_timeout_wins_over_session_kwargs():
+    import aiohttp
+
+    async with _local_server(_never_reply) as (url, _):
+        fs = _local_fs(
+            url,
+            requests_timeout=aiohttp.ClientTimeout(sock_read=0.2),
+            session_kwargs={"timeout": aiohttp.ClientTimeout(sock_read=30)},
+        )
+        with mock.patch("gcsfs.retry.asyncio.sleep", new_callable=mock.AsyncMock):
+            with pytest.raises(aiohttp.ServerTimeoutError):
+                await asyncio.wait_for(fs._cat_file("bucket/key"), 10)
+
+
+@pytest.mark.asyncio
+async def test_default_timeout_allows_slow_steady_response(short_default_timeout):
+    # The default bounds silence between response bytes, not transfer time:
+    # this response takes about 1 s, five times the patched read timeout.
+    async with _local_server(_reply_one_byte_at_a_time) as (url, _):
+        fs = _local_fs(url)
+        body = await asyncio.wait_for(fs._cat_file("bucket/key"), 10)
+        assert body == b"0123456789abcdefghijklmno"
