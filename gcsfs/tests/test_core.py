@@ -5072,3 +5072,235 @@ def test_get_dirs_and_update_cache_with_directories_and_prefix(gcs):
     assert f"{bucket}/a/b/c" in dirs
     # Cache should remain empty because update_cache=False and prefix is used
     assert len(gcs.dircache) == 0
+
+
+def test_coalesce_generation_variants():
+    from gcsfs.core import _coalesce_generation
+
+    assert _coalesce_generation(None, None) is None
+    assert _coalesce_generation("123", None) == "123"
+    assert _coalesce_generation(None, "123") == "123"
+    assert _coalesce_generation(0, None) == 0
+    assert isinstance(_coalesce_generation(0, None), int)
+    assert _coalesce_generation("123", "123") == "123"
+    assert _coalesce_generation(123, "123") == 123
+    with pytest.raises(ValueError, match="Cannot coalesce generations"):
+        _coalesce_generation("123", "456")
+    with pytest.raises(ValueError, match="Cannot coalesce generations"):
+        _coalesce_generation(123, "456")
+    for invalid in (True, False, "", "abc", "-1", -1, " 123 ", 1.5):
+        with pytest.raises(
+            ValueError, match="generation must be a non-negative integer"
+        ):
+            _coalesce_generation(invalid, None)
+
+
+def test_url_with_zero_and_invalid_generation():
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    assert fs.url("bucket/obj", generation=0).endswith("&generation=0")
+    assert fs.url("bucket/obj", generation="111").endswith("&generation=111")
+    assert "?alt=media" in fs.url("bucket/obj")
+    assert "&generation=" not in fs.url("bucket/obj")
+    with pytest.raises(ValueError, match="generation must be a non-negative integer"):
+        fs.url("bucket/obj", generation="")
+
+
+@pytest.mark.asyncio
+async def test_info_and_get_object_with_generation_handle_cache_and_fallbacks():
+    # Default filesystem (version_aware=False) exercises keyword generation= paths.
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    assert fs.version_aware is False
+    path = "bucket/dir/file.txt"
+
+    # 1. Cache hit when cached generation matches (str or int).
+    fs.dircache["bucket/dir"] = [
+        {"name": path, "size": 5, "generation": "111", "type": "file"}
+    ]
+    with mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as mock_call:
+        assert (await fs._info(path, generation="111"))["generation"] == "111"
+        assert (await fs._info(path, generation=111))["generation"] == "111"
+        mock_call.assert_not_awaited()
+
+    # 2. Stale dircache holding newer generation 222 does not hijack generation="111"
+    #    or misclassify the file as a directory.
+    fs.dircache["bucket/dir"] = [
+        {"name": path, "size": 20, "generation": "222", "type": "file"}
+    ]
+    with mock.patch.object(
+        fs,
+        "_call",
+        new=mock.AsyncMock(
+            return_value={"name": "dir/file.txt", "size": "5", "generation": "111"}
+        ),
+    ) as mock_call:
+        info = await fs._info(path, generation="111")
+        assert info["type"] == "file"
+        assert info["size"] == 5
+        assert info["generation"] == "111"
+        mock_call.assert_awaited_once_with(
+            "GET",
+            "b/{}/o/{}",
+            "bucket",
+            "dir/file.txt",
+            json_out=True,
+            generation="111",
+        )
+
+    # 3. Cached ancestor listing without intermediate directory raises FileNotFoundError
+    #    when generation is None, but falls through to _get_object when generation is set.
+    fs.dircache.clear()
+    fs.dircache["bucket"] = [
+        {"name": "bucket/other.txt", "size": 3, "generation": "999", "type": "file"}
+    ]
+    with pytest.raises(FileNotFoundError):
+        await fs._info(path)
+    with mock.patch.object(
+        fs,
+        "_call",
+        new=mock.AsyncMock(
+            return_value={"name": "dir/file.txt", "size": "5", "generation": "111"}
+        ),
+    ) as mock_call:
+        info = await fs._info(path, generation="111")
+        assert info["generation"] == "111"
+        mock_call.assert_awaited_once()
+
+    # 4. _get_object Forbidden fallback lists versions when generation is set, and
+    #    handles generation=None cache hit/miss.
+    fs.dircache.clear()
+    fs.dircache["bucket/dir"] = [
+        {"name": "bucket/dir/other.txt", "size": 3, "generation": "999", "type": "file"}
+    ]
+    with pytest.raises(FileNotFoundError):
+        await fs._get_object(path)
+    fs.dircache["bucket/dir"].append(
+        {"name": path, "size": 5, "generation": "111", "type": "file"}
+    )
+    assert (await fs._get_object(path))["generation"] == "111"
+
+    fs.dircache.clear()
+
+    async def forbidden_then_list(method, url_tmpl, *args, **kwargs):
+        if url_tmpl == "b/{}/o/{}":
+            raise OSError("Forbidden: storage.objects.get denied")
+        assert url_tmpl == "b/{}/o"
+        assert kwargs["versions"] == "true"
+        assert kwargs["maxResults"] is None
+        return {
+            "items": [
+                {"name": "dir/file.txt", "size": "20", "generation": 222},
+                {"name": "dir/file.txt", "size": "5", "generation": 111},
+            ]
+        }
+
+    with mock.patch.object(fs, "_call", side_effect=forbidden_then_list):
+        obj = await fs._get_object(path, generation="111")
+        assert obj["generation"] == 111
+        assert obj["size"] == 5
+        with pytest.raises(FileNotFoundError):
+            await fs._get_object(path, generation="333")
+
+    # 5. Missing pinned generation raises FileNotFoundError without falling back
+    #    to _get_directory_info (which on flat buckets would return the live object).
+    fs.dircache.clear()
+    with (
+        mock.patch.object(
+            fs, "_call", new=mock.AsyncMock(side_effect=FileNotFoundError(path))
+        ),
+        mock.patch.object(
+            fs, "_get_directory_info", new_callable=mock.AsyncMock
+        ) as mock_dir_info,
+    ):
+        with pytest.raises(FileNotFoundError):
+            await fs._info(path, generation="111")
+        mock_dir_info.assert_not_awaited()
+
+    # 6. version_aware=True coalesces #gen fragment and rejects conflicting generation=.
+    va_fs = GCSFileSystem(token="anon", version_aware=True, skip_instance_cache=True)
+    with mock.patch.object(
+        va_fs,
+        "_call",
+        new=mock.AsyncMock(
+            return_value={"name": "dir/file.txt", "size": "5", "generation": "111"}
+        ),
+    ):
+        assert (await va_fs._info(f"{path}#111"))["generation"] == "111"
+        with pytest.raises(ValueError, match="Cannot coalesce generations"):
+            await va_fs._info(f"{path}#111", generation="222")
+
+
+@pytest.mark.asyncio
+async def test_cat_file_concurrent_forwards_generation_to_info():
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    fs.MIN_CHUNK_SIZE_FOR_CONCURRENCY = 4
+    path = "bucket/file.bin"
+
+    with (
+        mock.patch.object(
+            fs, "_info", new=mock.AsyncMock(return_value={"size": 10})
+        ) as mock_info,
+        mock.patch.object(
+            fs,
+            "_cat_file_sequential",
+            new=mock.AsyncMock(side_effect=[b"01234", b"56789"]),
+        ) as mock_seq,
+    ):
+        out = await fs._cat_file_concurrent(
+            path, start=0, end=None, concurrency=2, generation="111"
+        )
+        assert out == b"0123456789"
+        mock_info.assert_awaited_once_with(path, generation="111")
+        assert [c.kwargs["generation"] for c in mock_seq.await_args_list] == [
+            "111",
+            "111",
+        ]
+
+
+@pytest.mark.parametrize("cache_type", ["none", "readahead", "adaptive"])
+def test_gcsfile_open_with_generation_pins_size_and_reads(cache_type):
+    """GCSFile opened with generation= pins both f.size and f.read() across cache modes."""
+    from urllib.parse import parse_qs, urlsplit
+
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    path = "bucket/file.bin"
+    versions = {"111": b"v1-10bytes", "222": b"v2-longer-live-payload"}
+    overwritten_after_open = False
+
+    async def fake_call(method, url_or_tmpl, *args, **kwargs):
+        if url_or_tmpl == "b/{}/o/{}":
+            gen = str(kwargs.get("generation") or "222")
+            if gen not in versions or (overwritten_after_open and gen == "111"):
+                raise FileNotFoundError(path)
+            return {
+                "name": "file.bin",
+                "size": str(len(versions[gen])),
+                "generation": gen,
+            }
+        # Media download URL
+        parsed = urlsplit(url_or_tmpl)
+        qs = parse_qs(parsed.query)
+        gen = qs.get("generation", ["222"])[0]
+        if gen not in versions or (overwritten_after_open and gen == "111"):
+            raise FileNotFoundError(path)
+        data = versions[gen]
+        headers = kwargs.get("headers") or {}
+        if "Range" in headers:
+            rng = headers["Range"].removeprefix("bytes=")
+            start_s, end_s = rng.split("-")
+            start_i = int(start_s)
+            end_i = int(end_s) + 1 if end_s else len(data)
+            data = data[start_i:end_i]
+        return {}, data
+
+    with mock.patch.object(fs, "_call", side_effect=fake_call):
+        with fs.open(path, "rb", generation="111", cache_type=cache_type) as f:
+            assert f.size == len(versions["111"])
+            assert f.read() == b"v1-10bytes"
+
+        # If gen 111 is deleted/overwritten on an unversioned bucket between open and read,
+        # reading raises FileNotFoundError instead of returning truncated live bytes.
+        with fs.open(path, "rb", generation="111", cache_type=cache_type) as f:
+            assert f.size == len(versions["111"])
+            overwritten_after_open = True
+            with pytest.raises(FileNotFoundError):
+                f.read()
