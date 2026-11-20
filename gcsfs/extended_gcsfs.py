@@ -2627,6 +2627,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if os.path.isdir(lpath):
             return
 
+        chunksize = kwargs.pop("chunksize", 4096 * 32)  # 128KB default
+        if chunksize is None or chunksize <= 0:
+            raise ValueError(f"chunksize must be a positive integer, got {chunksize!r}")
+
         # Coalesce generation: URL parsed vs kwargs
         generation = path_generation or kwargs.get("generation")
         callback = callback or NoOpCallback()
@@ -2657,7 +2661,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 lparent = os.path.dirname(lpath) or os.curdir
                 os.makedirs(lparent, exist_ok=True)
 
-                chunksize = kwargs.get("chunksize", 4096 * 32)  # 128KB default
                 offset = 0
 
                 with open(lpath, "wb") as f2:
