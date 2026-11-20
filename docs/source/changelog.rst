@@ -26,7 +26,7 @@ Unreleased
   ``google-cloud-storage`` supports that keyword, while the read sinks
   (``PartialView`` and ``DirectMemmoveBuffer``) copy directly from any
   contiguous bytes-like object (raising ``ValueError`` for non-contiguous
-  views).
+  views) (#1195).
 
 2026.10.0
 ---------

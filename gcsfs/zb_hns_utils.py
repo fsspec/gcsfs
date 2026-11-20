@@ -474,6 +474,15 @@ class PartialView:
                         raise TypeError("underlying buffer is not C-contiguous")
                     if view.nbytes == 0:
                         data = b""
+                    elif (
+                        view.nbytes == self.parent.expected_size
+                        and view.nbytes
+                        <= DirectMemmoveBuffer.THRESHOLD_BYTES_FOR_SCHEDULING
+                    ):
+                        # A small chunk covering the whole buffer: one copy into
+                        # new bytes takes the bytes fastpath, which is cheaper
+                        # than allocating and copying through ctypes.
+                        data = view.tobytes()
                     else:
                         owned_view = view.cast("B")
                         data = owned_view
@@ -638,8 +647,8 @@ class DirectMemmoveBuffer:
                         and type(data) is bytes
                     ):
                         # fastpath: a bytes chunk covering the whole buffer is the
-                        # result itself. Not taken for memoryview chunks (the
-                        # zero-copy parser), which alias the gRPC message.
+                        # result itself. Not taken for memoryview chunks over the
+                        # scheduling threshold, which alias the gRPC message.
                         self._result_bytes = data
                         self.semaphore.release()  # Release because we skip the executor
                         fut = concurrent.futures.Future()

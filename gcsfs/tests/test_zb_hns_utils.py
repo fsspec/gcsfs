@@ -972,9 +972,9 @@ def test_direct_memmove_buffer_accepts_memoryview_slices():
 
 
 def test_direct_memmove_buffer_copies_whole_buffer_memoryview():
-    # A bytes payload covering the whole buffer is kept by reference; a
-    # memoryview must be copied during write() and release its buffer export
-    # once the copy completes so the caller can resize or overwrite the source.
+    # A bytes payload covering the whole buffer is kept by reference. A small
+    # memoryview covering it is copied into new bytes during write(), which
+    # then take the same path, so the caller can resize or overwrite the source.
     data = bytes(range(256)) * 4
     source = bytearray(data)
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -987,6 +987,7 @@ def test_direct_memmove_buffer_copies_whole_buffer_memoryview():
 
     view.close()
     buf.close()
+    assert buf._start_address is None
     result = buf.get_value()
     assert isinstance(result, bytes)
     assert result == data
@@ -1187,19 +1188,21 @@ def test_direct_memmove_buffer_releases_source_before_future_completes(copy_fail
 def test_direct_memmove_buffer_leaves_callers_memoryview_usable(size):
     # google-cloud-storage reads a chunk again after write() returns (the
     # rolling CRC32C of whole-object reads), so the sink may release its own
-    # view of the chunk but never the caller's.
+    # view of the chunk but never the caller's. The buffer is one byte larger
+    # than the chunk, so the chunk is copied through the sink's own view.
     data = bytes(range(256)) * (size // 256 + 1)
     chunk = memoryview(data)[:size]
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    buf = DirectMemmoveBuffer(size, executor)
-    view = buf.get_view(0, size)
+    buf = DirectMemmoveBuffer(size + 1, executor)
+    view = buf.get_view(0, size + 1)
 
     view.write(chunk).result()
     assert chunk.tobytes() == data[:size]
+    view.write(b"!").result()
 
     view.close()
     buf.close()
-    assert buf.get_value() == data[:size]
+    assert buf.get_value() == data[:size] + b"!"
     executor.shutdown()
 
 
