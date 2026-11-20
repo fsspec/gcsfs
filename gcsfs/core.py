@@ -1875,6 +1875,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         chunksize=50 * 2**20,
         mode="overwrite",
         if_generation_match=None,
+        kms_key_name=None,
     ):
         # enforce blocksize should be a multiple of 2**18
         consistency = consistency or self.consistency
@@ -1896,6 +1897,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 content_type,
                 fixed_key_metadata=fixed_key_metadata,
                 mode=mode,
+                kms_key_name=kms_key_name,
                 if_generation_match=if_generation_match,
             )
         else:
@@ -1907,6 +1909,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 metadata,
                 fixed_key_metadata=fixed_key_metadata,
                 mode=mode,
+                kms_key_name=kms_key_name,
                 if_generation_match=if_generation_match,
             )
             try:
@@ -1940,6 +1943,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         fixed_key_metadata=None,
         mode="overwrite",
         if_generation_match=None,
+        kms_key_name=None,
         **kwargs,
     ):
         # enforce blocksize should be a multiple of 2**18
@@ -1972,6 +1976,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     content_type=content_type,
                     fixed_key_metadata=fixed_key_metadata,
                     mode=mode,
+                    kms_key_name=kms_key_name,
                     if_generation_match=if_generation_match,
                 )
                 callback.absolute_update(size)
@@ -1985,6 +1990,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                     metadata=metadata,
                     fixed_key_metadata=fixed_key_metadata,
                     mode=mode,
+                    kms_key_name=kms_key_name,
                     if_generation_match=if_generation_match,
                 )
                 offset = 0

@@ -268,6 +268,197 @@ async def test_init_aaow_failed_precondition(if_generation_match, expected):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "if_generation_match, storage_class, expected_generation, expected_kwargs",
+    [
+        (None, None, None, {}),
+        (0, None, 0, {}),
+        (7, None, None, {"preconditions": _Preconditions(if_generation_match=7)}),
+        (None, "RAPID", None, {}),
+    ],
+    ids=["default", "exclusive_create", "cas_overwrite", "storage_class_on_blob"],
+)
+async def test_init_aaow_kms_key_name_uses_from_blob(
+    if_generation_match, storage_class, expected_generation, expected_kwargs
+):
+    """When kms_key_name is set and Preconditions is available, init_aaow builds a
+    Blob (with storage_class set on the Blob, not passed as a kwarg) and opens
+    AsyncAppendableObjectWriter.from_blob."""
+    kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
+    mock_writer_instance = mock.AsyncMock()
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", _Preconditions),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            new_callable=mock.Mock,
+        ) as mock_writer_class,
+    ):
+        mock_writer_class.from_blob.return_value = mock_writer_instance
+        result = await zb_hns_utils.init_aaow(
+            mock_grpc_client,
+            bucket_name,
+            object_name,
+            if_generation_match=if_generation_match,
+            storage_class=storage_class,
+            kms_key_name=kms_key,
+        )
+
+    mock_writer_class.assert_not_called()
+    mock_writer_class.from_blob.assert_called_once()
+    call_kwargs = mock_writer_class.from_blob.call_args.kwargs
+    assert "storage_class" not in call_kwargs
+    blob = call_kwargs.pop("blob")
+    assert blob.bucket.name == bucket_name
+    assert blob.name == object_name
+    assert blob.kms_key_name == kms_key
+    assert blob.storage_class == storage_class
+    assert call_kwargs == {
+        "client": mock_grpc_client,
+        "generation": expected_generation,
+        "writer_options": {},
+        **expected_kwargs,
+    }
+    mock_writer_instance.open.assert_awaited_once()
+    assert result is mock_writer_instance
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "if_generation_match, expected",
+    [(0, FileExistsError), (7, GenerationMismatchError), (None, FailedPrecondition)],
+)
+async def test_init_aaow_kms_key_name_failed_precondition(
+    if_generation_match, expected
+):
+    """FailedPrecondition from from_blob().open() maps the same way as direct __init__."""
+    mock_writer_instance = mock.AsyncMock()
+    mock_writer_instance.open.side_effect = FailedPrecondition("mismatch")
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", _Preconditions),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            new_callable=mock.Mock,
+        ) as mock_writer_class,
+    ):
+        mock_writer_class.from_blob.return_value = mock_writer_instance
+        with pytest.raises(expected) as excinfo:
+            await zb_hns_utils.init_aaow(
+                mock_grpc_client,
+                bucket_name,
+                object_name,
+                if_generation_match=if_generation_match,
+                kms_key_name="projects/p/locations/l/keyRings/r/cryptoKeys/k",
+            )
+    if if_generation_match == 7:
+        assert excinfo.value.generation == 7
+        assert excinfo.value.__cause__ is mock_writer_instance.open.side_effect
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gen", [5, "12345"])
+@pytest.mark.parametrize("preconditions", [None, _Preconditions])
+async def test_init_aaow_kms_key_name_rejects_existing_generation(gen, preconditions):
+    """AppendObjectSpec (generation > 0) ignores Blob metadata, so kms_key_name is rejected."""
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", preconditions),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            new_callable=mock.Mock,
+        ) as mock_writer_class,
+    ):
+        with pytest.raises(
+            ValueError,
+            match="kms_key_name cannot be set for an existing object generation",
+        ):
+            await zb_hns_utils.init_aaow(
+                mock_grpc_client,
+                bucket_name,
+                object_name,
+                generation=gen,
+                kms_key_name="projects/p/locations/l/keyRings/r/cryptoKeys/k",
+            )
+        mock_writer_class.assert_not_called()
+        mock_writer_class.from_blob.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gen", [0, "0"])
+async def test_init_aaow_kms_key_name_normalizes_zero_generation(gen):
+    """generation=0 and generation='0' both pass integer 0 to from_blob so the SDK
+    takes the WriteObjectSpec(if_generation_match=0) branch instead of AppendObjectSpec.
+    """
+    kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
+    mock_writer_instance = mock.AsyncMock()
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", _Preconditions),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            new_callable=mock.Mock,
+        ) as mock_writer_class,
+    ):
+        mock_writer_class.from_blob.return_value = mock_writer_instance
+        await zb_hns_utils.init_aaow(
+            mock_grpc_client,
+            bucket_name,
+            object_name,
+            generation=gen,
+            kms_key_name=kms_key,
+        )
+
+    call_kwargs = mock_writer_class.from_blob.call_args.kwargs
+    assert type(call_kwargs["generation"]) is int
+    assert call_kwargs["generation"] == 0
+    assert call_kwargs["blob"].kms_key_name == kms_key
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_gen", [-1, "-5", True, False, 1.5, "not-an-int"])
+async def test_init_aaow_kms_key_name_rejects_invalid_generation(bad_gen):
+    """Negative, boolean, float, or non-numeric generations with kms_key_name raise ValueError."""
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", _Preconditions),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            new_callable=mock.Mock,
+        ) as mock_writer_class,
+    ):
+        with pytest.raises(ValueError, match="generation"):
+            await zb_hns_utils.init_aaow(
+                mock_grpc_client,
+                bucket_name,
+                object_name,
+                generation=bad_gen,
+                kms_key_name="projects/p/locations/l/keyRings/r/cryptoKeys/k",
+            )
+        mock_writer_class.assert_not_called()
+        mock_writer_class.from_blob.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_init_aaow_kms_key_name_unsupported_sdk():
+    """Without Preconditions, init_aaow rejects kms_key_name before constructing a writer."""
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", None),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            new_callable=mock.Mock,
+        ) as mock_writer_class,
+    ):
+        with pytest.raises(
+            NotImplementedError,
+            match="AsyncAppendableObjectWriter.from_blob accepts Preconditions",
+        ):
+            await zb_hns_utils.init_aaow(
+                mock_grpc_client,
+                bucket_name,
+                object_name,
+                kms_key_name="projects/p/locations/l/keyRings/r/cryptoKeys/k",
+            )
+        mock_writer_class.assert_not_called()
+        mock_writer_class.from_blob.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_init_aaow_with_flush_interval_bytes():
     """
     Tests that init_aaow correctly passes the flush_interval_bytes

@@ -25,6 +25,7 @@ from fsspec.utils import seek_delimiter
 
 import gcsfs.checkers
 import gcsfs.tests.settings
+import gcsfs.zb_hns_utils as zb_hns_utils
 from gcsfs import GCSFileSystem
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFile
@@ -324,10 +325,82 @@ def test_simple_upload_with_kms(gcs):
     if not gcs.on_google:
         pytest.skip("emulator does not support kmsKeyName")
     fn = TEST_BUCKET + "/test"
-    with gcs.open(fn, "wb", content_type="text/plain", kms_key_name=TEST_KMS_KEY) as f:
-        f.write(b"zz")
+    try:
+        with gcs.open(
+            fn, "wb", content_type="text/plain", kms_key_name=TEST_KMS_KEY
+        ) as f:
+            f.write(b"zz")
+    except NotImplementedError:
+        if getattr(gcs, "_uses_grpc_write_path", None):
+            layout = gcs._sync_lookup_bucket_layout(TEST_BUCKET)
+            if gcs._uses_grpc_write_path(layout) and (
+                layout.is_rcu or zb_hns_utils.Preconditions is None
+            ):
+                pytest.skip(
+                    "gRPC kms_key_name is unsupported on RCU rapid writes or without Preconditions"
+                )
+        raise
     assert gcs.cat(fn) == b"zz"
     assert TEST_KMS_KEY in gcs.info(fn)["kmsKeyName"]
+
+
+def test_pipe_and_put_file_forward_kms_key_name(gcs, skip_if_zonal, tmp_path):
+    """pipe_file and put_file forward kms_key_name on both simple and resumable HTTP uploads."""
+    location = (
+        "https://storage.googleapis.com/upload/storage/v1/b/"
+        f"{TEST_BUCKET}/o?uploadType=resumable&upload_id=abc123"
+    )
+    small_file = tmp_path / "small.bin"
+    small_file.write_bytes(b"abc")
+    large_file = tmp_path / "large.bin"
+    large_file.write_bytes(b"x" * (5 * 2**20))
+
+    with (
+        mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call,
+        mock.patch(
+            "gcsfs.core.upload_chunk", new_callable=mock.AsyncMock, return_value={}
+        ),
+    ):
+        mock_call.return_value = {"size": "3", "md5Hash": "", "crc32c": ""}
+        gcs.pipe_file(
+            TEST_BUCKET + "/kms-pipe-small",
+            b"abc",
+            consistency="none",
+            kms_key_name="kms-key",
+        )
+        assert mock_call.await_args.kwargs["kmsKeyName"] == "kms-key"
+
+        mock_call.reset_mock()
+        mock_call.return_value = ({"Location": location}, None)
+        gcs.pipe_file(
+            TEST_BUCKET + "/kms-pipe-large",
+            b"x" * 2**20,
+            chunksize=2**19,
+            consistency="none",
+            kms_key_name="kms-key",
+        )
+        assert mock_call.await_args.kwargs["kmsKeyName"] == "kms-key"
+
+        mock_call.reset_mock()
+        mock_call.return_value = {"size": "3", "md5Hash": "", "crc32c": ""}
+        gcs.put_file(
+            str(small_file),
+            TEST_BUCKET + "/kms-put-small",
+            consistency="none",
+            kms_key_name="kms-key",
+        )
+        assert mock_call.await_args.kwargs["kmsKeyName"] == "kms-key"
+
+        mock_call.reset_mock()
+        mock_call.return_value = ({"Location": location}, None)
+        gcs.put_file(
+            str(large_file),
+            TEST_BUCKET + "/kms-put-large",
+            chunksize=2**20,
+            consistency="none",
+            kms_key_name="kms-key",
+        )
+        assert mock_call.await_args.kwargs["kmsKeyName"] == "kms-key"
 
 
 def test_large_upload(gcs):
@@ -355,10 +428,24 @@ def test_large_upload_with_kms(gcs):
     try:
         fn = TEST_BUCKET + "/test"
         d = b"7123" * 262144
-        with gcs.open(
-            fn, "wb", content_type="application/octet-stream", kms_key_name=TEST_KMS_KEY
-        ) as f:
-            f.write(d)
+        try:
+            with gcs.open(
+                fn,
+                "wb",
+                content_type="application/octet-stream",
+                kms_key_name=TEST_KMS_KEY,
+            ) as f:
+                f.write(d)
+        except NotImplementedError:
+            if getattr(gcs, "_uses_grpc_write_path", None):
+                layout = gcs._sync_lookup_bucket_layout(TEST_BUCKET)
+                if gcs._uses_grpc_write_path(layout) and (
+                    layout.is_rcu or zb_hns_utils.Preconditions is None
+                ):
+                    pytest.skip(
+                        "gRPC kms_key_name is unsupported on RCU rapid writes or without Preconditions"
+                    )
+            raise
         assert gcs.cat(fn) == d
         assert TEST_KMS_KEY in gcs.info(fn)["kmsKeyName"]
     finally:

@@ -12,6 +12,7 @@ from io import BytesIO
 
 from fsspec.asyn import FSTimeoutError
 from google.api_core.exceptions import FailedPrecondition, NotFound
+from google.cloud.storage import Blob, Bucket
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
     AsyncAppendableObjectWriter,
@@ -169,6 +170,25 @@ async def download_ranges(ranges, mrd):
     return results
 
 
+def _normalize_kms_generation(generation):
+    """Validate and normalize ``generation`` to ``int`` when ``kms_key_name`` is set."""
+    if isinstance(generation, bool) or not isinstance(generation, (int, str)):
+        raise ValueError(
+            f"generation must be a non-negative integer, got {generation!r}"
+        )
+    try:
+        gen_int = int(generation)
+    except ValueError as e:
+        raise ValueError(
+            f"generation must be a non-negative integer, got {generation!r}"
+        ) from e
+    if gen_int < 0:
+        raise ValueError(
+            f"generation must be a non-negative integer, got {generation!r}"
+        )
+    return gen_int
+
+
 async def init_aaow(
     grpc_client,
     bucket_name,
@@ -177,6 +197,7 @@ async def init_aaow(
     flush_interval_bytes=None,
     if_generation_match=None,
     storage_class=None,
+    kms_key_name=None,
 ):
     """
     Creates and opens the AsyncAppendableObjectWriter.
@@ -192,6 +213,13 @@ async def init_aaow(
     default new objects to ``STANDARD``, which appendable writes reject, so
     writes to them must request ``"RAPID"``; Zonal buckets already default to
     ``RAPID`` and leave it unset.
+
+    ``kms_key_name`` encrypts newly created or overwritten objects via
+    ``AsyncAppendableObjectWriter.from_blob`` (requires a google-cloud-storage
+    release whose ``AsyncAppendableObjectWriter.from_blob`` accepts
+    ``Preconditions``). Combining ``kms_key_name`` with a positive
+    ``generation`` raises ``ValueError`` because ``AppendObjectSpec`` resumes an
+    existing object without reading ``Blob`` metadata.
     """
     writer_options = {}
     # Only pass flush_interval_bytes if the user explicitly provided a
@@ -206,6 +234,13 @@ async def init_aaow(
         raise ValueError(
             "if_generation_match cannot be combined with an explicit generation"
         )
+    if kms_key_name and generation is not None:
+        gen_int = _normalize_kms_generation(generation)
+        if gen_int > 0:
+            raise ValueError(
+                "kms_key_name cannot be set for an existing object generation"
+            )
+        generation = gen_int
     if if_generation_match == 0:
         # Every SDK release maps generation=0 to WriteObjectSpec(if_generation_match=0).
         generation = 0
@@ -216,16 +251,34 @@ async def init_aaow(
                 "release whose AsyncAppendableObjectWriter accepts Preconditions"
             )
         kwargs["preconditions"] = Preconditions(if_generation_match=if_generation_match)
-    if storage_class is not None:
-        kwargs["storage_class"] = storage_class
-    writer = AsyncAppendableObjectWriter(
-        client=grpc_client,
-        bucket_name=bucket_name,
-        object_name=object_name,
-        generation=generation,
-        writer_options=writer_options,
-        **kwargs,
-    )
+    if kms_key_name:
+        if Preconditions is None:
+            raise NotImplementedError(
+                "kms_key_name on Zonal buckets requires a google-cloud-storage "
+                "release whose AsyncAppendableObjectWriter.from_blob accepts Preconditions."
+            )
+        bucket = Bucket(client=None, name=bucket_name)
+        blob = Blob(name=object_name, bucket=bucket, kms_key_name=kms_key_name)
+        if storage_class is not None:
+            blob.storage_class = storage_class
+        writer = AsyncAppendableObjectWriter.from_blob(
+            client=grpc_client,
+            blob=blob,
+            generation=generation,
+            writer_options=writer_options,
+            **kwargs,
+        )
+    else:
+        if storage_class is not None:
+            kwargs["storage_class"] = storage_class
+        writer = AsyncAppendableObjectWriter(
+            client=grpc_client,
+            bucket_name=bucket_name,
+            object_name=object_name,
+            generation=generation,
+            writer_options=writer_options,
+            **kwargs,
+        )
     try:
         await writer.open()
     except FailedPrecondition as e:
