@@ -8,7 +8,6 @@ test_hns_unit.py or test_hns.py.
 
 import array
 import asyncio
-import contextlib
 import logging
 import os
 import sys
@@ -1014,17 +1013,39 @@ def test_zonal_file_write_modes_forward_kms_key_name_when_preconditions_availabl
 def test_zonal_file_append_nonexistent_creates_with_kms_key_name(
     extended_gcsfs, zonal_write_mocks, file_path
 ):
-    """Appending to a missing Zonal object with kms_key_name creates it with kms_key_name."""
+    """Appending to a missing Zonal object with kms_key_name creates it with kms_key_name,
+    even when _info/dircache reports an HNS folder entry at the same path."""
     bucket, key, _ = extended_gcsfs.split_path(file_path)
     kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
-    extended_gcsfs._info.side_effect = FileNotFoundError
+    parent = extended_gcsfs._parent(file_path)
+    folder_entry = {
+        "name": file_path,
+        "size": 0,
+        "type": "directory",
+        "storageClass": "DIRECTORY",
+    }
+    zonal_write_mocks["_gcsfs_info"].return_value = folder_entry
+    extended_gcsfs.dircache[parent] = [folder_entry]
 
-    with mock.patch.object(zb_hns_utils, "Preconditions", object()):
-        with extended_gcsfs.open(
-            file_path, "ab", finalize_on_close=True, kms_key_name=kms_key
-        ) as f:
-            f.write(test_data)
+    try:
+        with (
+            mock.patch.object(zb_hns_utils, "Preconditions", object()),
+            mock.patch.object(
+                extended_gcsfs,
+                "_call",
+                new_callable=mock.AsyncMock,
+                side_effect=FileNotFoundError,
+            ) as m_call,
+        ):
+            with extended_gcsfs.open(
+                file_path, "ab", finalize_on_close=True, kms_key_name=kms_key
+            ) as f:
+                f.write(test_data)
+    finally:
+        extended_gcsfs.dircache.pop(parent, None)
 
+    m_call.assert_awaited_once_with("GET", "b/{}/o/{}", bucket, key, json_out=True)
+    zonal_write_mocks["_gcsfs_info"].assert_not_awaited()
     zonal_write_mocks["init_aaow"].assert_awaited_once_with(
         extended_gcsfs.grpc_client,
         bucket,
@@ -1058,8 +1079,8 @@ def test_zonal_file_append_existing_matching_kms_key_resumes_without_kms_kwarg(
     extended_gcsfs, zonal_write_mocks, file_path, existing_kms_key, explicit_gen
 ):
     """Appending to an existing Zonal object whose kmsKeyName matches resumes via
-    AppendObjectSpec(generation=...) with kms_key_name omitted, including when
-    parent dircache holds another generation and explicit_gen is str or int."""
+    AppendObjectSpec(generation=...) with kms_key_name omitted, even when parent
+    dircache lists an HNS folder entry first or another generation."""
     bucket, key, _ = extended_gcsfs.split_path(file_path)
     kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
     info_dict = {
@@ -1070,41 +1091,46 @@ def test_zonal_file_append_existing_matching_kms_key_resumes_without_kms_kwarg(
     }
     parent = extended_gcsfs._parent(file_path)
     extended_gcsfs.dircache[parent] = [
-        {"name": file_path, "type": "file", "size": 10, "generation": "9999"}
+        {
+            "name": file_path,
+            "size": 0,
+            "type": "directory",
+            "storageClass": "DIRECTORY",
+        },
+        {"name": file_path, "type": "file", "size": 10, "generation": "9999"},
     ]
 
+    async def real_info(*a, **kw):
+        return await _REAL_GCSFS_INFO(extended_gcsfs, *a, **kw)
+
+    zonal_write_mocks["_gcsfs_info"].side_effect = real_info
+
     open_kwargs = {"finalize_on_close": True, "kms_key_name": kms_key}
-    if explicit_gen is None:
-        zonal_write_mocks["_gcsfs_info"].return_value = info_dict
-        call_ctx = contextlib.nullcontext()
-    else:
+    if explicit_gen is not None:
         open_kwargs["generation"] = explicit_gen
-        zonal_write_mocks["_gcsfs_info"].side_effect = (
-            lambda *a, **kw: _REAL_GCSFS_INFO(extended_gcsfs, *a, **kw)
-        )
-        call_ctx = mock.patch.object(
-            extended_gcsfs, "_call", new_callable=mock.AsyncMock, return_value=info_dict
-        )
 
     try:
         with (
             mock.patch.object(zb_hns_utils, "Preconditions", object()),
-            call_ctx as m_call,
+            mock.patch.object(
+                extended_gcsfs,
+                "_call",
+                new_callable=mock.AsyncMock,
+                return_value=info_dict,
+            ) as m_call,
         ):
             with extended_gcsfs.open(file_path, "ab", **open_kwargs) as f:
                 f.write(test_data)
     finally:
         extended_gcsfs.dircache.pop(parent, None)
 
+    expected_call_kwargs = {"json_out": True}
     if explicit_gen is not None:
-        m_call.assert_awaited_once_with(
-            "GET",
-            "b/{}/o/{}",
-            bucket,
-            key,
-            json_out=True,
-            generation="12345",
-        )
+        expected_call_kwargs["generation"] = "12345"
+    m_call.assert_awaited_once_with(
+        "GET", "b/{}/o/{}", bucket, key, **expected_call_kwargs
+    )
+    zonal_write_mocks["_gcsfs_info"].assert_not_awaited()
     expected_gen = "12345" if explicit_gen is None else explicit_gen
     zonal_write_mocks["init_aaow"].assert_awaited_once_with(
         extended_gcsfs.grpc_client,
@@ -1147,32 +1173,67 @@ def test_zonal_file_append_existing_mismatched_kms_key_raises_before_init_aaow(
         info_dict["kmsKeyName"] = existing_kms_key
 
     open_kwargs = {"finalize_on_close": True, "kms_key_name": kms_key}
-    if explicit_gen is None:
-        zonal_write_mocks["_gcsfs_info"].return_value = info_dict
-        call_ctx = contextlib.nullcontext()
-    else:
+    if explicit_gen is not None:
         open_kwargs["generation"] = explicit_gen
-        zonal_write_mocks["_gcsfs_info"].side_effect = (
-            lambda *a, **kw: _REAL_GCSFS_INFO(extended_gcsfs, *a, **kw)
-        )
-        call_ctx = mock.patch.object(
-            extended_gcsfs, "_call", new_callable=mock.AsyncMock, return_value=info_dict
-        )
 
-    with mock.patch.object(zb_hns_utils, "Preconditions", object()), call_ctx as m_call:
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", object()),
+        mock.patch.object(
+            extended_gcsfs,
+            "_call",
+            new_callable=mock.AsyncMock,
+            return_value=info_dict,
+        ) as m_call,
+    ):
         with pytest.raises(ValueError, match="Cannot append with kms_key_name"):
             with extended_gcsfs.open(file_path, "ab", **open_kwargs) as f:
                 f.write(test_data)
 
+    expected_call_kwargs = {"json_out": True}
     if explicit_gen is not None:
-        m_call.assert_awaited_once_with(
-            "GET",
-            "b/{}/o/{}",
-            bucket,
-            key,
-            json_out=True,
-            generation="12345",
-        )
+        expected_call_kwargs["generation"] = "12345"
+    m_call.assert_awaited_once_with(
+        "GET", "b/{}/o/{}", bucket, key, **expected_call_kwargs
+    )
+    zonal_write_mocks["_gcsfs_info"].assert_not_awaited()
+    zonal_write_mocks["init_aaow"].assert_not_awaited()
+    assert f.closed
+
+
+@pytest.mark.skipif(is_real_gcs(), reason="Unit test using mocked Preconditions.")
+@pytest.mark.parametrize(
+    "zonal_write_mocks", [layouts.ZONAL_HIERARCHICAL], indirect=True
+)
+def test_zonal_file_append_missing_explicit_generation_raises_not_found(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """Appending with kms_key_name and an explicit positive generation raises
+    FileNotFoundError when that generation does not exist."""
+    bucket, key, _ = extended_gcsfs.split_path(file_path)
+    kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
+
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", object()),
+        mock.patch.object(
+            extended_gcsfs,
+            "_call",
+            new_callable=mock.AsyncMock,
+            side_effect=FileNotFoundError,
+        ) as m_call,
+    ):
+        with pytest.raises(FileNotFoundError):
+            with extended_gcsfs.open(
+                file_path,
+                "ab",
+                generation="12345",
+                finalize_on_close=True,
+                kms_key_name=kms_key,
+            ) as f:
+                f.write(test_data)
+
+    m_call.assert_awaited_once_with(
+        "GET", "b/{}/o/{}", bucket, key, json_out=True, generation="12345"
+    )
     zonal_write_mocks["init_aaow"].assert_not_awaited()
     assert f.closed
 
@@ -1199,10 +1260,15 @@ def test_zonal_file_kms_key_name_normalizes_zero_generation(
     with (
         mock.patch.object(zb_hns_utils, "Preconditions", object()),
         mock.patch.object(extended_gcsfs, "version_aware", zero_source == "#0"),
+        mock.patch.object(
+            extended_gcsfs, "_call", new_callable=mock.AsyncMock
+        ) as m_call,
     ):
         with extended_gcsfs.open(open_path, mode, **open_kwargs) as f:
             f.write(test_data)
 
+    m_call.assert_not_awaited()
+    zonal_write_mocks["_gcsfs_info"].assert_not_awaited()
     zonal_write_mocks["init_aaow"].assert_awaited_once_with(
         extended_gcsfs.grpc_client,
         bucket,

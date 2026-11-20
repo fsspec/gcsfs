@@ -106,26 +106,21 @@ class ZonalFile(GCSFile):
         _resolve_open_generation_match(mode, if_generation_match)
         bucket_layout = None
         if (mode != "rb" and kms_key_name) or finalize_on_close is None:
-            from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+            from gcsfs.extended_gcsfs import (
+                ExtendedGcsFileSystem,
+                _validate_grpc_write_kms_key_name,
+            )
 
             if isinstance(gcsfs, ExtendedGcsFileSystem):
                 bucket_layout = gcsfs._sync_lookup_bucket_layout(bucket)
         if mode != "rb" and kms_key_name:
-            if bucket_layout is not None and bucket_layout.is_rcu:
-                raise NotImplementedError(
-                    "kms_key_name is not supported for gRPC RAPID uploads to RCU buckets."
-                )
+            _validate_grpc_write_kms_key_name(bucket_layout, kms_key_name)
             if generation is not None:
                 gen_int = zb_hns_utils._normalize_kms_generation(generation)
                 if "a" not in mode and gen_int > 0:
                     raise ValueError(
                         "kms_key_name cannot be set for an existing object generation"
                     )
-            if zb_hns_utils.Preconditions is None:
-                raise NotImplementedError(
-                    "kms_key_name on Zonal buckets requires a google-cloud-storage "
-                    "release whose AsyncAppendableObjectWriter.from_blob accepts Preconditions."
-                )
         if finalize_on_close is None:
             if bucket_layout is not None:
                 finalize_on_close = gcsfs._resolve_finalize_on_close(bucket_layout)
@@ -259,6 +254,31 @@ class ZonalFile(GCSFile):
             self.gcsfs.grpc_client, bucket_name, object_name, generation
         )
 
+    async def _resolve_kms_append(
+        self, bucket_name, object_name, generation, kms_key_name
+    ):
+        call_kwargs = {"json_out": True}
+        if generation is not None:
+            gen_int = zb_hns_utils._normalize_kms_generation(generation)
+            if gen_int == 0:
+                return 0, kms_key_name
+            call_kwargs["generation"] = str(gen_int)
+        try:
+            info = await self.gcsfs._call(
+                "GET", "b/{}/o/{}", bucket_name, object_name, **call_kwargs
+            )
+        except FileNotFoundError:
+            if generation is None:
+                return None, kms_key_name
+            raise
+        existing_kms_key = info.get("kmsKeyName")
+        if not _kms_key_matches(existing_kms_key, kms_key_name):
+            raise ValueError(
+                f"Cannot append with kms_key_name={kms_key_name!r}: existing "
+                f"object {bucket_name}/{object_name} uses {existing_kms_key!r}"
+            )
+        return generation or info.get("generation"), None
+
     async def _init_aaow(
         self, bucket_name, object_name, generation=None, flush_interval_bytes=None
     ):
@@ -267,55 +287,31 @@ class ZonalFile(GCSFile):
         """
         kms_key_name = self.kms_key_name or None
         # generation is needed while creating aaow to append to existing objects
-        if "a" in self.mode:
-            info = None
-            if generation is None:
-                try:
-                    # self.path might not be set yet, so reconstruct full path
-                    info = await self.gcsfs._info(f"{bucket_name}/{object_name}")
-                    generation = info.get("generation")
-                except FileNotFoundError:
-                    # if file doesn't exist, we don't need generation
-                    pass
-            elif kms_key_name:
-                gen_int = zb_hns_utils._normalize_kms_generation(generation)
-                if gen_int > 0:
-                    # Query the exact generation directly: GCSFileSystem._info
-                    # drops a kwarg-only generation on uncached GETs and returns
-                    # a synthetic directory entry when parent dircache misses it.
-                    info = await self.gcsfs._call(
-                        "GET",
-                        "b/{}/o/{}",
-                        bucket_name,
-                        object_name,
-                        json_out=True,
-                        generation=str(gen_int),
-                    )
-                else:
-                    generation = 0
-            if kms_key_name and info is not None:
-                existing_kms_key = info.get("kmsKeyName")
-                if not _kms_key_matches(existing_kms_key, kms_key_name):
-                    raise ValueError(
-                        f"Cannot append with kms_key_name={kms_key_name!r}: existing "
-                        f"object {bucket_name}/{object_name} uses {existing_kms_key!r}"
-                    )
-                kms_key_name = None
+        if "a" in self.mode and kms_key_name:
+            generation, kms_key_name = await self._resolve_kms_append(
+                bucket_name, object_name, generation, kms_key_name
+            )
+        elif "a" in self.mode and generation is None:
+            try:
+                # self.path might not be set yet, so reconstruct full path
+                info = await self.gcsfs._info(f"{bucket_name}/{object_name}")
+                generation = info.get("generation")
+            except FileNotFoundError:
+                # if file doesn't exist, we don't need generation
+                pass
         elif (
             kms_key_name
             and generation is not None
             and zb_hns_utils._normalize_kms_generation(generation) == 0
         ):
             generation = 0
-        init_kwargs = {"if_generation_match": self.if_generation_match}
-        if kms_key_name:
-            init_kwargs["kms_key_name"] = kms_key_name
         return await self.gcsfs._init_aaow(
             bucket_name,
             object_name,
             generation,
             flush_interval_bytes,
-            **init_kwargs,
+            if_generation_match=self.if_generation_match,
+            kms_key_name=kms_key_name,
         )
 
     def _ensure_aaow(self):

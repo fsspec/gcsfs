@@ -172,8 +172,6 @@ async def download_ranges(ranges, mrd):
 
 def _normalize_kms_generation(generation):
     """Validate and normalize ``generation`` to ``int`` when ``kms_key_name`` is set."""
-    if generation is None:
-        return None
     if isinstance(generation, bool) or not isinstance(generation, (int, str)):
         raise ValueError(
             f"generation must be a non-negative integer, got {generation!r}"

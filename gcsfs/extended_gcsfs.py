@@ -133,7 +133,8 @@ def _validate_grpc_write_kms_key_name(layout, kms_key_name):
         return
     if layout is not None and layout.is_rcu:
         raise NotImplementedError(
-            "kms_key_name is not supported for gRPC RAPID uploads to RCU buckets."
+            "kms_key_name is not supported for gRPC RAPID uploads to RCU buckets; "
+            "use rcu_rapid_write=False to write with kms_key_name over HTTP."
         )
     if zb_hns_utils.Preconditions is None:
         raise NotImplementedError(
@@ -703,10 +704,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         ):
             raise _rapid_cache_ultra_disabled_error(bucket)
         is_rcu = layout.is_rcu
-        if kms_key_name and is_rcu:
-            raise NotImplementedError(
-                "kms_key_name is not supported for gRPC RAPID uploads to RCU buckets."
-            )
+        _validate_grpc_write_kms_key_name(layout, kms_key_name)
         init_kwargs = {
             "if_generation_match": if_generation_match,
             "storage_class": "RAPID" if is_rcu else None,
@@ -2444,19 +2442,15 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             finalize_on_close = self._resolve_finalize_on_close(
                 layout, kwargs.get("finalize_on_close")
             )
-            init_kwargs = {
-                "if_generation_match": _resolve_generation_match(
-                    mode, if_generation_match
-                )
-            }
-            if kms_key_name:
-                init_kwargs["kms_key_name"] = kms_key_name
             with open(lpath, "rb") as f:
                 try:
                     writer = await self._init_aaow(
                         bucket,
                         key,
-                        **init_kwargs,
+                        if_generation_match=_resolve_generation_match(
+                            mode, if_generation_match
+                        ),
+                        kms_key_name=kms_key_name,
                     )
                 except RapidCacheUltraDisabledError as e:
                     logger.warning("%s Retrying the write over HTTP.", e)
@@ -2571,18 +2565,14 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             finalize_on_close = self._resolve_finalize_on_close(
                 layout, kwargs.get("finalize_on_close")
             )
-            init_kwargs = {
-                "if_generation_match": _resolve_generation_match(
-                    mode, if_generation_match
-                )
-            }
-            if kms_key_name:
-                init_kwargs["kms_key_name"] = kms_key_name
             try:
                 writer = await self._init_aaow(
                     bucket,
                     key,
-                    **init_kwargs,
+                    if_generation_match=_resolve_generation_match(
+                        mode, if_generation_match
+                    ),
+                    kms_key_name=kms_key_name,
                 )
             except RapidCacheUltraDisabledError as e:
                 logger.warning("%s Retrying the write over HTTP.", e)
@@ -2980,16 +2970,14 @@ async def initiate_upload(
     layout = await fs._lookup_bucket_layout(bucket)
     if fs._uses_grpc_write_path(layout):
         _validate_grpc_write_kms_key_name(layout, kms_key_name)
-        init_kwargs = {
-            "if_generation_match": _resolve_generation_match(mode, if_generation_match)
-        }
-        if kms_key_name:
-            init_kwargs["kms_key_name"] = kms_key_name
         try:
             writer = await fs._init_aaow(
                 bucket,
                 key,
-                **init_kwargs,
+                if_generation_match=_resolve_generation_match(
+                    mode, if_generation_match
+                ),
+                kms_key_name=kms_key_name,
             )
         except RapidCacheUltraDisabledError as e:
             logger.warning("%s Retrying the write over HTTP.", e)
@@ -3080,16 +3068,14 @@ async def simple_upload(
         finalize_on_close = fs._resolve_finalize_on_close(
             layout, kwargs.get("finalize_on_close")
         )
-        init_kwargs = {
-            "if_generation_match": _resolve_generation_match(mode, if_generation_match)
-        }
-        if kms_key_name:
-            init_kwargs["kms_key_name"] = kms_key_name
         try:
             writer = await fs._init_aaow(
                 bucket,
                 key,
-                **init_kwargs,
+                if_generation_match=_resolve_generation_match(
+                    mode, if_generation_match
+                ),
+                kms_key_name=kms_key_name,
             )
         except RapidCacheUltraDisabledError as e:
             logger.warning("%s Retrying the write over HTTP.", e)

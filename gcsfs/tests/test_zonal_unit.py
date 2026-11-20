@@ -1166,11 +1166,13 @@ async def test_initiate_upload_zonal_kms_key_name_raises_without_preconditions(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("method", ["pipe_file", "put_file"])
+@pytest.mark.parametrize("method", ["pipe_file", "put_file", "_init_aaow"])
 async def test_pipe_and_put_file_zonal_kms_key_name_raises_without_preconditions(
     async_gcs, zonal_write_mocks, file_path, method, tmp_path
 ):
-    """_pipe_file and _put_file on Zonal buckets reject kms_key_name before AAOW when Preconditions is None."""
+    """_pipe_file, _put_file, and _init_aaow on Zonal buckets reject kms_key_name
+    before AAOW when Preconditions is None."""
+    bucket, object_name, _ = async_gcs.split_path(file_path)
     lpath = tmp_path / "payload.bin"
     lpath.write_bytes(b"secret")
     with mock.patch("gcsfs.zb_hns_utils.Preconditions", None):
@@ -1182,10 +1184,12 @@ async def test_pipe_and_put_file_zonal_kms_key_name_raises_without_preconditions
                 await async_gcs._pipe_file(
                     file_path, b"secret", kms_key_name="key_name"
                 )
-            else:
+            elif method == "put_file":
                 await async_gcs._put_file(
                     str(lpath), file_path, kms_key_name="key_name"
                 )
+            else:
+                await async_gcs._init_aaow(bucket, object_name, kms_key_name="key_name")
 
     zonal_write_mocks["init_aaow"].assert_not_awaited()
 

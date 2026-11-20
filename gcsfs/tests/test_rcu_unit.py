@@ -426,7 +426,9 @@ async def test_rcu_default_http_initiate_open_pipe_and_put_forward_kms_key_name(
             new_callable=mock.AsyncMock,
             side_effect=_fake_http_call,
         ) as http_call,
-        mock.patch.object(fs, "call", return_value=({}, '{"generation": "1"}')),
+        mock.patch.object(
+            fs, "call", return_value=({}, '{"generation": "1"}')
+        ) as http_upload,
     ):
         await initiate_upload(fs, BUCKET, "key", kms_key_name="kms-key")
         assert http_call.await_args.kwargs["kmsKeyName"] == "kms-key"
@@ -434,6 +436,8 @@ async def test_rcu_default_http_initiate_open_pipe_and_put_forward_kms_key_name(
         http_call.reset_mock()
         with fs.open(PATH, "wb", kms_key_name="kms-key") as f:
             f.write(b"data")
+        # call_args holds a memoryview of the upload buffer.
+        http_upload.reset_mock()
         assert type(f) is core.GCSFile
         assert http_call.await_args.kwargs["kmsKeyName"] == "kms-key"
 
@@ -482,7 +486,10 @@ async def test_rcu_rapid_write_rejects_kms_key_name_before_init_aaow(
         mock.patch("gcsfs.zb_hns_utils.Preconditions", preconditions),
         pytest.raises(
             NotImplementedError,
-            match="not supported for gRPC RAPID uploads to RCU buckets",
+            match=(
+                "kms_key_name is not supported for gRPC RAPID uploads to RCU buckets; "
+                "use rcu_rapid_write=False to write with kms_key_name over HTTP."
+            ),
         ),
     ):
         if entry_point.startswith("open_"):

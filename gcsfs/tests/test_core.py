@@ -331,10 +331,14 @@ def test_simple_upload_with_kms(gcs):
         ) as f:
             f.write(b"zz")
     except NotImplementedError:
-        if zb_hns_utils.Preconditions is None:
-            pytest.skip(
-                "zonal kms_key_name needs a google-cloud-storage release with Preconditions"
-            )
+        if getattr(gcs, "_uses_grpc_write_path", None):
+            layout = gcs._sync_lookup_bucket_layout(TEST_BUCKET)
+            if gcs._uses_grpc_write_path(layout) and (
+                layout.is_rcu or zb_hns_utils.Preconditions is None
+            ):
+                pytest.skip(
+                    "gRPC kms_key_name is unsupported on RCU rapid writes or without Preconditions"
+                )
         raise
     assert gcs.cat(fn) == b"zz"
     assert TEST_KMS_KEY in gcs.info(fn)["kmsKeyName"]
@@ -433,10 +437,14 @@ def test_large_upload_with_kms(gcs):
             ) as f:
                 f.write(d)
         except NotImplementedError:
-            if zb_hns_utils.Preconditions is None:
-                pytest.skip(
-                    "zonal kms_key_name needs a google-cloud-storage release with Preconditions"
-                )
+            if getattr(gcs, "_uses_grpc_write_path", None):
+                layout = gcs._sync_lookup_bucket_layout(TEST_BUCKET)
+                if gcs._uses_grpc_write_path(layout) and (
+                    layout.is_rcu or zb_hns_utils.Preconditions is None
+                ):
+                    pytest.skip(
+                        "gRPC kms_key_name is unsupported on RCU rapid writes or without Preconditions"
+                    )
             raise
         assert gcs.cat(fn) == d
         assert TEST_KMS_KEY in gcs.info(fn)["kmsKeyName"]
