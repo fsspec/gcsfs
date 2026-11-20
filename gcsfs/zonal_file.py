@@ -68,13 +68,17 @@ class ZonalFile(GCSFile):
         called explicitly or `finalize_on_close` must be set to `True`.
         On Zonal and RCU buckets an overwrite replaces the existing object as
         soon as the writer opens, so a failed append, flush or commit leaves
-        the partially written object in its place, unfinalized. So does an
-        exception raised by other code inside the file's own `with` block
-        (`with fs.open(path, "wb") as f:`), unless no write has opened the
-        writer yet. A wrapper that only closes the file when its block exits,
-        such as a text-mode file or `fsspec.open()`, does not pass the
-        exception on, so there the partial object is still finalized when
-        `finalize_on_close` is `True`.
+        the partially written object in its place, unfinalized. When other
+        code raises inside `ZonalFile`'s own `with` block
+        (`with fs.open(path, "wb") as f:`), closing skips opening the writer
+        if it has not been opened yet (leaving any existing object intact),
+        and otherwise leaves the object unfinalized, still holding the data
+        already written, unless `.commit()` has already finalized it. A
+        wrapper that only calls `close()` when its block exits, such as a
+        text-mode file or `fsspec.open()`, does not pass the exception on: it
+        still runs the closing flush (opening the writer even if nothing was
+        written yet, regardless of `finalize_on_close`) and finalizes the
+        object when `finalize_on_close` is `True`.
 
         For Zonal and RCU buckets, `flush_interval_bytes` controls the write buffer size before
         persisting data to GCS (default: 16 MiB). This value must be a multiple
@@ -440,7 +444,8 @@ class ZonalFile(GCSFile):
         self.finalize_on_close = False
 
     def _abort_write(self):
-        """Makes the file close-only after a failed append, flush or finalize.
+        """Makes the file close-only after a failed append, flush or finalize,
+        or after the `with` block raised.
 
         The SDK may have closed the stream, so close() must not flush it again,
         and the partially written object is not finalized.
@@ -505,13 +510,30 @@ class ZonalFile(GCSFile):
         )
 
     def __exit__(self, exc_type, exc_value, traceback):
-        # Code inside the `with` block raised: still close the file, but leave
-        # the partially written object unfinalized (and skip opening a writer
-        # if nothing has been written yet).
-        if exc_type is not None and self.writable() and not self.finalized:
-            self.finalize_on_close = False
-            if self.aaow is None:
-                self.forced = True
+        # Code inside the `with` block raised: still close the file, but abort
+        # any uncommitted write (skipping the closing flush, not opening a
+        # writer if nothing has opened it yet, and leaving any partial object
+        # unfinalized) and keep close errors from masking the active exception.
+        # Bytes already written are not rolled back: closing the stream
+        # persists them without the flush.
+        if exc_type is not None:
+            if self.writable() and not self._close_deferred:
+                if self.aaow is None:
+                    self.finalize_on_close = False
+                    self.closed = True
+                else:
+                    self._abort_write()
+            try:
+                return super().__exit__(exc_type, exc_value, traceback)
+            except Exception as e:
+                if not self._close_deferred:
+                    self.closed = True
+                logger.warning(
+                    "Failed to close %s after with-block exception: %r",
+                    self.path,
+                    e,
+                )
+                return False
         return super().__exit__(exc_type, exc_value, traceback)
 
     def _close_impl(self):
