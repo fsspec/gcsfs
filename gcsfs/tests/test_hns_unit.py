@@ -44,8 +44,6 @@ from gcsfs.tests.utils import is_real_gcs
 
 pytestmark = [requires_hns]
 
-ORIGINAL_GET_BUCKET_LAYOUT = ExtendedGcsFileSystem._get_bucket_layout
-
 FIXED_UUID = uuid.UUID("00000000-0000-0000-0000-000000000000")
 FIXED_REQUEST_ID = str(FIXED_UUID)
 
@@ -4203,15 +4201,6 @@ class TestStorageControlRetryExecution:
 
 class TestExtendedGcsFileSystemBucketLayout:
     """Unit tests for ExtendedGcsFileSystem _get_bucket_layout and grpc_client."""
-
-    @pytest.fixture(autouse=True)
-    def _mock_get_bucket_layout_on_emulator(self):
-        """Override the global session mock to allow testing the real _get_bucket_layout."""
-        with mock.patch(
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_layout",
-            new=ORIGINAL_GET_BUCKET_LAYOUT,
-        ):
-            yield
 
     @pytest.fixture
     def extended_gcsfs(self):
