@@ -28,6 +28,7 @@ import gcsfs.tests.settings
 from gcsfs import GCSFileSystem
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFile
+from gcsfs.core import GCSFileSystem as CoreGCSFileSystem
 from gcsfs.credentials import GoogleCredentials
 from gcsfs.retry import GenerationMismatchError, HttpError
 from gcsfs.tests.conftest import (
@@ -2280,7 +2281,7 @@ def test_merge(gcs):
 
 
 def test_merge_destination_generation_raises():
-    gcs_versioned = GCSFileSystem(
+    gcs_versioned = CoreGCSFileSystem(
         token="anon", version_aware=True, skip_instance_cache=True
     )
     with pytest.raises(ValueError, match="Cannot write to specific object generation"):
@@ -2288,7 +2289,7 @@ def test_merge_destination_generation_raises():
 
 
 def test_merge_empty_key_raises():
-    gcs_versioned = GCSFileSystem(
+    gcs_versioned = CoreGCSFileSystem(
         token="anon", version_aware=True, skip_instance_cache=True
     )
     with pytest.raises(
@@ -2300,7 +2301,7 @@ def test_merge_empty_key_raises():
 
 
 def test_merge_bucket_mismatch_raises():
-    gcs_versioned = GCSFileSystem(
+    gcs_versioned = CoreGCSFileSystem(
         token="anon", version_aware=True, skip_instance_cache=True
     )
     with pytest.raises(
@@ -2311,7 +2312,7 @@ def test_merge_bucket_mismatch_raises():
 
 
 def test_merge_source_generations_forwarded():
-    gcs_versioned = GCSFileSystem(
+    gcs_versioned = CoreGCSFileSystem(
         token="anon", version_aware=True, skip_instance_cache=True
     )
     calls = []
