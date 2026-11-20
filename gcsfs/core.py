@@ -84,6 +84,31 @@ GCS_MIN_BLOCK_SIZE = 2**18
 GCS_MAX_BLOCK_SIZE = 2**28
 DEFAULT_BLOCK_SIZE = 5 * 2**20
 
+# Default maximum number of batch delete requests that a recursive ``rm`` keeps
+# in flight on standard (non-HNS) buckets. Deletes count as writes, and a
+# standard bucket initially supports about 1000 writes/s
+# (https://cloud.google.com/storage/docs/request-rate). The default of 4 keeps
+# deletes well below that limit to leave headroom for other writes (e.g.
+# application writes) to the same bucket, so that neither the deletes nor
+# those writes get throttled. Callers can pass a higher ``concurrency`` for
+# buckets that have scaled to higher rates.
+DEFAULT_RM_CONCURRENCY = 4
+
+
+def _validate_rm_concurrency(concurrency):
+    """Check the ``concurrency`` argument of ``rm``: None or a positive int."""
+    if concurrency is None:
+        return
+    if (
+        isinstance(concurrency, bool)
+        or not isinstance(concurrency, int)
+        or concurrency < 1
+    ):
+        raise ValueError(
+            f"concurrency must be a positive integer or None, got {concurrency!r}"
+        )
+
+
 SUPPORTED_FIXED_KEY_METADATA = {
     "content_encoding": "contentEncoding",
     "cache_control": "cacheControl",
@@ -1814,18 +1839,17 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             )
 
     async def _rm(
-        self, path, recursive=False, maxdepth=None, batchsize=100, concurrency=5
+        self, path, recursive=False, maxdepth=None, batchsize=100, concurrency=None
     ):
         # 100 is the maximum number of operations allowed in a single GCS batch
         # request (https://cloud.google.com/storage/docs/batch); using the full
         # limit minimizes the number of round-trips when deleting many objects.
         #
-        # ``concurrency`` is the maximum number of batch requests in flight.
-        # The default is kept low so that deletes stay below the initial
-        # write rate of a standard (non-HNS) bucket, about 1000 writes/s
-        # (https://cloud.google.com/storage/docs/request-rate), and do not
-        # get throttled or slow down other writes to the bucket.
-        # Increase it for buckets that have scaled to higher rates.
+        # ``concurrency`` is the maximum number of batch requests in flight;
+        # None uses DEFAULT_RM_CONCURRENCY (see its comment for the rationale).
+        _validate_rm_concurrency(concurrency)
+        if concurrency is None:
+            concurrency = DEFAULT_RM_CONCURRENCY
         paths = await self._expand_path(path, recursive=recursive, maxdepth=maxdepth)
         files = [p for p in paths if self.split_path(p)[1]]
         dirs = [p for p in paths if not self.split_path(p)[1]]
