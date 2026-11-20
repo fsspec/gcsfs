@@ -6,7 +6,7 @@ if [[ "${_SKIP_CLEANUP}" == "true" ]]; then
 fi
 source "$(dirname "$0")/lib.sh"
 source "${BUILD_VARS_FILE}"
-curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash || true
+install_helm || true
 gcloud container clusters get-credentials "$CLUSTER_NAME" --zone="${CLUSTER_LOCATION:-${_ZONE}}" --project="${PROJECT_ID}" || true
 helm uninstall "$RUN_ID" || true
 # Best-effort: the seed release is normally uninstalled by the seed-checkpoint
