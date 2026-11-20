@@ -1515,6 +1515,39 @@ async def test_get_file_stops_at_persisted_size_of_growing_object(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+@pytest.mark.parametrize("kwargs", [{"chunksize": 50}, {}], ids=["chunked", "default"])
+async def test_get_file_fails_when_object_outgrew_info_size(
+    async_gcs, gcs_bucket_mocks, tmp_path, file_path, bucket_layout, kwargs
+):
+    """
+    Tests that _get_file raises instead of writing a truncated file when the MRD
+    has no persisted_size and the object has grown past the size _info() reports.
+    """
+    server_data = bytes(range(200))
+    info_size = 133
+
+    with gcs_bucket_mocks(server_data, bucket_type_val=bucket_layout) as mocks:
+        mocks["pool"].persisted_size = None
+        mocks["pool"].details = {"size": info_size}
+        lpath = tmp_path / "output.txt"
+        with (
+            mock.patch.object(
+                async_gcs, "_info", new_callable=mock.AsyncMock
+            ) as mock_info,
+            # _get_file_concurrent retries the ClientError; skip the real backoff.
+            mock.patch("gcsfs.retry.asyncio.sleep", new_callable=mock.AsyncMock),
+            pytest.raises(
+                aiohttp.ClientError, match="Expected 133 bytes, but only received"
+            ),
+        ):
+            mock_info.return_value = {"size": info_size}
+            await async_gcs._get_file(file_path, str(lpath), **kwargs)
+
+        assert not lpath.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
 async def test_get_file_short_read_from_downloader(
     async_gcs, gcs_bucket_mocks, caplog, tmp_path, file_path, bucket_layout
 ):

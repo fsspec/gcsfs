@@ -2648,6 +2648,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         try:
             async with mrd_pool.get_mrd() as mrd:
                 size = mrd.persisted_size
+                size_from_mrd = size is not None
                 if size is None:
                     logger.warning(
                         f"AsyncMultiRangeDownloader (MRD) for {rpath} has no 'persisted_size'. "
@@ -2668,9 +2669,18 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         if offset >= size:
                             break
 
+                        # A size from _info() can be stale while the object is
+                        # still being appended to, so only the MRD's own size
+                        # limits the last chunk. With a full chunk, bytes past
+                        # a stale size fail the size check below instead of
+                        # being cut off silently.
                         data = await zb_hns_utils.download_range(
                             offset=offset,
-                            length=min(chunksize, size - offset),
+                            length=(
+                                min(chunksize, size - offset)
+                                if size_from_mrd
+                                else chunksize
+                            ),
                             mrd=mrd,
                         )
                         if not data:
