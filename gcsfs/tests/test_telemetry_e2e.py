@@ -19,6 +19,7 @@ recorded at the aiohttp layer, i.e. exactly what is sent over the wire.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import http.server
@@ -197,6 +198,35 @@ def test_lightning_checkpoint_save_e2e(gcs, wire, tmp_path):
     trainer.save_checkpoint(f"gs://{path}")
     wire.assert_all_tagged("lightning")
     assert gcs.exists(path)
+
+
+def test_adk_artifact_service_io_pattern_e2e(gcs, wire):
+    """
+    ADK `FsspecArtifactService` I/O (`asyncio.to_thread` into a `google.adk` function)
+    sends `fw/adk` on every request.
+
+    google-adk is not a test dependency. Detection only reads `__name__` from frame
+    globals, so a function defined with the real ADK module name stands in for ADK.
+    """
+    adk_globals = {
+        "__name__": "google.adk.integrations.fsspec._fsspec_artifact_service"
+    }
+    exec(
+        "def save_list_load(fs, prefix, path):\n"
+        "    fs.pipe_file(path, b'artifact')\n"
+        "    return fs.find(prefix), fs.cat_file(path)\n",
+        adk_globals,
+    )
+    prefix = _unique_prefix()
+    path = f"{prefix}/app/user/session/report.txt/0"
+
+    wire.clear()
+    listing, data = asyncio.run(
+        asyncio.to_thread(adk_globals["save_list_load"], gcs, prefix, path)
+    )
+    wire.assert_all_tagged("adk")
+    assert listing == [path]
+    assert data == b"artifact"
 
 
 def test_env_token_on_first_op_after_filesystem_init(

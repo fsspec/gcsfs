@@ -233,11 +233,9 @@ async def init_aaow(
         **kwargs,
     )
     encoded = telemetry_manager.default_usage_tracker.encode_features()
+    open_kwargs = {"metadata": [(GRPC_METADATA_KEY, encoded)]} if encoded else {}
     try:
-        if encoded:
-            await writer.open(metadata=[(GRPC_METADATA_KEY, encoded)])
-        else:
-            await writer.open()
+        await writer.open(**open_kwargs)
     except FailedPrecondition as e:
         if if_generation_match is None:
             # No precondition was requested (e.g. appending to a finalized

@@ -48,7 +48,7 @@ def _serialize_features(
     framework_id: int | None,
     env_id: int | None,
     method_params: frozenset[str],
-) -> str | None:
+) -> str:
     features = GcsfsFeatures()
     if method_id is not None:
         features.method = method_id
@@ -62,8 +62,6 @@ def _serialize_features(
             {field_name: True for field_name in method_params}
         )
     serialized = GcsfsFeatures.serialize(features)
-    if not serialized:
-        return None
     return base64.urlsafe_b64encode(serialized).decode("ascii")
 
 
