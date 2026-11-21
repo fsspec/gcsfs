@@ -4453,7 +4453,6 @@ class TestExtendedGcsFileSystemBucketLayout:
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1
         assert str(error) in warnings[0].getMessage()
-        assert "The caller needs" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_layout_lookup_ignores_empty_bucket(self, extended_gcsfs):
@@ -4516,16 +4515,26 @@ class TestExtendedGcsFileSystemBucketLayout:
         ],
     )
     async def test_layout_lookup_default_endpoint_retries_and_raises_transient(
-        self, endpoint_url, error
+        self, endpoint_url, error, caplog
     ):
         fs = ExtendedGcsFileSystem(
             token="anon", endpoint_url=endpoint_url, skip_instance_cache=True
         )
-        with self._layout_rpc(fs, side_effect=error) as (_, rpc):
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            self._layout_rpc(fs, side_effect=error) as (_, rpc),
+        ):
             with pytest.raises(type(error)):
                 await fs._lookup_bucket_layout("b")
         assert rpc.await_args.kwargs["retry"] is not None
         assert "b" not in fs._storage_layout_cache
+        # The raised gapic error does not say why a plain read or write failed:
+        # the warning names the bucket, the lookup and the opt-out.
+        (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+        message = warning.getMessage()
+        assert "bucket b" in message
+        assert "Storage Control" in message
+        assert "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=false" in message
 
     @pytest.mark.asyncio
     async def test_layout_lookup_custom_endpoint_single_attempt(self):

@@ -525,15 +525,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     async def _get_bucket_layout(self, bucket):
         """Look up the layout of ``bucket`` with the Storage Control API.
 
-        Falls back to ``BucketLayout.UNKNOWN`` (standard bucket behavior) only
-        when the answer is definitive, and the caller caches it:
+        Falls back to ``BucketLayout.UNKNOWN`` (standard bucket behavior), which
+        the caller caches, when the lookup cannot work or retrying would not
+        change the answer:
 
         * a plain ``http://`` endpoint (e.g. an emulator): the control channel
           always uses TLS, so the lookup cannot work and is not attempted;
         * an endpoint other than the default GCS one, which may not serve the
-          Storage Control API: one attempt, and any API error falls back;
-        * on the default endpoint, an error that retrying will not change,
-          such as missing permission.
+          Storage Control API: one attempt, and any API error other than
+          ``NotFound``, or a timeout, falls back;
+        * on the default endpoint, any non-transient API error other than
+          ``NotFound``, e.g. missing permission.
 
         ``NotFound`` is raised on every endpoint: only the Storage Control API
         answers it (an endpoint that does not serve the API fails with another
@@ -541,7 +543,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         transient errors (after the retry budget) are raised too: falling back
         there would silently change the semantics of HNS and zonal operations.
         """
-        location = self._grpc_location.rstrip("/")
+        location = self._grpc_location
         if location.startswith("http://"):
             logger.debug(
                 f"Endpoint {location} is plain http; skipping the bucket layout lookup."
@@ -565,6 +567,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 isinstance(e, (api_exceptions.RetryError, asyncio.TimeoutError))
                 or is_transient_exception(e)
             ):
+                # The raised gapic error does not say why a plain read or
+                # write failed, so name the lookup and the opt-out here.
+                logger.warning(
+                    f"Looking up the layout of bucket {bucket} with the Storage "
+                    f"Control API failed: {e!r}. The operation fails instead of "
+                    "using standard bucket behavior, which would be wrong on "
+                    "HNS and zonal buckets. To skip layout lookups (and HNS, "
+                    "zonal and Rapid Cache support), set "
+                    "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=false before importing "
+                    "gcsfs."
+                )
                 raise
             # The server's message names a missing permission when that is
             # the cause, e.g. "... does not have storage.objects.list access".
@@ -785,6 +798,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     # bucket's layout is not kept.
                     self._storage_layout_cache.pop(bucket, None)
                 except Exception as lookup_error:
+                    # Deliberately broad: whatever made the re-check fail, the
+                    # open error is the one to report.
                     logger.debug(
                         f"Re-checking the layout of bucket {bucket} failed: "
                         f"{lookup_error!r}"
@@ -1421,7 +1436,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         False when no layout is cached. Listings look the layout up before they
         cache entries, so a bucket with cached listings has a cached layout,
-        unless ``invalidate_storage_layout_cache()`` dropped it.
+        unless it was dropped since (by ``invalidate_storage_layout_cache()``,
+        or because this instance created or deleted the bucket).
         """
         layout = self._storage_layout_cache.get(bucket)
         return layout is not None and layout.is_hierarchical

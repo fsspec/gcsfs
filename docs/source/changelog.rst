@@ -17,7 +17,7 @@ Unreleased
   Now ``http://`` endpoints skip the lookup; other non-default endpoints try
   once; on the default endpoint, answers that retrying will not change (such
   as a missing ``storage.objects.list`` permission) fall back, and every
-  fallback is remembered per filesystem instance
+  fallback except a missing bucket is remembered per filesystem instance
   (``invalidate_storage_layout_cache()`` checks again). A lookup that still
   fails after retries on the default endpoint now raises: during a Storage
   Control outage, the first operation on a bucket fails after about 60 s
