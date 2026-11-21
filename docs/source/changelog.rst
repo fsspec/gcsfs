@@ -7,6 +7,11 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
+* Fix generation parsing for object names containing literal ``#``, ``?``,
+  or URL-like text (#1129).
+* Reject generation-qualified overwrites and ``merge`` sources instead of
+  silently using live objects. Zonal append is unchanged (#1129).
+
 * ``sign()`` now works with credentials that have no private key, such as
   Compute Engine and GKE Workload Identity credentials. When the credentials
   cannot sign, the URL is signed through the IAM Credentials ``signBlob`` API

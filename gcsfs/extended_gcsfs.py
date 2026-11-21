@@ -2557,6 +2557,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # not bytes-like fails first; chunksize then counts bytes.
         data = as_byte_buffer(data)
         bucket, key, generation = self.split_path(path)
+        if generation is not None:
+            raise ValueError("Cannot write to specific object generation")
         layout = await self._lookup_bucket_layout(bucket)
         if self._uses_grpc_write_path(layout):
             finalize_on_close = self._resolve_finalize_on_close(

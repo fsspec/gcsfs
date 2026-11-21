@@ -2083,3 +2083,43 @@ async def test_core_upload_helpers_route_rcu_to_extended_with_rcu_rapid_write(
 
     mock_ext_simple_upload.assert_awaited_once()
     mock_ext_initiate_upload.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "suffix", ["#123", "?generation=123", "#variant?generation=123"]
+)
+async def test_pipe_zonal_rejects_specific_generation(
+    async_gcs, zonal_write_mocks, suffix
+):
+    async_gcs.version_aware = True
+    async_gcs._grpc_client = mock.AsyncMock()
+    with mock.patch.object(async_gcs, "_get_grpc_client", new_callable=mock.AsyncMock):
+        with pytest.raises(
+            ValueError, match="Cannot write to specific object generation"
+        ):
+            await async_gcs._pipe_file(
+                f"{TEST_ZONAL_BUCKET}/file{suffix}", b"replacement"
+            )
+    zonal_write_mocks["init_aaow"].assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "suffix,generation", [("", "123"), ("#123", None), ("?generation=123", None)]
+)
+def test_zonal_append_preserves_generation(
+    extended_gcsfs, zonal_write_mocks, suffix, generation
+):
+    extended_gcsfs.version_aware = True
+    with extended_gcsfs.open(
+        f"{file_path}{suffix}", "ab", generation=generation
+    ) as handle:
+        handle.write(b"new data")
+    assert zonal_write_mocks["init_aaow"].await_args.args[3] == "123"
+
+
+@pytest.mark.parametrize("mode", ["wb", "xb"])
+def test_zonal_overwrite_rejects_generation(extended_gcsfs, zonal_write_mocks, mode):
+    with pytest.raises(ValueError, match="Cannot write to specific object generation"):
+        extended_gcsfs.open(file_path, mode, generation="123")
+    zonal_write_mocks["init_aaow"].assert_not_awaited()

@@ -136,3 +136,67 @@ def test_write_captures_generation_multipart(gcs_versioned):
         wo.write(b"second chunk")
     assert wo.generation is not None
     assert wo.generation == gcs_versioned.info(b)["generation"]
+
+
+@pytest.mark.parametrize(
+    "key", ["dir/file#variant.txt", "http://example.com/a#variant.txt"]
+)
+def test_read_old_generation_with_literal_hash_in_key(gcs_versioned, key):
+    path = f"{TEST_VERSIONED_BUCKET}/{key}"
+    gcs_versioned.pipe_file(path, b"first version")
+    generation = gcs_versioned.info(path)["generation"]
+    gcs_versioned.pipe_file(path, b"second version")
+
+    versioned_path = f"{path}?generation={generation}"
+    assert gcs_versioned.cat_file(versioned_path) == b"first version"
+    assert gcs_versioned.info(versioned_path)["generation"] == generation
+    assert gcs_versioned.cat_file(path) == b"second version"
+
+
+@pytest.mark.parametrize("writer", ["pipe", "wb", "xb", "ab"])
+@pytest.mark.parametrize(
+    "suffix", ["#123", "?generation=123", "#variant?generation=123"]
+)
+def test_write_rejects_specific_generation_without_overwriting(
+    gcs_versioned, writer, suffix
+):
+    key = f"{TEST_VERSIONED_BUCKET}/guarded"
+    gcs_versioned.pipe_file(key, b"original")
+    gcs_versioned.pipe_file(f"{key}#variant", b"original variant")
+    path = f"{key}{suffix}"
+    with pytest.raises(ValueError, match="Cannot write to specific object generation"):
+        if writer == "pipe":
+            gcs_versioned.pipe_file(path, b"replacement")
+        else:
+            with gcs_versioned.open(path, writer) as f:
+                f.write(b"replacement")
+    assert gcs_versioned.cat_file(key) == b"original"
+    assert gcs_versioned.cat_file(f"{key}#variant") == b"original variant"
+
+
+@pytest.mark.parametrize("mode", ["wb", "xb", "ab"])
+def test_open_rejects_explicit_generation_for_write(gcs_versioned, mode):
+    with pytest.raises(ValueError, match="Cannot write to specific object generation"):
+        gcs_versioned.open(f"{TEST_VERSIONED_BUCKET}/explicit", mode, generation="123")
+
+
+@pytest.mark.parametrize("writer", ["pipe", "wb"])
+@pytest.mark.parametrize("suffix", ["#123", "?generation=123"])
+def test_write_literal_generation_suffix_without_version_awareness(
+    gcs_versioned, writer, suffix
+):
+    path = f"{TEST_VERSIONED_BUCKET}/literal{suffix}"
+    gcs_versioned.version_aware = False
+    try:
+        if writer == "pipe":
+            gcs_versioned.pipe_file(path, b"literal content")
+        else:
+            with gcs_versioned.open(path, writer) as f:
+                f.write(b"literal content")
+        assert gcs_versioned.cat_file(path) == b"literal content"
+    finally:
+        try:
+            if gcs_versioned.exists(path):
+                gcs_versioned.rm(path)
+        finally:
+            gcs_versioned.version_aware = True
