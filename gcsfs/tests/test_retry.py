@@ -711,7 +711,6 @@ async def test_sync_cat_file_wraps_timeout_in_fstimeouterror(short_default_timeo
     import fsspec
 
     from gcsfs.core import GCSFileSystem
-    from gcsfs.tests.conftest import _close_gcs
 
     async with _local_server(_never_reply) as (url, connections):
         fs = GCSFileSystem(token="anon", endpoint_url=url, skip_instance_cache=True)
@@ -723,7 +722,11 @@ async def test_sync_cat_file_wraps_timeout_in_fstimeouterror(short_default_timeo
                     )
                 assert isinstance(exc_info.value.__cause__, aiohttp.ServerTimeoutError)
         finally:
-            _close_gcs(fs)
+            # Close on the filesystem's own loop and wait for it: a plain
+            # create_task from this thread would sit on the idle fsspec loop.
+            if fs._session is not None:
+                await asyncio.to_thread(fsspec.asyn.sync, fs.loop, fs._session.close)
+        assert fs._session.closed
     assert len(connections) == 6
 
 
