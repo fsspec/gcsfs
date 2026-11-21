@@ -811,16 +811,27 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         Reuses a layout without RCU that another write already cached, and
         otherwise looks the layout up once. A fresh layout that no longer
-        reports RCU is cached. A lookup that is ``UNKNOWN`` or still reports
-        RCU keeps the cached layout.
+        reports RCU is cached. A lookup that is ``UNKNOWN``, still reports
+        RCU, or fails returns ``False`` and keeps the cached layout, unless
+        the re-check found the bucket missing, which drops its cached layout.
         """
         cached_layout = self._storage_layout_cache.get(bucket)
         if cached_layout is None or cached_layout.is_rcu:
             # No other write has refreshed the layout yet: look it up once.
+            # If the lookup fails, the layout stays unknown and returning
+            # False lets the caller re-raise the write error unchanged.
+            fresh_layout = BucketLayout.UNKNOWN
             try:
                 fresh_layout = await self._get_bucket_layout(bucket)
-            except Exception:
-                return False
+            except api_exceptions.NotFound:
+                # The bucket is gone: as in _lookup_bucket_layout, a missing
+                # bucket's layout is not kept.
+                self._storage_layout_cache.pop(bucket, None)
+            except Exception as lookup_error:
+                logger.debug(
+                    f"Re-checking the layout of bucket {bucket} failed: "
+                    f"{lookup_error!r}"
+                )
             if (
                 fresh_layout.storage_class == StorageClass.UNKNOWN
                 or fresh_layout.is_rcu
@@ -963,7 +974,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         cached, and otherwise looks the layout up once. If the layout no
         longer reports RCU, it is cached and ``RapidCacheUltraDisabledError``
         is raised from the original error; otherwise the original error is
-        re-raised and the cached layout is kept.
+        re-raised and the cached layout is kept, unless the re-check found the
+        bucket missing, which drops its cached layout.
         """
         await self._get_grpc_client()
         layout = await self._lookup_bucket_layout(bucket)
