@@ -1439,6 +1439,171 @@ async def test_get_file_exception_cleanup(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+@pytest.mark.parametrize(
+    "size, kwargs, expected_ranges",
+    [
+        pytest.param(
+            133,
+            {"chunksize": 50},
+            [(0, 50), (50, 50), (100, 33)],
+            id="partial_last_chunk",
+        ),
+        pytest.param(100, {"chunksize": 50}, [(0, 50), (50, 50)], id="exact_multiple"),
+        pytest.param(133, {}, [(0, 133)], id="default_chunksize"),
+        pytest.param(0, {}, [], id="empty_object"),
+    ],
+)
+async def test_get_file_last_chunk_requests_only_remaining_bytes(
+    async_gcs,
+    gcs_bucket_mocks,
+    caplog,
+    tmp_path,
+    file_path,
+    bucket_layout,
+    size,
+    kwargs,
+    expected_ranges,
+):
+    """
+    Tests that _get_file asks only for the remaining bytes in the last chunk, so
+    a size that is not a multiple of the chunk size does not log a short read.
+    """
+    data = bytes(range(size))
+
+    with gcs_bucket_mocks(data, bucket_type_val=bucket_layout) as mocks:
+        mocks["downloader"].persisted_size = len(data)
+        lpath = tmp_path / "output.txt"
+        with caplog.at_level(logging.WARNING, logger="gcsfs"):
+            await async_gcs._get_file(file_path, str(lpath), **kwargs)
+
+        requested = [
+            call.args[0][0][:2]
+            for call in mocks["downloader"].download_ranges.await_args_list
+        ]
+        assert requested == expected_ranges
+        assert "Short read" not in caplog.text
+        assert lpath.read_bytes() == data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+async def test_get_file_stops_at_persisted_size_of_growing_object(
+    async_gcs, gcs_bucket_mocks, caplog, tmp_path, file_path, bucket_layout
+):
+    """
+    Tests that _get_file downloads exactly persisted_size bytes, without an
+    error, when an unfinalized object has grown past the size the MRD reported.
+    """
+    server_data = bytes(range(200))
+    persisted_size = 133
+
+    with gcs_bucket_mocks(server_data, bucket_type_val=bucket_layout) as mocks:
+        mocks["downloader"].persisted_size = persisted_size
+        lpath = tmp_path / "output.txt"
+        with caplog.at_level(logging.WARNING, logger="gcsfs"):
+            await async_gcs._get_file(file_path, str(lpath), chunksize=50)
+
+        requested = [
+            call.args[0][0][:2]
+            for call in mocks["downloader"].download_ranges.await_args_list
+        ]
+        assert requested == [(0, 50), (50, 50), (100, 33)]
+        assert "Short read" not in caplog.text
+        assert lpath.read_bytes() == server_data[:persisted_size]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+@pytest.mark.parametrize("kwargs", [{"chunksize": 50}, {}], ids=["chunked", "default"])
+async def test_get_file_fails_when_object_outgrew_info_size(
+    async_gcs, gcs_bucket_mocks, tmp_path, file_path, bucket_layout, kwargs
+):
+    """
+    Tests that _get_file raises instead of writing a truncated file when the MRD
+    has no persisted_size and the object has grown past the size _info() reports.
+    """
+    server_data = bytes(range(200))
+    info_size = 133
+
+    with gcs_bucket_mocks(server_data, bucket_type_val=bucket_layout) as mocks:
+        mocks["pool"].persisted_size = None
+        mocks["pool"].details = {"size": info_size}
+        lpath = tmp_path / "output.txt"
+        with (
+            mock.patch.object(
+                async_gcs, "_info", new_callable=mock.AsyncMock
+            ) as mock_info,
+            # _get_file_concurrent retries the ClientError; skip the real backoff.
+            mock.patch("gcsfs.retry.asyncio.sleep", new_callable=mock.AsyncMock),
+            pytest.raises(
+                aiohttp.ClientError, match="Expected 133 bytes, but only received"
+            ),
+        ):
+            mock_info.return_value = {"size": info_size}
+            await async_gcs._get_file(file_path, str(lpath), **kwargs)
+
+        assert not lpath.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+async def test_get_file_short_read_from_downloader(
+    async_gcs, gcs_bucket_mocks, caplog, tmp_path, file_path, bucket_layout
+):
+    """
+    Tests that _get_file still logs a short read, raises ClientError and removes
+    the local file when the downloader delivers fewer bytes than requested.
+    """
+    data = bytes(range(133))
+    delivered = data[:120]
+
+    async def under_deliver(read_requests, metadata=None):
+        for offset, length, buffer in read_requests:
+            buffer.write(delivered[offset : offset + length])
+
+    with gcs_bucket_mocks(data, bucket_type_val=bucket_layout) as mocks:
+        mocks["downloader"].persisted_size = len(data)
+        mocks["downloader"].download_ranges.side_effect = under_deliver
+        lpath = tmp_path / "output.txt"
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            # _get_file_concurrent retries the ClientError; skip the real backoff.
+            mock.patch("gcsfs.retry.asyncio.sleep", new_callable=mock.AsyncMock),
+            pytest.raises(
+                aiohttp.ClientError,
+                match="Expected 133 bytes, but only received 120 bytes",
+            ),
+        ):
+            await async_gcs._get_file(file_path, str(lpath), chunksize=50)
+
+        assert "Short read detected" in caplog.text
+        assert not lpath.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+@pytest.mark.parametrize("chunksize", [None, 0, -1])
+async def test_get_file_request_rejects_invalid_chunksize(
+    async_gcs, gcs_bucket_mocks, tmp_path, file_path, bucket_layout, chunksize
+):
+    """
+    Tests that _get_file_request rejects a chunksize that can never work before
+    it opens an MRD pool or the local file.
+    """
+    with gcs_bucket_mocks(json_data, bucket_type_val=bucket_layout) as mocks:
+        mocks["downloader"].persisted_size = len(json_data)
+        lpath = tmp_path / "output.txt"
+        with pytest.raises(ValueError, match="chunksize must be a positive integer"):
+            await async_gcs._get_file_request(
+                file_path, str(lpath), chunksize=chunksize
+            )
+
+        mocks["pool_cache_get"].assert_not_called()
+        assert not lpath.exists()
+
+
+@pytest.mark.asyncio
 async def test_merge_zonal_not_supported(async_gcs, zonal_write_mocks):
     """Test _merge for Zonal buckets raises NotImplementedError."""
     path = f"{TEST_ZONAL_BUCKET}/merged_file"

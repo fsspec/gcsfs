@@ -2647,6 +2647,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if os.path.isdir(lpath):
             return
 
+        chunksize = kwargs.pop("chunksize", 4096 * 32)  # 128KB default
+        if chunksize is None or chunksize <= 0:
+            raise ValueError(f"chunksize must be a positive integer, got {chunksize!r}")
+
         # Coalesce generation: URL parsed vs kwargs
         generation = path_generation or kwargs.get("generation")
         callback = callback or NoOpCallback()
@@ -2664,6 +2668,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         try:
             async with mrd_pool.get_mrd() as mrd:
                 size = mrd.persisted_size
+                size_from_mrd = size is not None
                 if size is None:
                     logger.warning(
                         f"AsyncMultiRangeDownloader (MRD) for {rpath} has no 'persisted_size'. "
@@ -2677,7 +2682,6 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 lparent = os.path.dirname(lpath) or os.curdir
                 os.makedirs(lparent, exist_ok=True)
 
-                chunksize = kwargs.get("chunksize", 4096 * 32)  # 128KB default
                 offset = 0
 
                 with open(lpath, "wb") as f2:
@@ -2685,8 +2689,19 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         if offset >= size:
                             break
 
+                        # A size from _info() can be stale while the object is
+                        # still being appended to, so only the MRD's own size
+                        # limits the last chunk. With a full chunk, bytes past
+                        # a stale size fail the size check below instead of
+                        # being cut off silently.
                         data = await zb_hns_utils.download_range(
-                            offset=offset, length=chunksize, mrd=mrd
+                            offset=offset,
+                            length=(
+                                min(chunksize, size - offset)
+                                if size_from_mrd
+                                else chunksize
+                            ),
+                            mrd=mrd,
                         )
                         if not data:
                             break
