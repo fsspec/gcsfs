@@ -2660,16 +2660,22 @@ class TestExtendedGcsFileSystemInternal:
 
     @pytest.mark.asyncio
     async def test_uses_grpc_data_path_looks_up_layout_once(self):
-        """UNKNOWN layouts are not cached, so each extra lookup would be another RPC."""
+        """The data-path check resolves the layout with a single lookup."""
         fs = ExtendedGcsFileSystem(token="anon")
-        with mock.patch.object(
-            fs,
-            "_get_bucket_layout",
-            new_callable=mock.AsyncMock,
-            return_value=BucketLayout.UNKNOWN,
-        ) as mock_get_layout:
+        with (
+            mock.patch.object(
+                fs,
+                "_get_bucket_layout",
+                new_callable=mock.AsyncMock,
+                return_value=BucketLayout.UNKNOWN,
+            ) as mock_get_layout,
+            mock.patch.object(
+                fs, "_lookup_bucket_layout", wraps=fs._lookup_bucket_layout
+            ) as lookup,
+        ):
             assert await fs._uses_grpc_data_path("unknown-layout-bucket") is False
 
+        lookup.assert_awaited_once_with("unknown-layout-bucket")
         mock_get_layout.assert_awaited_once_with("unknown-layout-bucket")
 
     @pytest.mark.asyncio

@@ -37,6 +37,10 @@ Unreleased
   fails after retries on the default endpoint now raises: during a Storage
   Control outage, the first operation on a bucket fails after about 60 s
   instead of silently using flat semantics (#1110).
+* With ``token=None`` and no default credentials, the gRPC clients of
+  ``ExtendedGcsFileSystem`` now use anonymous credentials, as they already
+  did for ``token="anon"``, instead of looking for default credentials
+  themselves on every bucket-layout lookup (#1109).
 * ``sign()`` now works with credentials that have no private key, such as
   Compute Engine and GKE Workload Identity credentials. When the credentials
   cannot sign, the URL is signed through the IAM Credentials ``signBlob`` API
