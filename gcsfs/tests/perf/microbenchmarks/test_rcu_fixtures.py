@@ -155,7 +155,7 @@ def test_prepare_files_rcu_warm_and_cold_use_http_on_emulator(
                     "_get_bucket_layout",
                     new_callable=mock.AsyncMock,
                     return_value=bucket_layout,
-                ),
+                ) as get_layout,
                 mock.patch(
                     "gcsfs.zb_hns_utils.init_aaow",
                     new_callable=mock.AsyncMock,
@@ -165,6 +165,9 @@ def test_prepare_files_rcu_warm_and_cold_use_http_on_emulator(
                 bench_conftest._prepare_files(
                     gcs, paths, file_size=64, bucket_type=bucket_type
                 )
+            # The writes saw the mocked RCU layout; otherwise the init_aaow
+            # guard above proves nothing.
+            get_layout.assert_awaited_with(TEST_BUCKET)
         finally:
             gcs.invalidate_storage_layout_cache(TEST_BUCKET)
 

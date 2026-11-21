@@ -91,7 +91,7 @@ Before routing directory-level or file-level operations, the ``ExtendedGcsFileSy
   * The caller may not read the layout. It needs ``storage.objects.list`` on the bucket.
 
   Call ``invalidate_storage_layout_cache()`` to check again, for example after granting the permission. A bucket that does not exist is looked up again on the next operation.
-* **Transient Failures:** On the default endpoint, a lookup that still fails after retries (for example during a Storage Control outage) raises the error instead of falling back. Falling back would silently change the result of HNS operations: ``mv`` of a folder would move nothing, and ``makedirs`` would create no folder.
+* **Transient Failures:** On the default endpoint, a lookup that still fails after retries (for example during a Storage Control outage) raises the error instead of falling back. Falling back would silently change the result of HNS operations: ``mv`` of a folder would move nothing, and ``makedirs`` would create no folder. Because the layout is looked up before an operation is routed, this applies to the first operation on any bucket whose layout is not cached yet, standard buckets included. The directory listing cache update after ``mv_file`` and ``rm_file`` uses only a cached layout and never waits for a lookup.
 
 Waiting for Folder Renames
 --------------------------
