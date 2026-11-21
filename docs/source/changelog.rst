@@ -7,6 +7,12 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
+* **The storage control gRPC channel used for HNS operations now sends
+  keepalive pings** (every 30 s while a call is open, 20 s to answer). A
+  connection that dies silently in the middle of a call is now replaced within
+  that call, instead of every later HNS call (``mv``, ``makedirs``, ``rm``,
+  ``info``) failing after its 60 s retry budget until the operating system gives
+  up on the socket, which can take about 15 minutes.
 * ``sign()`` now works with credentials that have no private key, such as
   Compute Engine and GKE Workload Identity credentials. When the credentials
   cannot sign, the URL is signed through the IAM Credentials ``signBlob`` API

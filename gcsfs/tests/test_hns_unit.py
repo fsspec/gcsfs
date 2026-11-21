@@ -4008,6 +4008,32 @@ async def test_get_control_plane_client_quota_project_id(
 
 
 @pytest.mark.asyncio
+async def test_get_control_plane_client_sends_keepalive_pings():
+    from gcsfs import __version__
+    from gcsfs.extended_gcsfs import USER_AGENT
+
+    with mock.patch.dict(os.environ, {"STORAGE_EMULATOR_HOST": ""}):
+        ExtendedGcsFileSystem.clear_instance_cache()
+        fs = ExtendedGcsFileSystem(project="my-project")
+
+        mock_transport_cls = mock.Mock()
+        with mock.patch.object(
+            storage_control_v2.StorageControlAsyncClient,
+            "get_transport_class",
+            return_value=mock_transport_cls,
+        ):
+            await fs._get_control_plane_client()
+
+        options = mock_transport_cls.create_channel.call_args.kwargs["options"]
+        assert options[0] == ("grpc.primary_user_agent", f"{USER_AGENT}/{__version__}")
+        options = dict(options)
+        assert options["grpc.keepalive_time_ms"] == 30000
+        assert options["grpc.keepalive_timeout_ms"] == 20000
+        assert options["grpc.http2.ping_timeout_ms"] == 20000
+        assert "grpc.keepalive_permit_without_calls" not in options
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "endpoint_url, env_updates, expected_host",
     [
