@@ -2801,94 +2801,128 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             and not fs_loop.is_closed()
         )
 
-        super().__init__(
-            gcsfs,
-            path,
-            mode,
-            block_size,
-            autocommit=autocommit,
-            cache_type=self.cache_type,
-            cache_options=effective_cache_options,
-            **kwargs,
-        )
-        self.gcsfs = gcsfs
-        self.bucket = bucket
-        self.key = key
-        self.acl = acl
-        self.consistency = consistency
-        self.checker = get_consistency_checker(consistency)
-
-        cache = getattr(self, "cache", None)
-        prefetcher = getattr(cache, "_prefetcher", None)
-        if prefetcher is not None and prefetcher.producer is not None:
-            # Wire GCSFile/ZonalFile's native async range fetcher into the prefetcher producer.
-            # Otherwise, _async_fetch_range is bypassed, split_factor is ignored, and
-            # fsspec's default fetcher performs an unnecessary asyncio.to_thread round-trip.
-            # TODO: Remove this direct override once fsspec natively supports passing an async_fetcher.
-            # Only producer uses the fetcher and producer will always be there for a prefetcher hence
-            # fetcher attributes check is not required.
-            if has_usable_fs_loop and prefetcher.loop is not fs_loop:
-                # AdaptiveReadaheadCache initializes BackgroundPrefetcher with
-                # fsspec.asyn.get_loop(). If that loop differs from gcsfs.loop
-                # (for instance, when gcsfs was given an explicit loop or a new
-                # global loop was created after fsspec.asyn.reset_lock(), as
-                # Hugging Face datasets IterableDataset._iter_pytorch does),
-                # recreate the prefetcher bound to gcsfs.loop so _async_fetch_range
-                # runs on the same event loop as the filesystem's gRPC/HTTP clients.
-                # TODO: Remove once the minimum fsspec release makes
-                # AdaptiveReadaheadCache bind BackgroundPrefetcher to fs.loop
-                # (fsspec/filesystem_spec#2292).
-                prefetcher.close()
-                from fsspec.prefetcher import BackgroundPrefetcher
-
-                prefetcher = BackgroundPrefetcher(
-                    fetcher=self._async_fetch_range,
-                    size=self.size,
-                    concurrency=effective_cache_options.get(
-                        "concurrency", self.concurrency
-                    ),
-                    max_prefetch_size=effective_cache_options.get("max_prefetch_size"),
-                    loop=fs_loop,
-                )
-                cache._prefetcher = prefetcher
-            else:
-                prefetcher.producer.fetcher = self._async_fetch_range
-
-            if hasattr(cache, "close"):
-                # TODO: Remove this disarm once fsspec adds native support for deferred or
-                # non-blocking cache teardown during GC (or accepts an async closer).
-                # Disarm standalone cache GC/close so that it does not execute sync_teardown
-                # synchronously on the GC thread (which would undermine GCSFile._defer_close).
-                # The prefetcher will instead be closed cleanly inside GCSFile._close_impl().
-                cache.close = lambda: None
-
-        if "a" in self.mode and not _supports_append:
-            warnings.warn(
-                "Append mode 'a' is not supported in GCS. Using overwrite mode instead."
+        try:
+            super().__init__(
+                gcsfs,
+                path,
+                mode,
+                block_size,
+                autocommit=autocommit,
+                cache_type=self.cache_type,
+                cache_options=effective_cache_options,
+                **kwargs,
             )
-            self.mode = self.mode.replace("a", "w")
+            self.gcsfs = gcsfs
+            self.bucket = bucket
+            self.key = key
+            self.acl = acl
+            self.consistency = consistency
+            self.checker = get_consistency_checker(consistency)
 
-        if "r" in self.mode:
-            det = self.details
-        else:
-            det = {}
-        self.content_type = (
-            content_type
-            or det.get("contentType")
-            or mimetypes.guess_type(self.path)[0]
-            or "application/octet-stream"
-        )
-        self.metadata = metadata or det.get("metadata", {})
-        self.fixed_key_metadata = _convert_fixed_key_metadata(det, from_google=True)
-        self.fixed_key_metadata.update(fixed_key_metadata or {})
-        self.kms_key_name = kms_key_name
-        self.timeout = timeout
-        _start_deferred_close_worker()
-        if mode in {"wb", "xb"}:
-            if self.blocksize < GCS_MIN_BLOCK_SIZE:
-                warnings.warn("Setting block size to minimum value, 2**18")
-                self.blocksize = GCS_MIN_BLOCK_SIZE
-            self.location = None
+            cache = getattr(self, "cache", None)
+            prefetcher = getattr(cache, "_prefetcher", None)
+            if prefetcher is not None and prefetcher.producer is not None:
+                # Wire GCSFile/ZonalFile's native async range fetcher into the prefetcher producer.
+                # Otherwise, _async_fetch_range is bypassed, split_factor is ignored, and
+                # fsspec's default fetcher performs an unnecessary asyncio.to_thread round-trip.
+                # TODO: Remove this direct override once fsspec natively supports passing an async_fetcher.
+                # Only producer uses the fetcher and producer will always be there for a prefetcher hence
+                # fetcher attributes check is not required.
+                if has_usable_fs_loop and prefetcher.loop is not fs_loop:
+                    # AdaptiveReadaheadCache initializes BackgroundPrefetcher with
+                    # fsspec.asyn.get_loop(). If that loop differs from gcsfs.loop
+                    # (for instance, when gcsfs was given an explicit loop or a new
+                    # global loop was created after fsspec.asyn.reset_lock(), as
+                    # Hugging Face datasets IterableDataset._iter_pytorch does),
+                    # recreate the prefetcher bound to gcsfs.loop so _async_fetch_range
+                    # runs on the same event loop as the filesystem's gRPC/HTTP clients.
+                    # TODO: Remove once the minimum fsspec release makes
+                    # AdaptiveReadaheadCache bind BackgroundPrefetcher to fs.loop
+                    # (fsspec/filesystem_spec#2292).
+                    cache._prefetcher = None
+                    prefetcher.close()
+                    from fsspec.prefetcher import BackgroundPrefetcher
+
+                    prefetcher = BackgroundPrefetcher(
+                        fetcher=self._async_fetch_range,
+                        size=self.size,
+                        concurrency=effective_cache_options.get(
+                            "concurrency", self.concurrency
+                        ),
+                        max_prefetch_size=effective_cache_options.get(
+                            "max_prefetch_size"
+                        ),
+                        loop=fs_loop,
+                    )
+                    cache._prefetcher = prefetcher
+                else:
+                    prefetcher.producer.fetcher = self._async_fetch_range
+
+                if hasattr(cache, "close"):
+                    # TODO: Remove this disarm once fsspec adds native support for deferred or
+                    # non-blocking cache teardown during GC (or accepts an async closer).
+                    # Disarm standalone cache GC/close so that it does not execute sync_teardown
+                    # synchronously on the GC thread (which would undermine GCSFile._defer_close).
+                    # The prefetcher will instead be closed cleanly inside GCSFile._close_impl().
+                    cache.close = lambda: None
+
+            if "a" in self.mode and not _supports_append:
+                warnings.warn(
+                    "Append mode 'a' is not supported in GCS. Using overwrite mode instead."
+                )
+                self.mode = self.mode.replace("a", "w")
+
+            if "r" in self.mode:
+                det = self.details
+            else:
+                det = {}
+            self.content_type = (
+                content_type
+                or det.get("contentType")
+                or mimetypes.guess_type(self.path)[0]
+                or "application/octet-stream"
+            )
+            self.metadata = metadata or det.get("metadata", {})
+            self.fixed_key_metadata = _convert_fixed_key_metadata(det, from_google=True)
+            self.fixed_key_metadata.update(fixed_key_metadata or {})
+            self.kms_key_name = kms_key_name
+            self.timeout = timeout
+            _start_deferred_close_worker()
+            if mode in {"wb", "xb"}:
+                if self.blocksize < GCS_MIN_BLOCK_SIZE:
+                    warnings.warn("Setting block size to minimum value, 2**18")
+                    self.blocksize = GCS_MIN_BLOCK_SIZE
+                self.location = None
+        except BaseException:
+            self._abort_open()
+            raise
+
+    def _abort_open(self):
+        """Mark a failed open as closed and release any cache resources it started."""
+        self.closed = True
+        cache = getattr(self, "cache", None)
+        self.cache = None
+        if cache is None:
+            return
+        prefetcher = getattr(cache, "_prefetcher", None)
+        if prefetcher is not None:
+            cache._prefetcher = None
+            try:
+                prefetcher.close()
+            except Exception as e:
+                logger.warning(
+                    "Failed to close prefetcher during failed initialization cleanup: %s",
+                    e,
+                )
+        close = getattr(cache, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as e:
+                logger.warning(
+                    "Failed to close cache during failed initialization cleanup: %s",
+                    e,
+                )
 
     def _reopen_kwargs(self):
         """Keyword arguments that reopen this file with the options it was opened with."""

@@ -197,16 +197,7 @@ class ZonalFile(GCSFile):
                 handoff["aborted"] = True
                 if self.mrd_pool is None:
                     self.mrd_pool = handoff["pool"]
-            self.closed = True
-            # GCSFile.__init__ leaves the prefetcher to _close_impl(), which a
-            # file marked closed never reaches, so stop it here. Like
-            # _close_impl(), rely on BackgroundPrefetcher.close() to log its
-            # own teardown errors.
-            cache = getattr(self, "cache", None)
-            prefetcher = getattr(cache, "_prefetcher", None)
-            if prefetcher is not None:
-                cache._prefetcher = None
-                prefetcher.close()
+            self._abort_open()
             if self.mrd_pool is not None:
                 pool, self.mrd_pool = self.mrd_pool, None
                 try:

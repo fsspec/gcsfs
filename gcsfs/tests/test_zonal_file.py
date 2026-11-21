@@ -2103,7 +2103,7 @@ def test_zonal_file_failed_init_closes_mrd_pool(mock_gcsfs):
     prefetcher_close.assert_called_once()
     assert zf.mrd_pool is None
     assert zf.closed is True
-    assert zf.cache._prefetcher is None
+    assert zf.cache is None
 
 
 def test_zonal_file_failed_init_preserves_exception_when_pool_close_fails(
