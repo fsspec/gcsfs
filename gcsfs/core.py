@@ -450,15 +450,18 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         proxy settings.
     requests_timeout: float or aiohttp.ClientTimeout, optional
         Timeout of each HTTP request. A number is aiohttp's total timeout
-        for the request, in seconds. If not given, the ``timeout`` in
-        ``session_kwargs`` is used, else a 30 s connect and 60 s read
-        timeout with no total limit (``DEFAULT_REQUESTS_TIMEOUT``): a
-        response that stops arriving fails, while a long transfer that
-        keeps receiving data does not. Connect and read timeouts
-        (``aiohttp.ServerTimeoutError``) are retried like other transient
-        errors; a total timeout, including a numeric ``requests_timeout``,
-        raises ``TimeoutError`` and is not retried. Pass
-        ``aiohttp.ClientTimeout()`` for no timeout at all.
+        for the request, in seconds; an ``aiohttp.ClientTimeout`` is used
+        as-is (any field left ``None`` has no limit, so
+        ``aiohttp.ClientTimeout()`` disables all timeouts). If not given,
+        the ``timeout`` in ``session_kwargs`` is used, else a 30 s
+        ``sock_connect`` and 60 s ``sock_read`` timeout with no total limit
+        (``DEFAULT_REQUESTS_TIMEOUT``): a response that stops arriving
+        fails, while a long transfer that keeps receiving data does not.
+        Connect and read timeouts (``aiohttp.ServerTimeoutError``) are
+        retried like other transient errors; a total timeout, including a
+        numeric ``requests_timeout``, raises ``TimeoutError`` and is not
+        retried. Synchronous calls wrap an unrecovered timeout in
+        ``fsspec.FSTimeoutError`` (a ``TimeoutError`` subclass).
     endpoint_url: str
         If given, use this URL (format protocol://host:port , *without* any
         path part) for communication. If not given, defaults to the value
