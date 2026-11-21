@@ -13,6 +13,7 @@ test_zonal.py or test_zonal_file.py.
 
 import asyncio
 import contextlib
+import logging
 import os
 import sys
 import uuid
@@ -22,10 +23,13 @@ import fsspec
 import pytest
 from fsspec.asyn import FSTimeoutError
 from google.api_core import exceptions as api_exceptions
+from google.auth.credentials import AnonymousCredentials
 from google.cloud import storage_control_v2
+from google.oauth2.credentials import Credentials
 from google.rpc import code_pb2
 
 from gcsfs import core as gcsfs_core
+from gcsfs.credentials import GoogleCredentials
 from gcsfs.extended_gcsfs import (
     DEFAULT_HNS_RM_CONCURRENCY,
     BucketLayout,
@@ -43,8 +47,6 @@ from gcsfs.tests.settings import TEST_HNS_BUCKET
 from gcsfs.tests.utils import is_real_gcs
 
 pytestmark = [requires_hns]
-
-ORIGINAL_GET_BUCKET_LAYOUT = ExtendedGcsFileSystem._get_bucket_layout
 
 FIXED_UUID = uuid.UUID("00000000-0000-0000-0000-000000000000")
 FIXED_REQUEST_ID = str(FIXED_UUID)
@@ -135,6 +137,11 @@ def gcs_hns_mocks():
                 patch_target_super_rm, new_callable=mock.AsyncMock
             ) as mock_super_rm,
             mock.patch("gcsfs.extended_gcsfs.uuid.uuid4", return_value=FIXED_UUID),
+            # Listings cache the layout they look up; dircache updates after a
+            # move or delete read only that cached layout.
+            mock.patch.dict(
+                gcsfs._storage_layout_cache, {TEST_HNS_BUCKET: bucket_type_val}
+            ),
         ):
             mock_async_lookup_bucket_layout.return_value = bucket_type_val
             mock_sync_lookup_bucket_layout.return_value = bucket_type_val
@@ -1260,11 +1267,12 @@ class TestExtendedGcsFileSystemMvFile:
         fs.dircache[TEST_HNS_BUCKET] = [{"name": dest_grandparent, "type": "directory"}]
 
         response = {"bucket": TEST_HNS_BUCKET, "name": "destgp/p/a.txt", "size": 5}
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
-            await fs._mv_file_cache_update(src, dst, response)
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        await fs._mv_file_cache_update(src, dst, response)
 
         # The source entry is dropped in place (removal never affects ancestors).
-        assert src not in [e["name"] for e in fs.dircache.get(src_parent, [])]
+        assert src_parent in fs.dircache
+        assert src not in [e["name"] for e in fs.dircache[src_parent]]
         # The destination's ancestors are invalidated, since the move may have
         # created dest_parent.
         assert dest_grandparent not in fs.dircache
@@ -1289,8 +1297,8 @@ class TestExtendedGcsFileSystemMvFile:
         ]
 
         response = {"bucket": TEST_HNS_BUCKET, "name": "parent/dst.txt", "size": 1}
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
-            await fs._mv_file_cache_update(src, dst, response)
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        await fs._mv_file_cache_update(src, dst, response)
 
         entries = fs.dircache[parent]
         names = [e["name"] for e in entries]
@@ -1323,10 +1331,8 @@ class TestExtendedGcsFileSystemRmFile:
         fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
         fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
 
-        with (
-            mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True),
-            mock.patch.object(fs, "_call", new_callable=mock.AsyncMock),
-        ):
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        with mock.patch.object(fs, "_call", new_callable=mock.AsyncMock):
             await fs._rm_file(path)
 
         # The immediate parent's listing is updated, not cleared.
@@ -1354,8 +1360,8 @@ class TestExtendedGcsFileSystemRmFile:
         fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
         fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
 
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=False):
-            await fs._rm_file_cache_update(path)
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD
+        await fs._rm_file_cache_update(path)
 
         # The base behavior invalidates the parent and walks up to the root.
         assert parent not in fs.dircache
@@ -1380,8 +1386,8 @@ class TestExtendedGcsFileSystemRmFile:
         fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
         fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
 
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
-            await fs._rm_files_cache_update([path1, path2])
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        await fs._rm_files_cache_update([path1, path2])
 
         # The shared parent's listing keeps its surviving entry.
         assert parent in fs.dircache
@@ -1407,8 +1413,8 @@ class TestExtendedGcsFileSystemRmFile:
         fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
         fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
 
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=False):
-            await fs._rm_files_cache_update([path])
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD
+        await fs._rm_files_cache_update([path])
 
         assert parent not in fs.dircache
         assert grandparent not in fs.dircache
@@ -1449,10 +1455,8 @@ class TestExtendedGcsFileSystemRmFile:
         ).encode()
         mock_headers = {"Content-Type": f"multipart/mixed; boundary={boundary}"}
 
-        with (
-            mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True),
-            mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as mock_call,
-        ):
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        with mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as mock_call:
             mock_call.return_value = (mock_headers, mock_response_content)
             out = await fs._rm_files([ok_path, bad_path])
 
@@ -1466,6 +1470,80 @@ class TestExtendedGcsFileSystemRmFile:
         names = [e["name"] for e in fs.dircache[parent]]
         assert ok_path not in names
         assert bad_path in names
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("op", ["mv_file", "rm_file", "rm_files"])
+    async def test_cache_update_never_looks_up_layout(self, op):
+        """The cache update after a move or delete never looks the layout up:
+        without a cached layout it invalidates broadly, which is correct for
+        every bucket. A lookup there would hold the completed move or delete
+        for the whole retry budget during a Storage Control outage."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        parent = f"{TEST_HNS_BUCKET}/parent"
+        src = f"{parent}/a.txt"
+        fs.dircache[parent] = [{"name": src, "type": "file"}]
+        fs.dircache[TEST_HNS_BUCKET] = [{"name": parent, "type": "directory"}]
+
+        with (
+            mock.patch.object(
+                fs, "_lookup_bucket_layout", new_callable=mock.AsyncMock
+            ) as lookup,
+            mock.patch.object(
+                fs, "_get_bucket_layout", new_callable=mock.AsyncMock
+            ) as get_layout,
+            mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as mock_call,
+        ):
+            if op == "mv_file":
+                mock_call.return_value = {
+                    "bucket": TEST_HNS_BUCKET,
+                    "name": "parent/b.txt",
+                    "size": 1,
+                }
+                await fs._mv_file(src, f"{parent}/b.txt")
+            elif op == "rm_file":
+                await fs._rm_file(src)
+            else:
+                boundary = "==========7330845974216740156=="
+                mock_call.return_value = (
+                    {"Content-Type": f"multipart/mixed; boundary={boundary}"},
+                    (
+                        f"\n--{boundary}\nContent-Type: application/http\n\n"
+                        f"HTTP/1.1 204 No Content\n\n--{boundary}--\n"
+                    ).encode(),
+                )
+                await fs._rm_files([src])
+
+        lookup.assert_not_awaited()
+        get_layout.assert_not_awaited()
+        assert parent not in fs.dircache
+        assert TEST_HNS_BUCKET not in fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_cache_update_uses_cached_layout_per_bucket(self):
+        """A batch delete across buckets updates the bucket cached as HNS in
+        place and invalidates the bucket without a cached layout broadly."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        hns_parent = f"{TEST_HNS_BUCKET}/parent"
+        other_parent = "other-bucket/parent"
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        fs.dircache[hns_parent] = [
+            {"name": f"{hns_parent}/a.txt", "type": "file"},
+            {"name": f"{hns_parent}/keep.txt", "type": "file"},
+        ]
+        fs.dircache[other_parent] = [{"name": f"{other_parent}/b.txt", "type": "file"}]
+
+        with mock.patch.object(
+            fs, "_lookup_bucket_layout", new_callable=mock.AsyncMock
+        ) as lookup:
+            await fs._rm_files_cache_update(
+                [f"{hns_parent}/a.txt", f"{other_parent}/b.txt"]
+            )
+
+        lookup.assert_not_awaited()
+        assert [e["name"] for e in fs.dircache[hns_parent]] == [
+            f"{hns_parent}/keep.txt"
+        ]
+        assert other_parent not in fs.dircache
 
 
 class TestExtendedGcsFileSystemWriteFileCacheUpdate:
@@ -2540,24 +2618,16 @@ class TestExtendedGcsFileSystemInternal:
     @pytest.mark.asyncio
     async def test_is_bucket_hns_enabled_exception_handling(self):
         """
-        Verifies that if _lookup_bucket_layout fails, we log a warning and return False
-        (fail-open to non-HNS behavior).
+        Verifies that if _lookup_bucket_layout fails, the error propagates
+        instead of silently treating the bucket as non-HNS.
         """
         fs = ExtendedGcsFileSystem(token="anon")
 
-        with (
-            mock.patch.object(
-                fs, "_lookup_bucket_layout", side_effect=Exception("API Error")
-            ),
-            mock.patch("gcsfs.extended_gcsfs.logger") as mock_logger,
+        with mock.patch.object(
+            fs, "_lookup_bucket_layout", side_effect=Exception("API Error")
         ):
-            assert await fs._is_bucket_hns_enabled("error-bucket") is False
-
-            # Verify warning was logged
-            mock_logger.warning.assert_called_once()
-            assert (
-                "Could not determine if bucket" in mock_logger.warning.call_args[0][0]
-            )
+            with pytest.raises(Exception, match="API Error"):
+                await fs._is_bucket_hns_enabled("error-bucket")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -2590,16 +2660,22 @@ class TestExtendedGcsFileSystemInternal:
 
     @pytest.mark.asyncio
     async def test_uses_grpc_data_path_looks_up_layout_once(self):
-        """UNKNOWN layouts are not cached, so each extra lookup would be another RPC."""
+        """The data-path check resolves the layout with a single lookup."""
         fs = ExtendedGcsFileSystem(token="anon")
-        with mock.patch.object(
-            fs,
-            "_get_bucket_layout",
-            new_callable=mock.AsyncMock,
-            return_value=BucketLayout.UNKNOWN,
-        ) as mock_get_layout:
+        with (
+            mock.patch.object(
+                fs,
+                "_get_bucket_layout",
+                new_callable=mock.AsyncMock,
+                return_value=BucketLayout.UNKNOWN,
+            ) as mock_get_layout,
+            mock.patch.object(
+                fs, "_lookup_bucket_layout", wraps=fs._lookup_bucket_layout
+            ) as lookup,
+        ):
             assert await fs._uses_grpc_data_path("unknown-layout-bucket") is False
 
+        lookup.assert_awaited_once_with("unknown-layout-bucket")
         mock_get_layout.assert_awaited_once_with("unknown-layout-bucket")
 
     @pytest.mark.asyncio
@@ -4188,19 +4264,56 @@ class TestStorageControlRetryExecution:
 class TestExtendedGcsFileSystemBucketLayout:
     """Unit tests for ExtendedGcsFileSystem _get_bucket_layout and grpc_client."""
 
-    @pytest.fixture(autouse=True)
-    def _mock_get_bucket_layout_on_emulator(self):
-        """Override the global session mock to allow testing the real _get_bucket_layout."""
-        with mock.patch(
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_layout",
-            new=ORIGINAL_GET_BUCKET_LAYOUT,
-        ):
-            yield
-
     @pytest.fixture
     def extended_gcsfs(self):
         ExtendedGcsFileSystem.clear_instance_cache()
-        return ExtendedGcsFileSystem(token="anon")
+        # The default GCS endpoint, where the lookup is retried and its
+        # transient failures raise; emulator endpoints skip or try once.
+        return ExtendedGcsFileSystem(
+            token="anon",
+            endpoint_url="https://storage.googleapis.com",
+            skip_instance_cache=True,
+        )
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _layout_rpc(fs, **get_storage_layout):
+        """Mock the control client; yields (client getter, get_storage_layout)."""
+        with mock.patch.object(
+            fs, "_get_control_plane_client", new_callable=mock.AsyncMock
+        ) as getter:
+            rpc = mock.AsyncMock(**get_storage_layout)
+            getter.return_value.get_storage_layout = rpc
+            yield getter, rpc
+
+    @pytest.mark.parametrize("token", [None, "anon"])
+    def test_anonymous_access_uses_anonymous_credentials(self, token):
+        # With token=None, gcsfs falls back to anonymous access when no other
+        # method works (#1109). The gRPC clients must not then look for
+        # default credentials themselves.
+        with contextlib.ExitStack() as stack:
+            for method in (
+                "_connect_google_default",
+                "_connect_cache",
+                "_connect_cloud",
+            ):
+                stack.enter_context(
+                    mock.patch.object(
+                        GoogleCredentials, method, side_effect=ValueError("unavailable")
+                    )
+                )
+            fs = ExtendedGcsFileSystem(
+                token=token,
+                endpoint_url="https://storage.googleapis.com",
+                skip_instance_cache=True,
+            )
+        assert fs.credentials.credentials is None
+        assert isinstance(fs.credential, AnonymousCredentials)
+
+    def test_supplied_credentials_are_passed_to_grpc(self):
+        creds = Credentials(token="token")
+        fs = ExtendedGcsFileSystem(token=creds, skip_instance_cache=True)
+        assert fs.credential is creds
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -4292,78 +4405,197 @@ class TestExtendedGcsFileSystemBucketLayout:
             )
 
     @pytest.mark.asyncio
-    async def test_get_bucket_layout_not_found(self, extended_gcsfs, caplog):
-        import logging
-
-        fs = extended_gcsfs
-
-        with mock.patch.object(
-            fs, "_get_control_plane_client", new_callable=mock.AsyncMock
-        ) as mock_client_getter:
-            mock_client = mock_client_getter.return_value
-            mock_client.get_storage_layout = mock.AsyncMock(
-                side_effect=api_exceptions.NotFound("Not Found")
+    @pytest.mark.parametrize("emulator_host", [None, "localhost:4443"])
+    async def test_layout_lookup_skips_plain_http_endpoint(
+        self, monkeypatch, emulator_host
+    ):
+        # The control channel always uses TLS, so it can never reach an
+        # http:// endpoint such as fake-gcs-server: no RPC, nothing to retry.
+        if emulator_host:
+            monkeypatch.setenv("STORAGE_EMULATOR_HOST", emulator_host)
+            fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        else:
+            fs = ExtendedGcsFileSystem(
+                token="anon",
+                endpoint_url="http://localhost:4443",
+                skip_instance_cache=True,
             )
-
-            with caplog.at_level(logging.WARNING, logger="gcsfs"):
-                bucket_layout = await fs._get_bucket_layout("missing-bucket")
-                assert bucket_layout == BucketLayout.UNKNOWN
-                assert "detect bucket layout" in caplog.text
+        with self._layout_rpc(fs) as (getter, _):
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+        getter.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_get_bucket_layout_general_exception(self, extended_gcsfs, caplog):
-        import logging
-
-        fs = extended_gcsfs
-
-        with mock.patch.object(
-            fs, "_get_control_plane_client", new_callable=mock.AsyncMock
-        ) as mock_client_getter:
-            mock_client = mock_client_getter.return_value
-            mock_client.get_storage_layout = mock.AsyncMock(
-                side_effect=Exception("Error")
-            )
-
-            with caplog.at_level(logging.WARNING, logger="gcsfs"):
-                bucket_layout = await fs._get_bucket_layout("error-bucket")
-                assert bucket_layout == BucketLayout.UNKNOWN
-                assert "Could not determine bucket layout" in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_lookup_bucket_layout_caches_known_and_skips_unknown(
-        self, extended_gcsfs
+    @pytest.mark.parametrize(
+        "error",
+        [
+            api_exceptions.PermissionDenied("denied"),
+            api_exceptions.Unauthenticated(
+                "caller does not have storage.objects.list access"
+            ),
+            api_exceptions.InvalidArgument("bad request"),
+            api_exceptions.MethodNotImplemented("not implemented"),
+        ],
+    )
+    async def test_layout_lookup_caches_definitive_errors(
+        self, extended_gcsfs, error, caplog
     ):
         fs = extended_gcsfs
-        fs.invalidate_storage_layout_cache()
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            self._layout_rpc(fs, side_effect=error) as (_, rpc),
+        ):
+            for _ in range(3):
+                assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+        rpc.assert_awaited_once()
+        # One warning, carrying the server's own message (which names a
+        # missing permission when that is the cause).
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert str(error) in warnings[0].getMessage()
 
-        with mock.patch.object(
-            fs,
-            "_get_bucket_layout",
-            new_callable=mock.AsyncMock,
-            side_effect=[
-                BucketLayout.UNKNOWN,
-                layouts.STANDARD_HIERARCHICAL,
-            ],
-        ) as mock_get_layout:
-            # First lookup returns UNKNOWN and should not cache
-            res1 = await fs._lookup_bucket_layout("transient-bucket")
-            assert res1 == BucketLayout.UNKNOWN
-            assert "transient-bucket" not in fs._storage_layout_cache
-            assert mock_get_layout.await_count == 1
+    @pytest.mark.asyncio
+    async def test_layout_lookup_ignores_empty_bucket(self, extended_gcsfs):
+        # Root and bucket-level glob paths split to bucket "": there is no
+        # bucket to look up.
+        fs = extended_gcsfs
+        with self._layout_rpc(fs) as (getter, _):
+            assert await fs._lookup_bucket_layout("") == BucketLayout.UNKNOWN
+        getter.assert_not_awaited()
+        assert "" not in fs._storage_layout_cache
 
-            # Second lookup retries _get_bucket_layout and caches the known layout
-            res2 = await fs._lookup_bucket_layout("transient-bucket")
-            assert res2 == layouts.STANDARD_HIERARCHICAL
-            assert (
-                fs._storage_layout_cache["transient-bucket"]
-                == layouts.STANDARD_HIERARCHICAL
-            )
-            assert mock_get_layout.await_count == 2
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "endpoint_url",
+        [
+            "https://storage.googleapis.com",
+            # Only the Storage Control API answers NotFound, so a missing
+            # bucket is not cached on other endpoints either.
+            "https://storage.us-central1.rep.googleapis.com",
+        ],
+    )
+    async def test_layout_lookup_rechecks_missing_bucket(self, endpoint_url, caplog):
+        # A missing bucket is not remembered, so a bucket created later is
+        # detected on the next operation.
+        fs = ExtendedGcsFileSystem(
+            token="anon", endpoint_url=endpoint_url, skip_instance_cache=True
+        )
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            self._layout_rpc(fs, side_effect=api_exceptions.NotFound("nf")) as (
+                _,
+                rpc,
+            ),
+        ):
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+        assert rpc.await_count == 2
+        assert "b" not in fs._storage_layout_cache
+        # The caller's own request reports the missing bucket.
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
-            # Third lookup hits the cache without calling _get_bucket_layout again
-            res3 = await fs._lookup_bucket_layout("transient-bucket")
-            assert res3 == layouts.STANDARD_HIERARCHICAL
-            assert mock_get_layout.await_count == 2
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "endpoint_url",
+        [
+            "https://storage.googleapis.com",
+            "https://storage.googleapis.com/",
+            "https://storage.googleapis.com:443",
+            "https://storage.googleapis.com:443/",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "error",
+        [
+            api_exceptions.RetryError("budget exhausted", cause=None),
+            api_exceptions.ServiceUnavailable("unavailable"),
+            api_exceptions.DeadlineExceeded("deadline"),
+            api_exceptions.Unauthenticated("Invalid Credentials"),
+            asyncio.TimeoutError(),
+        ],
+    )
+    async def test_layout_lookup_default_endpoint_retries_and_raises_transient(
+        self, endpoint_url, error, caplog
+    ):
+        fs = ExtendedGcsFileSystem(
+            token="anon", endpoint_url=endpoint_url, skip_instance_cache=True
+        )
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            self._layout_rpc(fs, side_effect=error) as (_, rpc),
+        ):
+            with pytest.raises(type(error)):
+                await fs._lookup_bucket_layout("b")
+        assert rpc.await_args.kwargs["retry"] is not None
+        assert "b" not in fs._storage_layout_cache
+        # The raised gapic error does not say why a plain read or write failed:
+        # the warning names the bucket, the lookup and the opt-out.
+        (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+        message = warning.getMessage()
+        assert "bucket b" in message
+        assert "Storage Control" in message
+        assert "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=false" in message
+
+    @pytest.mark.asyncio
+    async def test_layout_lookup_custom_endpoint_single_attempt(self):
+        # A regional endpoint does not serve Storage Control and answers 500.
+        fs = ExtendedGcsFileSystem(
+            token="anon",
+            endpoint_url="https://storage.us-central1.rep.googleapis.com",
+            skip_instance_cache=True,
+        )
+        error = api_exceptions.InternalServerError("http2 header status: 400")
+        with self._layout_rpc(fs, side_effect=error) as (_, rpc):
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+        rpc.assert_awaited_once()
+        assert rpc.await_args.kwargs["retry"] is None
+
+    @pytest.mark.asyncio
+    async def test_get_bucket_layout_propagates_non_api_errors(self, extended_gcsfs):
+        fs = extended_gcsfs
+        with self._layout_rpc(fs, side_effect=ValueError("bug")):
+            with pytest.raises(ValueError):
+                await fs._lookup_bucket_layout("b")
+
+    @pytest.mark.asyncio
+    async def test_lookup_bucket_layout_caches_known_layout(self, extended_gcsfs):
+        fs = extended_gcsfs
+        response = storage_control_v2.StorageLayout(
+            location_type="region", hierarchical_namespace={"enabled": True}
+        )
+        with self._layout_rpc(fs, return_value=response) as (_, rpc):
+            assert await fs._lookup_bucket_layout("b") == layouts.STANDARD_HIERARCHICAL
+            assert await fs._lookup_bucket_layout("b") == layouts.STANDARD_HIERARCHICAL
+        rpc.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_hns_ops_raise_on_transient_layout_lookup(self, extended_gcsfs):
+        # During a Storage Control outage, HNS operations must fail rather
+        # than run with flat-bucket semantics (mv moving nothing, makedirs
+        # creating no folder, rm leaving folders behind).
+        fs = extended_gcsfs
+        outage = api_exceptions.RetryError("budget exhausted", cause=None)
+        with (
+            self._layout_rpc(fs, side_effect=outage),
+            mock.patch.object(
+                fs, "_exists", new_callable=mock.AsyncMock, return_value=True
+            ),
+            mock.patch.object(
+                gcsfs_core.GCSFileSystem, "_mv", new_callable=mock.AsyncMock
+            ) as flat_mv,
+            mock.patch.object(
+                gcsfs_core.GCSFileSystem, "_rm", new_callable=mock.AsyncMock
+            ) as flat_rm,
+        ):
+            with pytest.raises(api_exceptions.RetryError):
+                await fs._mv("b/d1", "b/d2")
+            with pytest.raises(api_exceptions.RetryError):
+                await fs._makedirs("b/x/y")
+            with pytest.raises(api_exceptions.RetryError):
+                await fs._rm("b/d1", recursive=True)
+        flat_mv.assert_not_awaited()
+        flat_rm.assert_not_awaited()
 
     def test_invalidate_storage_layout_cache_single_bucket(self, extended_gcsfs):
         fs = extended_gcsfs
@@ -4410,6 +4642,54 @@ class TestExtendedGcsFileSystemBucketLayout:
 
             assert await fs._lookup_bucket_layout("bucket") == layouts.STANDARD
             assert mock_get_layout.await_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "op", ["rmdir", "mkdir_bucket", "mkdir_folder_creating_bucket"]
+    )
+    async def test_bucket_create_and_delete_drop_cached_layout(
+        self, extended_gcsfs, op
+    ):
+        # A bucket created again under the same name may have another layout;
+        # keeping the old one would run HNS operations with flat semantics
+        # (e.g. makedirs creating no folder).
+        fs = extended_gcsfs
+        fs._storage_layout_cache["b"] = layouts.STANDARD
+        with (
+            mock.patch.object(
+                gcsfs_core.GCSFileSystem, "_mkdir", new_callable=mock.AsyncMock
+            ),
+            mock.patch.object(
+                gcsfs_core.GCSFileSystem, "_rmdir", new_callable=mock.AsyncMock
+            ),
+            mock.patch.object(
+                fs, "_exists", new_callable=mock.AsyncMock, return_value=False
+            ),
+            mock.patch.object(fs, "_create_hns_folder", new_callable=mock.AsyncMock),
+        ):
+            if op == "rmdir":
+                await fs._rmdir("b")
+            elif op == "mkdir_bucket":
+                await fs._mkdir("b", enable_hierarchical_namespace=True)
+            else:
+                await fs._mkdir(
+                    "b/dir", create_parents=True, enable_hierarchical_namespace=True
+                )
+        assert "b" not in fs._storage_layout_cache
+
+    @pytest.mark.asyncio
+    async def test_failed_bucket_create_keeps_cached_layout(self, extended_gcsfs):
+        fs = extended_gcsfs
+        fs._storage_layout_cache["b"] = layouts.STANDARD
+        with mock.patch.object(
+            gcsfs_core.GCSFileSystem,
+            "_mkdir",
+            new_callable=mock.AsyncMock,
+            side_effect=FileExistsError("b"),
+        ):
+            with pytest.raises(FileExistsError):
+                await fs._mkdir("b")
+        assert fs._storage_layout_cache["b"] == layouts.STANDARD
 
     def test_bucket_layout_presets(self):
         assert BucketLayout.UNKNOWN == BucketLayout(

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 from glob import has_magic
 from typing import ClassVar
+from urllib.parse import urlsplit
 
 import aiohttp
 import fsspec
@@ -36,13 +37,18 @@ from gcsfs.concurrency import split_range
 from gcsfs.core import (
     GCSFile,
     GCSFileSystem,
+    _gcp_universe_domain,
     _get_prefetcher_and_cache_config,
     _location,
     _resolve_generation_match,
     _validate_rm_concurrency,
 )
 from gcsfs.poller import poll_lro, unwrap_operation_result
-from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
+from gcsfs.retry import (
+    DEFAULT_RETRY_CONFIG,
+    get_storage_control_retry_config,
+    is_transient_exception,
+)
 from gcsfs.telemetry.grpc import ControlPlaneTelemetryInterceptor
 from gcsfs.telemetry.wrapper import (
     _gcs_sync_wrapper,
@@ -119,6 +125,48 @@ class BucketLayout:
 BucketLayout.UNKNOWN = BucketLayout(
     StorageClass.UNKNOWN, CachingTier.NONE, NamespaceLayout.UNKNOWN
 )
+
+
+def _layout_from_response(response):
+    """The ``BucketLayout`` described by a ``get_storage_layout`` response."""
+    if response.location_type == "zone":
+        storage_class = StorageClass.RAPID
+    else:
+        storage_class = StorageClass.STANDARD
+
+    if response.location_type == "zone" or (
+        response.hierarchical_namespace and response.hierarchical_namespace.enabled
+    ):
+        namespace_layout = NamespaceLayout.HIERARCHICAL
+    else:
+        namespace_layout = NamespaceLayout.NON_HIERARCHICAL
+
+    rapid_cache_info = getattr(response, "rapid_cache_info", None)
+    cache_type = getattr(rapid_cache_info, "cache_type", "") if rapid_cache_info else ""
+    if cache_type == "rapid-cache-ultra":
+        caching_tier = CachingTier.RAPID_CACHE_ULTRA
+    elif cache_type == "rapid-cache":
+        caching_tier = CachingTier.RAPID_CACHE
+    else:
+        caching_tier = CachingTier.NONE
+
+    return BucketLayout(
+        storage_class=storage_class,
+        caching_tier=caching_tier,
+        namespace_layout=namespace_layout,
+    )
+
+
+def _is_default_storage_endpoint(location):
+    """Whether ``location`` is the default GCS endpoint, ``https://storage.{universe}``
+    (an explicit port 443 or a trailing slash included)."""
+    url = urlsplit(location)
+    return (
+        url.scheme == "https"
+        and url.hostname == f"storage.{_gcp_universe_domain()}"
+        and url.port in (None, 443)
+        and url.path in ("", "/")
+    )
 
 
 class RapidCacheUltraDisabledError(OSError):
@@ -274,11 +322,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # We unwrap the nested credentials here because self.credentials is a GCSFS wrapper,
         # but the clients expect the underlying google.auth credentials object.
         self.credential = self.credentials.credentials
-        # When token="anon", self.credentials.credentials is None. This is
-        # often used for testing with emulators. However, the gRPC and storage
-        # control clients require a credentials object for initialization.
-        # We explicitly use AnonymousCredentials() to allow unauthenticated access.
-        if self.credentials.token == "anon":
+        # GoogleCredentials holds None whenever it resolved to anonymous access:
+        # token="anon", or token=None when no other method works. The HTTP path
+        # then sends no credentials (GoogleCredentials.maybe_refresh), so give the
+        # gRPC and storage control clients AnonymousCredentials(); with None they
+        # would look for default credentials themselves and fail without them.
+        if self.credential is None:
             self.credential = AnonymousCredentials()
         self._storage_layout_cache = {}
         self._memmove_executor = ThreadPoolExecutor(
@@ -426,16 +475,20 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             self._grpc_client = None
 
     async def _lookup_bucket_layout(self, bucket):
+        if not bucket:
+            # Root and bucket-level glob paths have no bucket to look up.
+            return BucketLayout.UNKNOWN
         if bucket in self._storage_layout_cache:
             return self._storage_layout_cache[bucket]
-        bucket_layout = await self._get_bucket_layout(bucket)
-        # Don't cache UNKNOWN storage class.
-        # This ensures that subsequent operations will retry the lookup,
-        # allowing it to recover when the transient error resolves.
-        if bucket_layout.storage_class == StorageClass.UNKNOWN:
-            return bucket_layout
+        try:
+            bucket_layout = await self._get_bucket_layout(bucket)
+        except api_exceptions.NotFound:
+            # Not cached: a bucket created later must still be detected. The
+            # caller's own request reports the missing bucket.
+            logger.debug(f"Bucket {bucket} not found; using standard bucket behavior.")
+            return BucketLayout.UNKNOWN
         self._storage_layout_cache[bucket] = bucket_layout
-        return self._storage_layout_cache[bucket]
+        return bucket_layout
 
     # Not covered by mirror_gcs_methods (name doesn't follow the `_x` -> `x` convention).
     _sync_lookup_bucket_layout = _gcs_sync_wrapper(_lookup_bucket_layout)
@@ -445,13 +498,16 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         The layout of each bucket (zonal, hierarchical namespace, Rapid Cache
         Ultra) is looked up the first time this filesystem instance uses the
-        bucket. It stays cached until it is invalidated here, or until an
-        appendable write to a Rapid Cache Ultra bucket fails to open and the
-        re-checked layout no longer reports Rapid Cache Ultra. Call this method
-        after enabling or disabling Rapid Cache Ultra on a bucket that this
-        instance already used, so that later reads and writes pick the
-        matching data path. It only clears in-memory state and sends no
-        request.
+        bucket. It stays cached until it is invalidated here, until this
+        instance creates or deletes the bucket, or until an appendable write
+        to a Rapid Cache Ultra bucket fails to open and the re-checked layout
+        no longer reports Rapid Cache Ultra (or finds the bucket missing).
+        Call this method after enabling or disabling Rapid Cache Ultra on a
+        bucket that this instance already used, so that later reads and
+        writes pick the matching data path. It only clears in-memory state and
+        sends no request. Until the next lookup, ``mv_file`` and ``rm_file``
+        update the listing cache by invalidating the affected directories
+        instead of editing them in place.
 
         Parameters
         ----------
@@ -467,57 +523,71 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         self._storage_layout_cache.pop(bucket_name, None)
 
     async def _get_bucket_layout(self, bucket):
+        """Look up the layout of ``bucket`` with the Storage Control API.
+
+        Falls back to ``BucketLayout.UNKNOWN`` (standard bucket behavior), which
+        the caller caches, when the lookup cannot work or retrying would not
+        change the answer:
+
+        * a plain ``http://`` endpoint (e.g. an emulator): the control channel
+          always uses TLS, so the lookup cannot work and is not attempted;
+        * an endpoint other than the default GCS one, which may not serve the
+          Storage Control API: one attempt, and any API error other than
+          ``NotFound``, or a timeout, falls back;
+        * on the default endpoint, any non-transient API error other than
+          ``NotFound``, e.g. missing permission.
+
+        ``NotFound`` is raised on every endpoint: only the Storage Control API
+        answers it (an endpoint that does not serve the API fails with another
+        status), so the bucket does not exist. On the default endpoint,
+        transient errors (after the retry budget) are raised too: falling back
+        there would silently change the semantics of HNS and zonal operations.
+        """
+        location = self._grpc_location
+        if location.startswith("http://"):
+            logger.debug(
+                f"Endpoint {location} is plain http; skipping the bucket layout lookup."
+            )
+            return BucketLayout.UNKNOWN
+        default_endpoint = _is_default_storage_endpoint(location)
+
+        client = await self._get_control_plane_client()
+        bucket_name_value = f"projects/_/buckets/{bucket}/storageLayout"
+        logger.debug(f"get_storage_layout request for name: {bucket_name_value}")
         try:
-            client = await self._get_control_plane_client()
-            bucket_name_value = f"projects/_/buckets/{bucket}/storageLayout"
-            logger.debug(f"get_storage_layout request for name: {bucket_name_value}")
             response = await client.get_storage_layout(
                 name=bucket_name_value,
-                retry=self._get_retry_config(),
+                retry=self._get_retry_config() if default_endpoint else None,
                 timeout=STORAGE_CONTROL_RPC_TIMEOUT,
             )
-
-            if response.location_type == "zone":
-                storage_class = StorageClass.RAPID
-            else:
-                storage_class = StorageClass.STANDARD
-
-            if response.location_type == "zone" or (
-                response.hierarchical_namespace
-                and response.hierarchical_namespace.enabled
-            ):
-                namespace_layout = NamespaceLayout.HIERARCHICAL
-            else:
-                namespace_layout = NamespaceLayout.NON_HIERARCHICAL
-
-            rapid_cache_info = getattr(response, "rapid_cache_info", None)
-            cache_type = (
-                getattr(rapid_cache_info, "cache_type", "") if rapid_cache_info else ""
-            )
-            if cache_type == "rapid-cache-ultra":
-                caching_tier = CachingTier.RAPID_CACHE_ULTRA
-            elif cache_type == "rapid-cache":
-                caching_tier = CachingTier.RAPID_CACHE
-            else:
-                caching_tier = CachingTier.NONE
-
-            return BucketLayout(
-                storage_class=storage_class,
-                caching_tier=caching_tier,
-                namespace_layout=namespace_layout,
-            )
         except api_exceptions.NotFound:
+            raise
+        except (api_exceptions.GoogleAPIError, asyncio.TimeoutError) as e:
+            if default_endpoint and (
+                isinstance(e, (api_exceptions.RetryError, asyncio.TimeoutError))
+                or is_transient_exception(e)
+            ):
+                # The raised gapic error does not say why a plain read or
+                # write failed, so name the lookup and the opt-out here.
+                logger.warning(
+                    f"Looking up the layout of bucket {bucket} with the Storage "
+                    f"Control API failed: {e!r}. The operation fails instead of "
+                    "using standard bucket behavior, which would be wrong on "
+                    "HNS and zonal buckets. To skip layout lookups (and HNS, "
+                    "zonal and Rapid Cache support), set "
+                    "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=false before importing "
+                    "gcsfs."
+                )
+                raise
+            # The server's message names a missing permission when that is
+            # the cause, e.g. "... does not have storage.objects.list access".
             logger.warning(
-                f"Error: Bucket {bucket} not found or you lack permissions for "
-                f"storage layout api used to detect bucket layout. Falling back to GCSFileSystem."
+                f"Could not determine the layout of bucket {bucket}: {e}. "
+                "Using standard bucket behavior for this filesystem instance; "
+                "invalidate_storage_layout_cache() checks again."
             )
             return BucketLayout.UNKNOWN
-        except Exception as e:
-            logger.warning(
-                f"Could not determine bucket layout for bucket name {bucket}: {e}, falling back to GCSFileSystem"
-            )
-            # Default to UNKNOWN in case bucket layout is not obtained
-            return BucketLayout.UNKNOWN
+        return _layout_from_response(response)
 
     # Plain sync method (not covered by mirror_gcs_methods). The bucket-layout lookup and, for Rapid
     # (zonal) reads, the MRD pool's `_info` request in ZonalFile.__init__ run before GCSFile.__init__
@@ -687,7 +757,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         cached, and otherwise looks the layout up once. If the layout no
         longer reports RCU, it is cached and ``RapidCacheUltraDisabledError``
         is raised from the original error; otherwise the original error is
-        re-raised and the cached layout is kept.
+        re-raised and the cached layout is kept, unless the re-check found the
+        bucket missing, which drops its cached layout.
         """
         await self._get_grpc_client()
         layout = await self._lookup_bucket_layout(bucket)
@@ -717,7 +788,22 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             cached_layout = self._storage_layout_cache.get(bucket)
             if cached_layout is None or cached_layout.is_rcu:
                 # No other write has refreshed the layout yet: look it up once.
-                fresh_layout = await self._get_bucket_layout(bucket)
+                # If the lookup fails, the layout stays unknown and the bare
+                # raise below re-raises the open error unchanged.
+                fresh_layout = BucketLayout.UNKNOWN
+                try:
+                    fresh_layout = await self._get_bucket_layout(bucket)
+                except api_exceptions.NotFound:
+                    # The bucket is gone: as in _lookup_bucket_layout, a missing
+                    # bucket's layout is not kept.
+                    self._storage_layout_cache.pop(bucket, None)
+                except Exception as lookup_error:
+                    # Deliberately broad: whatever made the re-check fail, the
+                    # open error is the one to report.
+                    logger.debug(
+                        f"Re-checking the layout of bucket {bucket} failed: "
+                        f"{lookup_error!r}"
+                    )
                 if (
                     fresh_layout.storage_class == StorageClass.UNKNOWN
                     or fresh_layout.is_rcu
@@ -1343,16 +1429,18 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
     async def _is_bucket_hns_enabled(self, bucket):
         """Checks if a bucket has Hierarchical Namespace enabled."""
-        try:
-            bucket_layout = await self._lookup_bucket_layout(bucket)
-        except Exception as e:
-            logger.warning(
-                f"Could not determine if bucket '{bucket}' is HNS-enabled, falling back to default non-HNS: {e}",
-                stack_info=True,
-            )
-            return False
+        return (await self._lookup_bucket_layout(bucket)).is_hierarchical
 
-        return bucket_layout.is_hierarchical
+    def _is_bucket_hns_cached(self, bucket):
+        """Whether the cached layout of ``bucket`` is HNS. Never sends a request.
+
+        False when no layout is cached. Listings look the layout up before they
+        cache entries, so a bucket with cached listings has a cached layout,
+        unless it was dropped since (by ``invalidate_storage_layout_cache()``,
+        or because this instance created or deleted the bucket).
+        """
+        layout = self._storage_layout_cache.get(bucket)
+        return layout is not None and layout.is_hierarchical
 
     async def _wait_for_folder_rename(
         self, operation, path1, path2, request_id, timeout
@@ -1602,9 +1690,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         # Case 1: Path is just a bucket
         if not key:
-            return await super()._mkdir(
-                path, create_parents=create_parents, **bucket_kwargs
-            )
+            await super()._mkdir(path, create_parents=create_parents, **bucket_kwargs)
+            # A bucket created again under an old name may have another layout.
+            self.invalidate_storage_layout_cache(bucket)
+            return
 
         # Case 2: Path is a folder
         is_hns_bucket = False
@@ -1613,6 +1702,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if create_parents and should_create_hns_bucket:
             if not await self._exists(bucket):
                 await super()._mkdir(bucket, create_parents=True, **bucket_kwargs)
+                self.invalidate_storage_layout_cache(bucket)
                 is_hns_bucket = True
 
         if not is_hns_bucket:
@@ -1804,7 +1894,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # The parent _rmdir is only for deleting buckets. If key is empty,
         # given path is a bucket, we can fall back.
         if not key:
-            return await super()._rmdir(path)
+            await super()._rmdir(path)
+            # A bucket created later under this name may have another layout.
+            self.invalidate_storage_layout_cache(bucket)
+            return
 
         is_hns = await self._is_bucket_hns_enabled(bucket)
         if not is_hns:

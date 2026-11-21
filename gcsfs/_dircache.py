@@ -18,10 +18,8 @@ in :mod:`gcsfs.core` and :mod:`gcsfs.extended_gcsfs`:
 
 Both are mixed into a filesystem class and rely on the host class for
 ``dircache``, ``split_path``, ``_parent``, ``_strip_protocol``,
-``invalidate_cache``, ``_is_bucket_hns_enabled`` and ``_process_object``.
+``invalidate_cache``, ``_is_bucket_hns_cached`` and ``_process_object``.
 """
-
-import asyncio
 
 
 class DirCacheUpdater:
@@ -86,6 +84,11 @@ class HnsDirCacheUpdater(DirCacheUpdater):
     cross-bucket paths defer to :class:`DirCacheUpdater` via ``super()``. The
     write path is bucket-type-agnostic and handled entirely by
     :meth:`DirCacheUpdater._write_file_cache_update`.
+
+    The HNS check uses only the cached layout (``_is_bucket_hns_cached``) and
+    never sends a request: the move or delete has already succeeded, and
+    without a cached layout the broad invalidation is correct for every
+    bucket.
     """
 
     def _cache_drop_entries(self, parent, names, entry_type="file"):
@@ -216,7 +219,7 @@ class HnsDirCacheUpdater(DirCacheUpdater):
         src_bucket, _, _ = self.split_path(path1)
         dest_bucket, _, _ = self.split_path(path2)
 
-        if await self._is_bucket_hns_enabled(src_bucket) and src_bucket == dest_bucket:
+        if src_bucket == dest_bucket and self._is_bucket_hns_cached(src_bucket):
             # Source: removing the entry never changes an ancestor's listing, so
             # drop it in place.
             self._cache_drop_entries(
@@ -251,18 +254,12 @@ class HnsDirCacheUpdater(DirCacheUpdater):
         into account. Non-HNS paths fall back to the default broad invalidation
         of the parents and all of their ancestors.
         """
-        # Split each path once and resolve each distinct bucket's HNS status
-        # once, concurrently, rather than awaiting a (cached) lookup per path.
+        # Split each path once and check each distinct bucket's cached layout once.
         split_paths = [(path, *self.split_path(path)) for path in paths]
-        buckets = list({bucket for _, bucket, _, _ in split_paths})
-        hns_enabled = dict(
-            zip(
-                buckets,
-                await asyncio.gather(
-                    *(self._is_bucket_hns_enabled(bucket) for bucket in buckets)
-                ),
-            )
-        )
+        hns_enabled = {
+            bucket: self._is_bucket_hns_cached(bucket)
+            for bucket in {bucket for _, bucket, _, _ in split_paths}
+        }
 
         # Group the names to drop by their immediate parent so each listing is
         # rewritten only once. Non-HNS paths fall back to broad invalidation.
