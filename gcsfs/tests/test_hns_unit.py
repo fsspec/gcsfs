@@ -13,6 +13,7 @@ test_zonal.py or test_zonal_file.py.
 
 import asyncio
 import contextlib
+import logging
 import os
 import sys
 import uuid
@@ -4454,31 +4455,73 @@ class TestExtendedGcsFileSystemBucketLayout:
             api_exceptions.MethodNotImplemented("not implemented"),
         ],
     )
-    async def test_layout_lookup_caches_definitive_errors(self, extended_gcsfs, error):
+    async def test_layout_lookup_caches_definitive_errors(
+        self, extended_gcsfs, error, caplog
+    ):
         fs = extended_gcsfs
-        with self._layout_rpc(fs, side_effect=error) as (_, rpc):
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            self._layout_rpc(fs, side_effect=error) as (_, rpc),
+        ):
             for _ in range(3):
                 assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
         rpc.assert_awaited_once()
+        # One warning, carrying the server's own message (which names a
+        # missing permission when that is the cause).
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert str(error) in warnings[0].getMessage()
+        assert "The caller needs" not in caplog.text
 
     @pytest.mark.asyncio
-    async def test_layout_lookup_rechecks_missing_bucket(self, extended_gcsfs):
+    async def test_layout_lookup_ignores_empty_bucket(self, extended_gcsfs):
+        # Root and bucket-level glob paths split to bucket "": there is no
+        # bucket to look up.
+        fs = extended_gcsfs
+        with self._layout_rpc(fs) as (getter, _):
+            assert await fs._lookup_bucket_layout("") == BucketLayout.UNKNOWN
+        getter.assert_not_awaited()
+        assert "" not in fs._storage_layout_cache
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "endpoint_url",
+        [
+            "https://storage.googleapis.com",
+            # Only the Storage Control API answers NotFound, so a missing
+            # bucket is not cached on other endpoints either.
+            "https://storage.us-central1.rep.googleapis.com",
+        ],
+    )
+    async def test_layout_lookup_rechecks_missing_bucket(self, endpoint_url, caplog):
         # A missing bucket is not remembered, so a bucket created later is
         # detected on the next operation.
-        fs = extended_gcsfs
-        with self._layout_rpc(fs, side_effect=api_exceptions.NotFound("nf")) as (
-            _,
-            rpc,
+        fs = ExtendedGcsFileSystem(
+            token="anon", endpoint_url=endpoint_url, skip_instance_cache=True
+        )
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            self._layout_rpc(fs, side_effect=api_exceptions.NotFound("nf")) as (
+                _,
+                rpc,
+            ),
         ):
             assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
             assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
         assert rpc.await_count == 2
         assert "b" not in fs._storage_layout_cache
+        # The caller's own request reports the missing bucket.
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "endpoint_url",
-        ["https://storage.googleapis.com", "https://storage.googleapis.com/"],
+        [
+            "https://storage.googleapis.com",
+            "https://storage.googleapis.com/",
+            "https://storage.googleapis.com:443",
+            "https://storage.googleapis.com:443/",
+        ],
     )
     @pytest.mark.parametrize(
         "error",

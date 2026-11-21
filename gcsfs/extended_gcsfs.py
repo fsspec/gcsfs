@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 from glob import has_magic
 from typing import ClassVar
+from urllib.parse import urlsplit
 
 import aiohttp
 import fsspec
@@ -169,6 +170,18 @@ def _layout_from_response(response):
         storage_class=storage_class,
         caching_tier=caching_tier,
         namespace_layout=namespace_layout,
+    )
+
+
+def _is_default_storage_endpoint(location):
+    """Whether ``location`` is the default GCS endpoint, ``https://storage.{universe}``
+    (an explicit port 443 or a trailing slash included)."""
+    url = urlsplit(location)
+    return (
+        url.scheme == "https"
+        and url.hostname == f"storage.{_gcp_universe_domain()}"
+        and url.port in (None, 443)
+        and url.path in ("", "/")
     )
 
 
@@ -551,15 +564,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             self._grpc_client = None
 
     async def _lookup_bucket_layout(self, bucket):
+        if not bucket:
+            # Root and bucket-level glob paths have no bucket to look up.
+            return BucketLayout.UNKNOWN
         if bucket in self._storage_layout_cache:
             return self._storage_layout_cache[bucket]
         try:
             bucket_layout = await self._get_bucket_layout(bucket)
         except api_exceptions.NotFound:
-            # Not cached: a bucket created later must still be detected.
-            logger.warning(
-                f"Bucket {bucket} not found; using standard bucket behavior."
-            )
+            # Not cached: a bucket created later must still be detected. The
+            # caller's own request reports the missing bucket.
+            logger.debug(f"Bucket {bucket} not found; using standard bucket behavior.")
             return BucketLayout.UNKNOWN
         self._storage_layout_cache[bucket] = bucket_layout
         return bucket_layout
@@ -606,9 +621,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         * on the default endpoint, an error that retrying will not change,
           such as missing permission.
 
-        On the default endpoint, ``NotFound`` and transient errors (after the
-        retry budget) are raised: falling back there would silently change
-        the semantics of HNS and zonal operations.
+        ``NotFound`` is raised on every endpoint: only the Storage Control API
+        answers it (an endpoint that does not serve the API fails with another
+        status), so the bucket does not exist. On the default endpoint,
+        transient errors (after the retry budget) are raised too: falling back
+        there would silently change the semantics of HNS and zonal operations.
         """
         location = self._grpc_location.rstrip("/")
         if location.startswith("http://"):
@@ -616,7 +633,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 f"Endpoint {location} is plain http; skipping the bucket layout lookup."
             )
             return BucketLayout.UNKNOWN
-        default_endpoint = location == f"https://storage.{_gcp_universe_domain()}"
+        default_endpoint = _is_default_storage_endpoint(location)
 
         client = await self._get_control_plane_client()
         bucket_name_value = f"projects/_/buckets/{bucket}/storageLayout"
@@ -627,29 +644,18 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 retry=self._get_retry_config() if default_endpoint else None,
                 timeout=STORAGE_CONTROL_RPC_TIMEOUT,
             )
+        except api_exceptions.NotFound:
+            raise
         except (api_exceptions.GoogleAPIError, asyncio.TimeoutError) as e:
             if default_endpoint and (
-                isinstance(
-                    e,
-                    (
-                        api_exceptions.NotFound,
-                        api_exceptions.RetryError,
-                        asyncio.TimeoutError,
-                    ),
-                )
+                isinstance(e, (api_exceptions.RetryError, asyncio.TimeoutError))
                 or is_transient_exception(e)
             ):
                 raise
-            hint = (
-                " The caller needs storage.objects.list on the bucket."
-                if isinstance(
-                    e,
-                    (api_exceptions.PermissionDenied, api_exceptions.Unauthenticated),
-                )
-                else ""
-            )
+            # The server's message names a missing permission when that is
+            # the cause, e.g. "... does not have storage.objects.list access".
             logger.warning(
-                f"Could not determine the layout of bucket {bucket}: {e}.{hint} "
+                f"Could not determine the layout of bucket {bucket}: {e}. "
                 "Using standard bucket behavior for this filesystem instance; "
                 "invalidate_storage_layout_cache() checks again."
             )
