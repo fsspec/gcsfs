@@ -495,13 +495,16 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         The layout of each bucket (zonal, hierarchical namespace, Rapid Cache
         Ultra) is looked up the first time this filesystem instance uses the
-        bucket. It stays cached until it is invalidated here, or until an
-        appendable write to a Rapid Cache Ultra bucket fails to open and the
-        re-checked layout no longer reports Rapid Cache Ultra. Call this method
-        after enabling or disabling Rapid Cache Ultra on a bucket that this
-        instance already used, so that later reads and writes pick the
-        matching data path. It only clears in-memory state and sends no
-        request.
+        bucket. It stays cached until it is invalidated here, until this
+        instance creates or deletes the bucket, or until an appendable write
+        to a Rapid Cache Ultra bucket fails to open and the re-checked layout
+        no longer reports Rapid Cache Ultra (or finds the bucket missing).
+        Call this method after enabling or disabling Rapid Cache Ultra on a
+        bucket that this instance already used, so that later reads and
+        writes pick the matching data path. It only clears in-memory state and
+        sends no request. Until the next lookup, ``mv_file`` and ``rm_file``
+        update the listing cache by invalidating the affected directories
+        instead of editing them in place.
 
         Parameters
         ----------
