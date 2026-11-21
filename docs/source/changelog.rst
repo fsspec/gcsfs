@@ -41,6 +41,11 @@ Unreleased
   ``ExtendedGcsFileSystem`` now use anonymous credentials, as they already
   did for ``token="anon"``, instead of looking for default credentials
   themselves on every bucket-layout lookup (#1109).
+* Creating or deleting a bucket through ``ExtendedGcsFileSystem`` now forgets
+  its cached layout. Before, a bucket deleted and created again with another
+  layout kept the old one on the same filesystem instance; for example, a
+  bucket recreated as HNS stayed cached as flat and ``makedirs`` created no
+  folder.
 * ``sign()`` now works with credentials that have no private key, such as
   Compute Engine and GKE Workload Identity credentials. When the credentials
   cannot sign, the URL is signed through the IAM Credentials ``signBlob`` API
