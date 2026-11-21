@@ -1936,9 +1936,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         # Case 1: Path is just a bucket
         if not key:
-            return await super()._mkdir(
-                path, create_parents=create_parents, **bucket_kwargs
-            )
+            await super()._mkdir(path, create_parents=create_parents, **bucket_kwargs)
+            # A bucket created again under an old name may have another layout.
+            self.invalidate_storage_layout_cache(bucket)
+            return
 
         # Case 2: Path is a folder
         is_hns_bucket = False
@@ -1947,6 +1948,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if create_parents and should_create_hns_bucket:
             if not await self._exists(bucket):
                 await super()._mkdir(bucket, create_parents=True, **bucket_kwargs)
+                self.invalidate_storage_layout_cache(bucket)
                 is_hns_bucket = True
 
         if not is_hns_bucket:
@@ -2138,7 +2140,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # The parent _rmdir is only for deleting buckets. If key is empty,
         # given path is a bucket, we can fall back.
         if not key:
-            return await super()._rmdir(path)
+            await super()._rmdir(path)
+            # A bucket created later under this name may have another layout.
+            self.invalidate_storage_layout_cache(bucket)
+            return
 
         is_hns = await self._is_bucket_hns_enabled(bucket)
         if not is_hns:
