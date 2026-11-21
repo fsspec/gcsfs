@@ -395,11 +395,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # We unwrap the nested credentials here because self.credentials is a GCSFS wrapper,
         # but the clients expect the underlying google.auth credentials object.
         self.credential = self.credentials.credentials
-        # When token="anon", self.credentials.credentials is None. This is
-        # often used for testing with emulators. However, the gRPC and storage
-        # control clients require a credentials object for initialization.
-        # We explicitly use AnonymousCredentials() to allow unauthenticated access.
-        if self.credentials.token == "anon":
+        # GoogleCredentials holds None whenever it resolved to anonymous access:
+        # token="anon", or token=None when no other method works. The HTTP path
+        # then sends no credentials (GoogleCredentials.maybe_refresh), so give the
+        # gRPC and storage control clients AnonymousCredentials(); with None they
+        # would look for default credentials themselves and fail without them.
+        if self.credential is None:
             self.credential = AnonymousCredentials()
         self._storage_layout_cache = {}
         self._memmove_executor = ThreadPoolExecutor(

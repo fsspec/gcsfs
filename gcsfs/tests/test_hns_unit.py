@@ -22,10 +22,13 @@ import fsspec
 import pytest
 from fsspec.asyn import FSTimeoutError
 from google.api_core import exceptions as api_exceptions
+from google.auth.credentials import AnonymousCredentials
 from google.cloud import storage_control_v2
+from google.oauth2.credentials import Credentials
 from google.rpc import code_pb2
 
 from gcsfs import core as gcsfs_core
+from gcsfs.credentials import GoogleCredentials
 from gcsfs.extended_gcsfs import (
     DEFAULT_HNS_RM_CONCURRENCY,
     BucketLayout,
@@ -4282,6 +4285,35 @@ class TestExtendedGcsFileSystemBucketLayout:
             rpc = mock.AsyncMock(**get_storage_layout)
             getter.return_value.get_storage_layout = rpc
             yield getter, rpc
+
+    @pytest.mark.parametrize("token", [None, "anon"])
+    def test_anonymous_access_uses_anonymous_credentials(self, token):
+        # With token=None, gcsfs falls back to anonymous access when no other
+        # method works (#1109). The gRPC clients must not then look for
+        # default credentials themselves.
+        with contextlib.ExitStack() as stack:
+            for method in (
+                "_connect_google_default",
+                "_connect_cache",
+                "_connect_cloud",
+            ):
+                stack.enter_context(
+                    mock.patch.object(
+                        GoogleCredentials, method, side_effect=ValueError("unavailable")
+                    )
+                )
+            fs = ExtendedGcsFileSystem(
+                token=token,
+                endpoint_url="https://storage.googleapis.com",
+                skip_instance_cache=True,
+            )
+        assert fs.credentials.credentials is None
+        assert isinstance(fs.credential, AnonymousCredentials)
+
+    def test_supplied_credentials_are_passed_to_grpc(self):
+        creds = Credentials(token="token")
+        fs = ExtendedGcsFileSystem(token=creds, skip_instance_cache=True)
+        assert fs.credential is creds
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
