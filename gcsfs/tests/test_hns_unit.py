@@ -136,6 +136,11 @@ def gcs_hns_mocks():
                 patch_target_super_rm, new_callable=mock.AsyncMock
             ) as mock_super_rm,
             mock.patch("gcsfs.extended_gcsfs.uuid.uuid4", return_value=FIXED_UUID),
+            # Listings cache the layout they look up; dircache updates after a
+            # move or delete read only that cached layout.
+            mock.patch.dict(
+                gcsfs._storage_layout_cache, {TEST_HNS_BUCKET: bucket_type_val}
+            ),
         ):
             mock_async_lookup_bucket_layout.return_value = bucket_type_val
             mock_sync_lookup_bucket_layout.return_value = bucket_type_val
@@ -1261,11 +1266,12 @@ class TestExtendedGcsFileSystemMvFile:
         fs.dircache[TEST_HNS_BUCKET] = [{"name": dest_grandparent, "type": "directory"}]
 
         response = {"bucket": TEST_HNS_BUCKET, "name": "destgp/p/a.txt", "size": 5}
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
-            await fs._mv_file_cache_update(src, dst, response)
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        await fs._mv_file_cache_update(src, dst, response)
 
         # The source entry is dropped in place (removal never affects ancestors).
-        assert src not in [e["name"] for e in fs.dircache.get(src_parent, [])]
+        assert src_parent in fs.dircache
+        assert src not in [e["name"] for e in fs.dircache[src_parent]]
         # The destination's ancestors are invalidated, since the move may have
         # created dest_parent.
         assert dest_grandparent not in fs.dircache
@@ -1290,8 +1296,8 @@ class TestExtendedGcsFileSystemMvFile:
         ]
 
         response = {"bucket": TEST_HNS_BUCKET, "name": "parent/dst.txt", "size": 1}
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
-            await fs._mv_file_cache_update(src, dst, response)
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        await fs._mv_file_cache_update(src, dst, response)
 
         entries = fs.dircache[parent]
         names = [e["name"] for e in entries]
@@ -1302,40 +1308,6 @@ class TestExtendedGcsFileSystemMvFile:
         )
         assert dst_dir in entries
         assert f"{parent}/keep.txt" in names
-
-    @pytest.mark.asyncio
-    async def test_mv_file_layout_lookup_failure_after_move_invalidates(self):
-        """A failed layout lookup after a successful moveTo must not report
-        the move as failed (which would trigger the copy/delete fallback on an
-        already-moved object); the cache update falls back to broad
-        invalidation instead."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
-        parent = f"{TEST_HNS_BUCKET}/parent"
-        src = f"{parent}/src.txt"
-        dst = f"{parent}/dst.txt"
-        fs.dircache[parent] = [{"name": src, "type": "file"}]
-        fs.dircache[TEST_HNS_BUCKET] = [{"name": parent, "type": "directory"}]
-
-        response = {"bucket": TEST_HNS_BUCKET, "name": "parent/dst.txt", "size": 1}
-        with (
-            mock.patch.object(
-                fs,
-                "_is_bucket_hns_enabled",
-                side_effect=api_exceptions.RetryError("unavailable", None),
-            ),
-            mock.patch.object(
-                fs, "_call", new_callable=mock.AsyncMock, return_value=response
-            ) as mock_call,
-            mock.patch(
-                "fsspec.asyn.AsyncFileSystem._mv_file", new_callable=mock.AsyncMock
-            ) as mock_copy_delete,
-        ):
-            await fs._mv_file(src, dst)
-
-        mock_call.assert_awaited_once()
-        mock_copy_delete.assert_not_called()
-        assert parent not in fs.dircache
-        assert TEST_HNS_BUCKET not in fs.dircache
 
 
 class TestExtendedGcsFileSystemRmFile:
@@ -1358,10 +1330,8 @@ class TestExtendedGcsFileSystemRmFile:
         fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
         fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
 
-        with (
-            mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True),
-            mock.patch.object(fs, "_call", new_callable=mock.AsyncMock),
-        ):
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        with mock.patch.object(fs, "_call", new_callable=mock.AsyncMock):
             await fs._rm_file(path)
 
         # The immediate parent's listing is updated, not cleared.
@@ -1389,8 +1359,8 @@ class TestExtendedGcsFileSystemRmFile:
         fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
         fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
 
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=False):
-            await fs._rm_file_cache_update(path)
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD
+        await fs._rm_file_cache_update(path)
 
         # The base behavior invalidates the parent and walks up to the root.
         assert parent not in fs.dircache
@@ -1415,8 +1385,8 @@ class TestExtendedGcsFileSystemRmFile:
         fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
         fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
 
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
-            await fs._rm_files_cache_update([path1, path2])
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        await fs._rm_files_cache_update([path1, path2])
 
         # The shared parent's listing keeps its surviving entry.
         assert parent in fs.dircache
@@ -1442,36 +1412,11 @@ class TestExtendedGcsFileSystemRmFile:
         fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
         fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
 
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=False):
-            await fs._rm_files_cache_update([path])
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD
+        await fs._rm_files_cache_update([path])
 
         assert parent not in fs.dircache
         assert grandparent not in fs.dircache
-        assert TEST_HNS_BUCKET not in fs.dircache
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("batch", [False, True])
-    async def test_rm_layout_lookup_failure_after_delete_invalidates(self, batch):
-        """A failed layout lookup after a successful delete must not report the
-        delete as failed; the cache update falls back to broad invalidation."""
-        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
-        parent = f"{TEST_HNS_BUCKET}/parent"
-        path = f"{parent}/file1.txt"
-        fs.dircache[parent] = [{"name": path, "type": "file"}]
-        fs.dircache[TEST_HNS_BUCKET] = [{"name": parent, "type": "directory"}]
-
-        with mock.patch.object(
-            fs,
-            "_is_bucket_hns_enabled",
-            side_effect=api_exceptions.RetryError("unavailable", None),
-        ):
-            if batch:
-                await fs._rm_files_cache_update([path])
-            else:
-                with mock.patch.object(fs, "_call", new_callable=mock.AsyncMock):
-                    await fs._rm_file(path)
-
-        assert parent not in fs.dircache
         assert TEST_HNS_BUCKET not in fs.dircache
 
     @pytest.mark.asyncio
@@ -1509,10 +1454,8 @@ class TestExtendedGcsFileSystemRmFile:
         ).encode()
         mock_headers = {"Content-Type": f"multipart/mixed; boundary={boundary}"}
 
-        with (
-            mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True),
-            mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as mock_call,
-        ):
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        with mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as mock_call:
             mock_call.return_value = (mock_headers, mock_response_content)
             out = await fs._rm_files([ok_path, bad_path])
 
@@ -1526,6 +1469,80 @@ class TestExtendedGcsFileSystemRmFile:
         names = [e["name"] for e in fs.dircache[parent]]
         assert ok_path not in names
         assert bad_path in names
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("op", ["mv_file", "rm_file", "rm_files"])
+    async def test_cache_update_never_looks_up_layout(self, op):
+        """The cache update after a move or delete never looks the layout up:
+        without a cached layout it invalidates broadly, which is correct for
+        every bucket. A lookup there would hold the completed move or delete
+        for the whole retry budget during a Storage Control outage."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        parent = f"{TEST_HNS_BUCKET}/parent"
+        src = f"{parent}/a.txt"
+        fs.dircache[parent] = [{"name": src, "type": "file"}]
+        fs.dircache[TEST_HNS_BUCKET] = [{"name": parent, "type": "directory"}]
+
+        with (
+            mock.patch.object(
+                fs, "_lookup_bucket_layout", new_callable=mock.AsyncMock
+            ) as lookup,
+            mock.patch.object(
+                fs, "_get_bucket_layout", new_callable=mock.AsyncMock
+            ) as get_layout,
+            mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as mock_call,
+        ):
+            if op == "mv_file":
+                mock_call.return_value = {
+                    "bucket": TEST_HNS_BUCKET,
+                    "name": "parent/b.txt",
+                    "size": 1,
+                }
+                await fs._mv_file(src, f"{parent}/b.txt")
+            elif op == "rm_file":
+                await fs._rm_file(src)
+            else:
+                boundary = "==========7330845974216740156=="
+                mock_call.return_value = (
+                    {"Content-Type": f"multipart/mixed; boundary={boundary}"},
+                    (
+                        f"\n--{boundary}\nContent-Type: application/http\n\n"
+                        f"HTTP/1.1 204 No Content\n\n--{boundary}--\n"
+                    ).encode(),
+                )
+                await fs._rm_files([src])
+
+        lookup.assert_not_awaited()
+        get_layout.assert_not_awaited()
+        assert parent not in fs.dircache
+        assert TEST_HNS_BUCKET not in fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_cache_update_uses_cached_layout_per_bucket(self):
+        """A batch delete across buckets updates the bucket cached as HNS in
+        place and invalidates the bucket without a cached layout broadly."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        hns_parent = f"{TEST_HNS_BUCKET}/parent"
+        other_parent = "other-bucket/parent"
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        fs.dircache[hns_parent] = [
+            {"name": f"{hns_parent}/a.txt", "type": "file"},
+            {"name": f"{hns_parent}/keep.txt", "type": "file"},
+        ]
+        fs.dircache[other_parent] = [{"name": f"{other_parent}/b.txt", "type": "file"}]
+
+        with mock.patch.object(
+            fs, "_lookup_bucket_layout", new_callable=mock.AsyncMock
+        ) as lookup:
+            await fs._rm_files_cache_update(
+                [f"{hns_parent}/a.txt", f"{other_parent}/b.txt"]
+            )
+
+        lookup.assert_not_awaited()
+        assert [e["name"] for e in fs.dircache[hns_parent]] == [
+            f"{hns_parent}/keep.txt"
+        ]
+        assert other_parent not in fs.dircache
 
 
 class TestExtendedGcsFileSystemWriteFileCacheUpdate:

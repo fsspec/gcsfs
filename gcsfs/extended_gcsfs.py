@@ -1660,6 +1660,16 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """Checks if a bucket has Hierarchical Namespace enabled."""
         return (await self._lookup_bucket_layout(bucket)).is_hierarchical
 
+    def _is_bucket_hns_cached(self, bucket):
+        """Whether the cached layout of ``bucket`` is HNS. Never sends a request.
+
+        False when no layout is cached. Listings look the layout up before they
+        cache entries, so a bucket with cached listings has a cached layout,
+        unless ``invalidate_storage_layout_cache()`` dropped it.
+        """
+        layout = self._storage_layout_cache.get(bucket)
+        return layout is not None and layout.is_hierarchical
+
     async def _wait_for_folder_rename(
         self, operation, path1, path2, request_id, timeout
     ):
