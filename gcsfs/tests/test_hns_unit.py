@@ -4009,28 +4009,26 @@ async def test_get_control_plane_client_quota_project_id(
 
 @pytest.mark.asyncio
 async def test_get_control_plane_client_sends_keepalive_pings():
+    import grpc
+
     from gcsfs import __version__
     from gcsfs.extended_gcsfs import USER_AGENT
 
-    with mock.patch.dict(os.environ, {"STORAGE_EMULATOR_HOST": ""}):
-        ExtendedGcsFileSystem.clear_instance_cache()
-        fs = ExtendedGcsFileSystem(project="my-project")
-
-        mock_transport_cls = mock.Mock()
-        with mock.patch.object(
-            storage_control_v2.StorageControlAsyncClient,
-            "get_transport_class",
-            return_value=mock_transport_cls,
-        ):
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    try:
+        with mock.patch(
+            "google.api_core.grpc_helpers_async.aio.secure_channel",
+            wraps=grpc.aio.secure_channel,
+        ) as secure_channel:
             await fs._get_control_plane_client()
-
-        options = mock_transport_cls.create_channel.call_args.kwargs["options"]
-        assert options[0] == ("grpc.primary_user_agent", f"{USER_AGENT}/{__version__}")
-        options = dict(options)
-        assert options["grpc.keepalive_time_ms"] == 30000
-        assert options["grpc.keepalive_timeout_ms"] == 20000
-        assert options["grpc.http2.ping_timeout_ms"] == 20000
-        assert "grpc.keepalive_permit_without_calls" not in options
+        assert secure_channel.call_args.kwargs["options"] == [
+            ("grpc.primary_user_agent", f"{USER_AGENT}/{__version__}"),
+            ("grpc.keepalive_time_ms", 30000),
+            ("grpc.keepalive_timeout_ms", 20000),
+            ("grpc.http2.ping_timeout_ms", 20000),
+        ]
+    finally:
+        await fs._close_resources()
 
 
 @pytest.mark.asyncio
