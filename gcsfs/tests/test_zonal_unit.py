@@ -9,6 +9,7 @@ from unittest import mock
 
 import aiohttp
 import pytest
+from fsspec.callbacks import Callback
 from google.cloud.storage.asyncio.async_multi_range_downloader import (
     AsyncMultiRangeDownloader,
 )
@@ -21,6 +22,7 @@ from gcsfs.extended_gcsfs import (
     BucketLayout,
     ExtendedGcsFileSystem,
     _close_pool,
+    _get_mrd_size,
     initiate_upload,
     simple_upload,
     upload_chunk,
@@ -284,8 +286,8 @@ async def test_cat_file_warning_on_missing_persisted_size(
     """
     Tests that a warning is logged in cat_file when MRD has no 'persisted_size' attribute.
     """
-    with gcs_bucket_mocks(json_data, bucket_type_val=bucket_layout):
-        # 'persisted_size' is set to None in the mock downloader
+    with gcs_bucket_mocks(json_data, bucket_type_val=bucket_layout) as mocks:
+        mocks["pool"].persisted_size = None
         with (
             caplog.at_level(logging.WARNING, logger="gcsfs"),
             mock.patch.object(
@@ -296,6 +298,33 @@ async def test_cat_file_warning_on_missing_persisted_size(
             result = await extended_gcsfs._cat_file(file_path, start=0, end=10)
             assert "Falling back to _info() to get the file size" in caplog.text
             assert result == json_data[:10]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mrd_size, pool_size, expected",
+    [
+        (200, 133, 200),
+        (0, 133, 0),
+        (None, 133, 133),
+        (None, 0, 0),
+        (None, None, None),
+    ],
+)
+async def test_get_mrd_size_prefers_mrd_and_falls_back_to_pool(
+    mrd_size, pool_size, expected
+):
+    """_get_mrd_size prefers the checked-out MRD's size and falls back to MRDPool."""
+    from gcsfs.zb_hns_utils import MRDPool
+
+    mock_mrd = mock.AsyncMock(spec=AsyncMultiRangeDownloader)
+    mock_mrd.persisted_size = mrd_size
+
+    mock_pool = mock.AsyncMock(spec=MRDPool)
+    mock_pool.persisted_size = pool_size
+    mock_pool.get_mrd.return_value.__aenter__.return_value = mock_mrd
+
+    assert await _get_mrd_size(mock_pool) == expected
 
 
 @pytest.mark.asyncio
@@ -1559,7 +1588,8 @@ async def test_get_file_warning_on_missing_persisted_size(
     """
     Tests that a warning is logged in _get_file when MRD has no 'persisted_size' attribute.
     """
-    with gcs_bucket_mocks(json_data, bucket_type_val=bucket_layout):
+    with gcs_bucket_mocks(json_data, bucket_type_val=bucket_layout) as mocks:
+        mocks["pool"].persisted_size = None
         lpath = tmp_path / "output.txt"
         with (
             caplog.at_level(logging.WARNING, logger="gcsfs"),
@@ -1679,9 +1709,16 @@ async def test_get_file_last_chunk_requests_only_remaining_bytes(
     data = bytes(range(size))
 
     with gcs_bucket_mocks(data, bucket_type_val=bucket_layout) as mocks:
-        mocks["downloader"].persisted_size = len(data)
         lpath = tmp_path / "output.txt"
-        with caplog.at_level(logging.WARNING, logger="gcsfs"):
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            mock.patch.object(
+                async_gcs,
+                "_info",
+                new_callable=mock.AsyncMock,
+                return_value={"size": len(data)},
+            ) as mock_info,
+        ):
             await async_gcs._get_file(file_path, str(lpath), **kwargs)
 
         requested = [
@@ -1689,7 +1726,8 @@ async def test_get_file_last_chunk_requests_only_remaining_bytes(
             for call in mocks["downloader"].download_ranges.await_args_list
         ]
         assert requested == expected_ranges
-        assert "Short read" not in caplog.text
+        mock_info.assert_not_awaited()
+        assert not caplog.records
         assert lpath.read_bytes() == data
 
 
@@ -1722,35 +1760,100 @@ async def test_get_file_stops_at_persisted_size_of_growing_object(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
-@pytest.mark.parametrize("kwargs", [{"chunksize": 50}, {}], ids=["chunked", "default"])
-async def test_get_file_fails_when_object_outgrew_info_size(
-    async_gcs, gcs_bucket_mocks, tmp_path, file_path, bucket_layout, kwargs
+@pytest.mark.parametrize(
+    "server_size, stale_size, seed_dircache, kwargs",
+    [
+        pytest.param(0, 0, False, {}, id="empty_unfinalized"),
+        pytest.param(200, 0, False, {}, id="stale_zero"),
+        pytest.param(200, 133, True, {"chunksize": 50}, id="stale_dircache"),
+        pytest.param(200_000, 4096 * 32, False, {}, id="stale_chunksize_multiple"),
+        pytest.param(
+            6 * 1024 * 1024 + 1234,
+            6 * 1024 * 1024,
+            False,
+            {},
+            id="stale_above_concurrent_threshold",
+        ),
+    ],
+)
+async def test_get_file_streams_unfinalized_object_without_persisted_size(
+    async_gcs,
+    gcs_bucket_mocks,
+    caplog,
+    tmp_path,
+    file_path,
+    bucket_layout,
+    server_size,
+    stale_size,
+    seed_dircache,
+    kwargs,
 ):
     """
-    Tests that _get_file raises instead of writing a truncated file when the MRD
-    has no persisted_size and the object has grown past the size _info() reports.
+    Tests that _get_file streams the full unfinalized object via (0, 0, writer)
+    without calling _info() or truncating at stale metadata sizes when neither
+    the MRD nor MRDPool has persisted_size.
     """
-    server_data = bytes(range(200))
-    info_size = 133
+    pattern = bytes(range(256))
+    server_data = (pattern * ((server_size + 255) // 256))[:server_size]
+
+    async def stream_ranges(read_requests, metadata=None):
+        for offset, length, buffer in read_requests:
+            end = None if length == 0 else offset + length
+            buffer.write(server_data[offset:end])
 
     with gcs_bucket_mocks(server_data, bucket_type_val=bucket_layout) as mocks:
+        mocks["pool"].finalized = False
         mocks["pool"].persisted_size = None
-        mocks["pool"].details = {"size": info_size}
+        mocks["pool"].details = {"size": stale_size, "timeFinalized": None}
+        mocks["downloader"].persisted_size = None
+        mocks["downloader"].download_ranges.side_effect = stream_ranges
+
+        if seed_dircache:
+            parent = async_gcs._parent(file_path)
+            async_gcs.dircache[parent] = [
+                {
+                    "name": file_path,
+                    "size": stale_size,
+                    "type": "file",
+                    "timeFinalized": None,
+                }
+            ]
+            info_patch = mock.patch.object(async_gcs, "_info", wraps=async_gcs._info)
+        else:
+            info_patch = mock.patch.object(
+                async_gcs,
+                "_info",
+                new_callable=mock.AsyncMock,
+                return_value={"size": stale_size, "timeFinalized": None},
+            )
+
+        updates = []
+        cb = Callback(
+            hooks={"progress": lambda size, value, **_: updates.append((size, value))}
+        )
         lpath = tmp_path / "output.txt"
         with (
-            mock.patch.object(
-                async_gcs, "_info", new_callable=mock.AsyncMock
-            ) as mock_info,
-            # _get_file_concurrent retries the ClientError; skip the real backoff.
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            info_patch as spy_info,
             mock.patch("gcsfs.retry.asyncio.sleep", new_callable=mock.AsyncMock),
-            pytest.raises(
-                aiohttp.ClientError, match="Expected 133 bytes, but only received"
-            ),
         ):
-            mock_info.return_value = {"size": info_size}
-            await async_gcs._get_file(file_path, str(lpath), **kwargs)
+            await async_gcs._get_file(file_path, str(lpath), callback=cb, **kwargs)
 
-        assert not lpath.exists()
+        requested = [
+            call.args[0][0][:2]
+            for call in mocks["downloader"].download_ranges.await_args_list
+        ]
+        assert requested == [(0, 0)]
+        spy_info.assert_not_awaited()
+        assert not caplog.records
+        assert lpath.read_bytes() == server_data
+        assert cb.size is None
+        assert cb.value == server_size
+        expected_updates = (
+            [(None, 0), (None, server_size)] if server_size else [(None, 0)]
+        )
+        assert updates == expected_updates
+        assert mocks["pool"].close.await_count == 2
 
 
 @pytest.mark.asyncio

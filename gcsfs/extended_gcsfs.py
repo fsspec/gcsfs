@@ -181,7 +181,9 @@ async def _get_mrd_size(mrd_or_pool):
     if mrd_or_pool is None:
         return None
     async with _get_mrd_from_pool_or_mrd(mrd_or_pool) as m:
-        return m.persisted_size
+        if m.persisted_size is not None:
+            return m.persisted_size
+    return getattr(mrd_or_pool, "persisted_size", None)
 
 
 async def _close_pool(pool):
@@ -2722,53 +2724,52 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         )
         try:
             async with mrd_pool.get_mrd() as mrd:
-                size = mrd.persisted_size
-                size_from_mrd = size is not None
-                if size is None:
-                    logger.warning(
-                        f"AsyncMultiRangeDownloader (MRD) for {rpath} has no 'persisted_size'. "
-                        "Falling back to _info() to get the file size. "
-                        "This may result in incorrect behavior for unfinalized objects."
-                    )
-                    size = (await self._info(rpath, **kwargs)).get("size", 0)
-
-                callback.set_size(size)
-
+                size = (
+                    mrd.persisted_size
+                    if mrd.persisted_size is not None
+                    else getattr(mrd_pool, "persisted_size", None)
+                )
                 lparent = os.path.dirname(lpath) or os.curdir
-                os.makedirs(lparent, exist_ok=True)
 
-                offset = 0
-
-                with open(lpath, "wb") as f2:
-                    while True:
-                        if offset >= size:
-                            break
-
-                        # A size from _info() can be stale while the object is
-                        # still being appended to, so only the MRD's own size
-                        # limits the last chunk. With a full chunk, bytes past
-                        # a stale size fail the size check below instead of
-                        # being cut off silently.
-                        data = await zb_hns_utils.download_range(
-                            offset=offset,
-                            length=(
-                                min(chunksize, size - offset)
-                                if size_from_mrd
-                                else chunksize
-                            ),
-                            mrd=mrd,
+                if size is None and getattr(mrd_pool, "finalized", None) is False:
+                    callback.set_size(None)
+                    os.makedirs(lparent, exist_ok=True)
+                    with open(lpath, "wb") as f2:
+                        await mrd.download_ranges([(0, 0, f2)])
+                        bytes_written = f2.tell()
+                    if bytes_written:
+                        callback.relative_update(bytes_written)
+                else:
+                    if size is None:
+                        logger.warning(
+                            f"AsyncMultiRangeDownloader (MRD) for {rpath} has no 'persisted_size'. "
+                            "Falling back to _info() to get the file size. "
+                            "This may result in incorrect behavior for unfinalized objects."
                         )
-                        if not data:
-                            break
+                        size = (await self._info(rpath, **kwargs)).get("size", 0)
 
-                        f2.write(data)
-                        offset += len(data)
-                        callback.relative_update(len(data))
+                    callback.set_size(size)
+                    os.makedirs(lparent, exist_ok=True)
 
-                if offset != size:
-                    raise aiohttp.ClientError(
-                        f"Expected {size} bytes, but only received {offset} bytes"
-                    )
+                    offset = 0
+                    with open(lpath, "wb") as f2:
+                        while offset < size:
+                            data = await zb_hns_utils.download_range(
+                                offset=offset,
+                                length=min(chunksize, size - offset),
+                                mrd=mrd,
+                            )
+                            if not data:
+                                break
+
+                            f2.write(data)
+                            offset += len(data)
+                            callback.relative_update(len(data))
+
+                    if offset != size:
+                        raise aiohttp.ClientError(
+                            f"Expected {size} bytes, but only received {offset} bytes"
+                        )
         except Exception as e:
             # Clean up the corrupted file before raising error
             if os.path.exists(lpath):
@@ -2835,6 +2836,14 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             details = dict(mrd_pool.details or {})
             size = await _get_mrd_size(mrd_pool)
             if size is None:
+                if getattr(mrd_pool, "finalized", None) is False:
+                    return await self._get_file_request(
+                        rpath,
+                        lpath,
+                        headers=headers,
+                        callback=callback,
+                        **kwargs,
+                    )
                 logger.warning(
                     f"AsyncMultiRangeDownloader (MRD) for {rpath} has no 'persisted_size'. "
                     "Falling back to cached details to get the file size. "
