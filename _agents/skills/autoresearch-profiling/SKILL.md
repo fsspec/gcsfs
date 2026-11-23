@@ -46,6 +46,7 @@ See [references/profiling.md](references/profiling.md) for copy-pasteable comman
   - Formulate **one atomic hypothesis** naming the function/line, mechanism, and expected metric direction.
 - [ ] **Step 3: Configure and Invoke `autoresearch`**
   - Define `Goal`, `Scope` (production source only; **never** edit `gcsfs/tests/**` benchmark harnesses), `Metric`, `Direction` (`higher_is_better` or `lower_is_better`), `Verify` (command + python extractor printing a single number on the last line), and `Guard` (unit/emulator tests).
+  - Preserve security invariants during optimization: never bypass `ctypes` bounds/NULL/lifetime guards, URL `quote()` encoding, TLS verification, or credential redaction for throughput.
   - For `gcsfs` microbenchmarks and subsystembenchmarks, use the exact `Verify` and `Guard` templates in [references/benchmarks.md](references/benchmarks.md).
   - Invoke `$autoresearch` to execute the modify → verify → keep/discard loop.
 - [ ] **Step 4: Re-Profile After Kept Wins or Plateaus**
