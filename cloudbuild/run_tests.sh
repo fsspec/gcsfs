@@ -87,8 +87,9 @@ STATUS=0
 
 # Core test deselections for the zonal-core suite, whose Zonal bucket writes go
 # through the gRPC appendable writer.
-# 1. KMS & Metadata Support: gRPC appendable writes do not forward 'kmsKeyName',
-#    'contentType', or custom metadata.
+# 1. Metadata Support: gRPC appendable writes do not forward 'contentType' or
+#    custom metadata (including 'test_multi_upload_with_kms', which asserts
+#    'contentType == "text/plain"').
 # 2. Copy/Merge: Server-side Rewrite/Compose are not supported on RAPID objects.
 # 3. Write/Flush Mechanics: ZonalFile flushes directly to GCS via the SDK writer
 #    rather than GCSFile's HTTP resumable buffer, does not support transaction
@@ -97,8 +98,6 @@ STATUS=0
 #    targets standard HTTP buckets, and requester-pays buckets are not provisioned
 #    for Rapid suites.
 RAPID_CORE_DESELECTS=(
-  "--deselect=gcsfs/tests/test_core.py::test_simple_upload_with_kms"
-  "--deselect=gcsfs/tests/test_core.py::test_large_upload_with_kms"
   "--deselect=gcsfs/tests/test_core.py::test_multi_upload_with_kms"
   "--deselect=gcsfs/tests/test_core.py::test_multi_upload"
   "--deselect=gcsfs/tests/test_core.py::test_fixed_key_metadata"

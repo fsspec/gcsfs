@@ -1,13 +1,22 @@
+import array
 import asyncio
 import collections
 import concurrent.futures
+import contextlib
 import dataclasses
+import importlib
 import logging
+import os
+import sys
+import threading
 from typing import Optional
 from unittest import mock
 
 import pytest
 from google.api_core.exceptions import FailedPrecondition, NotFound
+from google.cloud.storage.asyncio.async_multi_range_downloader import (
+    AsyncMultiRangeDownloader,
+)
 
 from gcsfs import zb_hns_utils
 from gcsfs.retry import GenerationMismatchError
@@ -270,6 +279,197 @@ async def test_init_aaow_failed_precondition(if_generation_match, expected):
     elif if_generation_match == 7:
         assert excinfo.value.generation == 7
         assert excinfo.value.__cause__ is mock_writer_instance.open.side_effect
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "if_generation_match, storage_class, expected_generation, expected_kwargs",
+    [
+        (None, None, None, {}),
+        (0, None, 0, {}),
+        (7, None, None, {"preconditions": _Preconditions(if_generation_match=7)}),
+        (None, "RAPID", None, {}),
+    ],
+    ids=["default", "exclusive_create", "cas_overwrite", "storage_class_on_blob"],
+)
+async def test_init_aaow_kms_key_name_uses_from_blob(
+    if_generation_match, storage_class, expected_generation, expected_kwargs
+):
+    """When kms_key_name is set and Preconditions is available, init_aaow builds a
+    Blob (with storage_class set on the Blob, not passed as a kwarg) and opens
+    AsyncAppendableObjectWriter.from_blob."""
+    kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
+    mock_writer_instance = mock.AsyncMock()
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", _Preconditions),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            new_callable=mock.Mock,
+        ) as mock_writer_class,
+    ):
+        mock_writer_class.from_blob.return_value = mock_writer_instance
+        result = await zb_hns_utils.init_aaow(
+            mock_grpc_client,
+            bucket_name,
+            object_name,
+            if_generation_match=if_generation_match,
+            storage_class=storage_class,
+            kms_key_name=kms_key,
+        )
+
+    mock_writer_class.assert_not_called()
+    mock_writer_class.from_blob.assert_called_once()
+    call_kwargs = mock_writer_class.from_blob.call_args.kwargs
+    assert "storage_class" not in call_kwargs
+    blob = call_kwargs.pop("blob")
+    assert blob.bucket.name == bucket_name
+    assert blob.name == object_name
+    assert blob.kms_key_name == kms_key
+    assert blob.storage_class == storage_class
+    assert call_kwargs == {
+        "client": mock_grpc_client,
+        "generation": expected_generation,
+        "writer_options": {},
+        **expected_kwargs,
+    }
+    mock_writer_instance.open.assert_awaited_once()
+    assert result is mock_writer_instance
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "if_generation_match, expected",
+    [(0, FileExistsError), (7, GenerationMismatchError), (None, FailedPrecondition)],
+)
+async def test_init_aaow_kms_key_name_failed_precondition(
+    if_generation_match, expected
+):
+    """FailedPrecondition from from_blob().open() maps the same way as direct __init__."""
+    mock_writer_instance = mock.AsyncMock()
+    mock_writer_instance.open.side_effect = FailedPrecondition("mismatch")
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", _Preconditions),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            new_callable=mock.Mock,
+        ) as mock_writer_class,
+    ):
+        mock_writer_class.from_blob.return_value = mock_writer_instance
+        with pytest.raises(expected) as excinfo:
+            await zb_hns_utils.init_aaow(
+                mock_grpc_client,
+                bucket_name,
+                object_name,
+                if_generation_match=if_generation_match,
+                kms_key_name="projects/p/locations/l/keyRings/r/cryptoKeys/k",
+            )
+    if if_generation_match == 7:
+        assert excinfo.value.generation == 7
+        assert excinfo.value.__cause__ is mock_writer_instance.open.side_effect
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gen", [5, "12345"])
+@pytest.mark.parametrize("preconditions", [None, _Preconditions])
+async def test_init_aaow_kms_key_name_rejects_existing_generation(gen, preconditions):
+    """AppendObjectSpec (generation > 0) ignores Blob metadata, so kms_key_name is rejected."""
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", preconditions),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            new_callable=mock.Mock,
+        ) as mock_writer_class,
+    ):
+        with pytest.raises(
+            ValueError,
+            match="kms_key_name cannot be set for an existing object generation",
+        ):
+            await zb_hns_utils.init_aaow(
+                mock_grpc_client,
+                bucket_name,
+                object_name,
+                generation=gen,
+                kms_key_name="projects/p/locations/l/keyRings/r/cryptoKeys/k",
+            )
+        mock_writer_class.assert_not_called()
+        mock_writer_class.from_blob.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gen", [0, "0"])
+async def test_init_aaow_kms_key_name_normalizes_zero_generation(gen):
+    """generation=0 and generation='0' both pass integer 0 to from_blob so the SDK
+    takes the WriteObjectSpec(if_generation_match=0) branch instead of AppendObjectSpec.
+    """
+    kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
+    mock_writer_instance = mock.AsyncMock()
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", _Preconditions),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            new_callable=mock.Mock,
+        ) as mock_writer_class,
+    ):
+        mock_writer_class.from_blob.return_value = mock_writer_instance
+        await zb_hns_utils.init_aaow(
+            mock_grpc_client,
+            bucket_name,
+            object_name,
+            generation=gen,
+            kms_key_name=kms_key,
+        )
+
+    call_kwargs = mock_writer_class.from_blob.call_args.kwargs
+    assert type(call_kwargs["generation"]) is int
+    assert call_kwargs["generation"] == 0
+    assert call_kwargs["blob"].kms_key_name == kms_key
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_gen", [-1, "-5", True, False, 1.5, "not-an-int"])
+async def test_init_aaow_kms_key_name_rejects_invalid_generation(bad_gen):
+    """Negative, boolean, float, or non-numeric generations with kms_key_name raise ValueError."""
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", _Preconditions),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            new_callable=mock.Mock,
+        ) as mock_writer_class,
+    ):
+        with pytest.raises(ValueError, match="generation"):
+            await zb_hns_utils.init_aaow(
+                mock_grpc_client,
+                bucket_name,
+                object_name,
+                generation=bad_gen,
+                kms_key_name="projects/p/locations/l/keyRings/r/cryptoKeys/k",
+            )
+        mock_writer_class.assert_not_called()
+        mock_writer_class.from_blob.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_init_aaow_kms_key_name_unsupported_sdk():
+    """Without Preconditions, init_aaow rejects kms_key_name before constructing a writer."""
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", None),
+        mock.patch(
+            "gcsfs.zb_hns_utils.AsyncAppendableObjectWriter",
+            new_callable=mock.Mock,
+        ) as mock_writer_class,
+    ):
+        with pytest.raises(
+            NotImplementedError,
+            match="AsyncAppendableObjectWriter.from_blob accepts Preconditions",
+        ):
+            await zb_hns_utils.init_aaow(
+                mock_grpc_client,
+                bucket_name,
+                object_name,
+                kms_key_name="projects/p/locations/l/keyRings/r/cryptoKeys/k",
+            )
+        mock_writer_class.assert_not_called()
+        mock_writer_class.from_blob.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -943,6 +1143,490 @@ def test_direct_memmove_buffer():
     result_bytes = buf.get_value()
     assert result_bytes == b"helloworld"
 
+    executor.shutdown()
+
+
+def test_direct_memmove_buffer_accepts_memoryview_slices():
+    # The storage SDK's zero-copy read path hands chunks over as memoryview
+    # slices of the gRPC message; halves above THRESHOLD_BYTES_FOR_SCHEDULING
+    # go through the executor, so this covers the scheduled memmove path.
+    data = bytes(range(256)) * 2048
+    size = len(data)
+    half = size // 2
+    assert half > DirectMemmoveBuffer.THRESHOLD_BYTES_FOR_SCHEDULING
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(size, executor, max_pending=2)
+    view = buf.get_view(0, size)
+
+    view.write(memoryview(data)[:half]).result()
+    view.write(memoryview(data)[half:]).result()
+
+    view.close()
+    buf.close()
+    assert buf.get_value() == data
+    executor.shutdown()
+
+
+def test_direct_memmove_buffer_copies_whole_buffer_memoryview():
+    # A bytes payload covering the whole buffer is kept by reference. A small
+    # memoryview covering it is copied into new bytes during write(), which
+    # then take the same path, so the caller can resize or overwrite the source.
+    data = bytes(range(256)) * 4
+    source = bytearray(data)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(len(data), executor, max_pending=2)
+    view = buf.get_view(0, len(data))
+
+    view.write(memoryview(source)).result()
+    source[:] = b"\x00" * len(source)
+    source.clear()
+
+    view.close()
+    buf.close()
+    assert buf._start_address is None
+    result = buf.get_value()
+    assert isinstance(result, bytes)
+    assert result == data
+    executor.shutdown()
+
+
+def test_direct_memmove_buffer_memoryview_after_module_reexecution():
+    # gcsfs/tests/test_init.py drops every gcsfs module from sys.modules and
+    # imports the package again, then restores the originals. The module body
+    # runs twice in one process; each run binds its own private PyDLL
+    # functions, so the second run must not break the first module's calls.
+    import gcsfs
+
+    saved_module = sys.modules.pop("gcsfs.zb_hns_utils")
+    saved_attr = gcsfs.zb_hns_utils
+    try:
+        importlib.import_module("gcsfs.zb_hns_utils")
+    finally:
+        sys.modules["gcsfs.zb_hns_utils"] = saved_module
+        gcsfs.zb_hns_utils = saved_attr
+
+    data = bytes(range(256)) * 4
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(len(data), executor, max_pending=2)
+    view = buf.get_view(0, len(data))
+
+    view.write(memoryview(data)).result()
+
+    view.close()
+    buf.close()
+    assert buf.get_value() == data
+    executor.shutdown()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["text", 123, memoryview(b"abcdef")[::2], memoryview(b"abcdef")[0:0:2]],
+    ids=["str", "int", "non_contiguous_memoryview", "empty_non_contiguous_memoryview"],
+)
+def test_partial_view_write_rejects_non_contiguous_or_non_buffer(bad):
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(4, executor, max_pending=2)
+    view = buf.get_view(0, 4)
+
+    with pytest.raises(ValueError, match="Expected a contiguous bytes-like object"):
+        view.write(bad)
+
+    executor.shutdown()
+
+
+@pytest.mark.parametrize(
+    "make",
+    [bytearray, lambda data: array.array("I", data)],
+    ids=["bytearray", "array_uint32"],
+)
+def test_partial_view_write_accepts_any_contiguous_buffer(make):
+    data = bytes(range(256)) * 4
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(len(data), executor, max_pending=2)
+    view = buf.get_view(0, len(data))
+
+    view.write(make(data)).result()
+
+    view.close()
+    buf.close()
+    assert buf.get_value() == data
+    executor.shutdown()
+
+
+@pytest.mark.parametrize(
+    "make_view",
+    [
+        lambda data: memoryview(data).cast("I"),
+        lambda data: memoryview(data).cast("B", [4, len(data) // 4]),
+    ],
+    ids=["cast_uint32", "two_dimensional"],
+)
+def test_partial_view_write_sizes_memoryview_in_bytes(make_view):
+    # len() of these views is a fraction of their byte size; the whole payload
+    # must still be copied and accounted for.
+    data = bytes(range(256)) * 4
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(len(data), executor, max_pending=2)
+    view = buf.get_view(0, len(data))
+
+    view.write(make_view(data)).result()
+
+    view.close()
+    buf.close()
+    assert buf.get_value() == data
+    executor.shutdown()
+
+
+def test_partial_view_write_handles_bytes_subclass_and_empty_2d_view():
+    class _LyingBytes(bytes):
+        def __len__(self):
+            return 64
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        # Whole-buffer write of a bytes subclass returns plain bytes sized by
+        # its true buffer export rather than Python __len__.
+        whole = DirectMemmoveBuffer(4, executor, max_pending=2)
+        wv = whole.get_view(0, 4)
+        wv.write(_LyingBytes(b"abcd")).result()
+        wv.close()
+        whole.close()
+        res = whole.get_value()
+        assert type(res) is bytes and res == b"abcd"
+
+        # Multi-view write + empty 2D C-contiguous view does not over-read or fail.
+        split = DirectMemmoveBuffer(8, executor, max_pending=2)
+        v1 = split.get_view(0, 4)
+        v2 = split.get_view(4, 4)
+        empty_2d = memoryview(b"abcd").cast("B", [1, 4])[:0]
+        v1.write(empty_2d).result()
+        v1.write(_LyingBytes(b"efgh")).result()
+        v2.write(b"ijkl").result()
+        v1.close()
+        v2.close()
+        split.close()
+        assert split.get_value() == b"efghijkl"
+    finally:
+        executor.shutdown()
+
+
+def test_partial_view_write_error_does_not_pin_buffer():
+    # PartialView.write casts non-bytes inputs to an internal byte memoryview;
+    # if write() fails, the exception traceback must not keep that export open
+    # while the caller holds the exception (e.g. cat_ranges on_error="return"),
+    # nor release a memoryview owned by the caller.
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        buf = DirectMemmoveBuffer(4, executor, max_pending=2)
+        view = buf.get_view(0, 4)
+
+        overflow_src = bytearray(b"abcdef")
+        caller_mv = memoryview(overflow_src)
+        with pytest.raises(BufferError) as overflow_exc:
+            view.write(caller_mv)
+        assert "Max capacity is 4 bytes" in str(overflow_exc.value)
+        assert caller_mv.tobytes() == b"abcdef"
+        caller_mv.release()
+        overflow_src.clear()
+
+        buf.close()
+        closed_src = bytearray(b"abcd")
+        with pytest.raises(ValueError) as closed_exc:
+            view.write(closed_src)
+        assert "closed buffer" in str(closed_exc.value)
+        closed_src.clear()
+    finally:
+        executor.shutdown()
+
+
+@pytest.mark.parametrize("copy_fails", [False, True], ids=["copied", "copy_fails"])
+def test_direct_memmove_buffer_releases_source_before_future_completes(copy_fails):
+    # A scheduled copy works on PartialView.write's own byte view of the chunk.
+    # The worker's arguments, or the stored error of a failed copy, would keep
+    # that view alive past the write future, so the source could not be resized
+    # by a caller reacting to the future.
+    size = DirectMemmoveBuffer.THRESHOLD_BYTES_FOR_SCHEDULING + 1
+    source = bytearray(b"a" * size)
+    resize_errors = []
+
+    def resize_source(_future):
+        try:
+            source.append(0)
+            resize_errors.append(None)
+        except BufferError as e:
+            resize_errors.append(e)
+
+    failing_memmove = (
+        mock.patch.object(zb_hns_utils.ctypes, "memmove", side_effect=OSError("boom"))
+        if copy_fails
+        else contextlib.nullcontext()
+    )
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    gate = threading.Event()
+    executor.submit(gate.wait)  # hold the worker until the callback is attached
+    buf = DirectMemmoveBuffer(size, executor)
+    with failing_memmove:
+        future = buf.get_view(0, size).write(source)
+        future.add_done_callback(resize_source)
+        gate.set()
+        error = future.exception()
+        executor.shutdown()
+
+    assert isinstance(error, OSError) == copy_fails
+    assert resize_errors == [None]
+
+
+@pytest.mark.parametrize(
+    "size",
+    [1024, DirectMemmoveBuffer.THRESHOLD_BYTES_FOR_SCHEDULING + 1],
+    ids=["inline", "scheduled"],
+)
+def test_direct_memmove_buffer_leaves_callers_memoryview_usable(size):
+    # google-cloud-storage reads a chunk again after write() returns (the
+    # rolling CRC32C of whole-object reads), so the sink may release its own
+    # view of the chunk but never the caller's. The buffer is one byte larger
+    # than the chunk, so the chunk is copied through the sink's own view.
+    data = bytes(range(256)) * (size // 256 + 1)
+    chunk = memoryview(data)[:size]
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(size + 1, executor)
+    view = buf.get_view(0, size + 1)
+
+    view.write(chunk).result()
+    assert chunk.tobytes() == data[:size]
+    view.write(b"!").result()
+
+    view.close()
+    buf.close()
+    assert buf.get_value() == data[:size] + b"!"
+    executor.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing, expected", [(None, "1"), ("0", "0")])
+async def test_init_mrd_enables_zero_copy_bidi_read(monkeypatch, existing, expected):
+    # The opt-in happens before create_mrd opens the stream, and an explicit
+    # setting in the environment wins.
+    name = zb_hns_utils.ZERO_COPY_BIDI_READ_ENV_VAR
+    if existing is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, existing)
+
+    seen_in_create_mrd = []
+
+    async def _fake_create_mrd(*args, **kwargs):
+        seen_in_create_mrd.append(os.environ.get(name))
+        return mock.Mock()
+
+    with mock.patch(
+        "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
+        side_effect=_fake_create_mrd,
+    ):
+        await zb_hns_utils.init_mrd(mock_grpc_client, bucket_name, object_name)
+
+    assert seen_in_create_mrd == [expected]
+    assert os.environ.get(name) == expected
+
+
+def test_import_does_not_enable_zero_copy_bidi_read(monkeypatch):
+    # Importing gcsfs must not change the SDK's behaviour for processes that
+    # never open a gRPC MRD read stream (Rapid or Rapid Cache Ultra).
+    import gcsfs
+
+    name = zb_hns_utils.ZERO_COPY_BIDI_READ_ENV_VAR
+    monkeypatch.delenv(name, raising=False)
+
+    saved_module = sys.modules.pop("gcsfs.zb_hns_utils")
+    saved_attr = gcsfs.zb_hns_utils
+    try:
+        importlib.import_module("gcsfs.zb_hns_utils")
+    finally:
+        sys.modules["gcsfs.zb_hns_utils"] = saved_module
+        gcsfs.zb_hns_utils = saved_attr
+
+    assert name not in os.environ
+
+
+class _MemoryviewDownloader:
+    """download_ranges() of a google-cloud-storage with accepts_memoryview=."""
+
+    bucket_name = "bucket"
+    object_name = "obj"
+    persisted_size = None
+
+    def __init__(self):
+        self.accepts_memoryview_args = []
+
+    async def download_ranges(self, read_ranges, accepts_memoryview=False):
+        self.accepts_memoryview_args.append(accepts_memoryview)
+        for _, length, buffer in read_ranges:
+            n = 6 if length == 0 else length
+            buffer.write(memoryview(b"x" * n))
+
+
+class _LegacyDownloader:
+    """download_ranges() of a google-cloud-storage without the keyword."""
+
+    bucket_name = "bucket"
+    object_name = "obj"
+    persisted_size = None
+
+    def __init__(self):
+        self.calls = 0
+
+    async def download_ranges(self, read_ranges):
+        self.calls += 1
+        for _, length, buffer in read_ranges:
+            n = 6 if length == 0 else length
+            buffer.write(b"x" * n)
+
+
+def test_download_ranges_kwargs_follow_the_downloader_signature():
+    first = zb_hns_utils._download_ranges_kwargs(_MemoryviewDownloader)
+    second = zb_hns_utils._download_ranges_kwargs(_MemoryviewDownloader)
+    assert first == {"accepts_memoryview": True}
+    assert second == {"accepts_memoryview": True}
+    assert first is not second
+    assert zb_hns_utils._download_ranges_kwargs(_LegacyDownloader) == {}
+    # Mock downloaders in tests carry download_ranges on the instance only.
+    assert zb_hns_utils._download_ranges_kwargs(type(mock.MagicMock())) == {}
+
+    class _UnhashableCallable:
+        __hash__ = None
+
+        async def __call__(self, read_ranges):
+            pass
+
+    class _UnhashableDownloader:
+        download_ranges = _UnhashableCallable()
+
+    assert zb_hns_utils._download_ranges_kwargs(_UnhashableDownloader) == {}
+
+
+@pytest.mark.asyncio
+async def test_download_range_requests_memoryview_chunks_when_supported():
+    mrd = _MemoryviewDownloader()
+    assert await zb_hns_utils.download_range(0, 4, mrd) == b"xxxx"
+    assert mrd.accepts_memoryview_args == [True]
+
+
+@pytest.mark.asyncio
+async def test_download_range_passes_no_keyword_to_older_sdks():
+    mrd = _LegacyDownloader()
+    assert await zb_hns_utils.download_range(0, 4, mrd) == b"xxxx"
+    assert mrd.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_download_ranges_requests_memoryview_chunks_when_supported():
+    mrd = _MemoryviewDownloader()
+    assert await zb_hns_utils.download_ranges([(0, 2), (5, 3)], mrd) == [
+        b"xx",
+        b"xxx",
+    ]
+    assert mrd.accepts_memoryview_args == [True]
+
+
+@pytest.mark.asyncio
+async def test_extended_gcsfs_mrd_downloads_forward_accepts_memoryview(tmp_path):
+    from fsspec.callbacks import Callback
+
+    from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    fs = ExtendedGcsFileSystem.__new__(ExtendedGcsFileSystem)
+    fs._memmove_executor = executor
+    fs.MIN_CHUNK_SIZE_FOR_CONCURRENCY = (
+        ExtendedGcsFileSystem.MIN_CHUNK_SIZE_FOR_CONCURRENCY
+    )
+    fs.version_aware = False
+    fs._uses_grpc_data_path = mock.AsyncMock(return_value=True)
+    fs._mrd_pool_cache = mock.Mock(get=mock.AsyncMock())
+
+    def _pool_for(mrd):
+        pool = mock.MagicMock(spec=MRDPool)
+        pool.finalized = False
+        pool.persisted_size = None
+        pool.close = mock.AsyncMock()
+
+        @contextlib.asynccontextmanager
+        async def _get_mrd():
+            yield mrd
+
+        pool.get_mrd.side_effect = _get_mrd
+        return pool
+
+    try:
+        mv_mrd = _MemoryviewDownloader()
+        mv_pool = _pool_for(mv_mrd)
+        assert await fs._concurrent_mrd_fetch(0, 6, 1, mv_pool) == b"xxxxxx"
+        assert await fs._download_range_group(mv_pool, [(0, 0, 2), (1, 4, 3)]) == [
+            b"xx",
+            b"xxx",
+        ]
+        fs._mrd_pool_cache.get.return_value = mv_pool
+        mv_out = tmp_path / "mv_out"
+        cb = Callback()
+        await fs._get_file_request("bucket/obj", str(mv_out), callback=cb)
+        assert mv_mrd.accepts_memoryview_args == [True, True, True]
+        assert mv_out.read_bytes() == b"xxxxxx"
+        assert cb.value == 6
+
+        legacy_mrd = _LegacyDownloader()
+        legacy_pool = _pool_for(legacy_mrd)
+        assert await fs._concurrent_mrd_fetch(0, 5, 1, legacy_pool) == b"xxxxx"
+        assert await fs._download_range_group(legacy_pool, [(0, 0, 4)]) == [b"xxxx"]
+        fs._mrd_pool_cache.get.return_value = legacy_pool
+        legacy_out = tmp_path / "legacy_out"
+        await fs._get_file_request("bucket/obj", str(legacy_out))
+        assert legacy_mrd.calls == 3
+        assert legacy_out.read_bytes() == b"xxxxxx"
+    finally:
+        executor.shutdown()
+
+
+def test_direct_memmove_buffer_copies_real_zero_copy_parser_chunks(monkeypatch):
+    # The chunk shape google-cloud-storage's zero-copy parser produces: a
+    # read-only view aliasing the whole received message. The copy must be
+    # correct and independent of the message, which the view keeps alive.
+    parser = pytest.importorskip("google.cloud.storage.asyncio._zero_copy_bidi_read")
+    from google.cloud import _storage_v2
+
+    assert zb_hns_utils.ZERO_COPY_BIDI_READ_ENV_VAR == parser._ENV_VAR
+    assert zb_hns_utils._download_ranges_kwargs(AsyncMultiRangeDownloader) == {
+        "accepts_memoryview": True
+    }
+
+    monkeypatch.setattr(parser, "_memoryview_supported", True)
+    payload = bytes(range(256)) * 1024
+    message = _storage_v2.BidiReadObjectResponse.serialize(
+        _storage_v2.BidiReadObjectResponse(
+            object_data_ranges=[
+                _storage_v2.ObjectRangeData(
+                    checksummed_data=_storage_v2.ChecksummedData(content=payload),
+                    read_range=_storage_v2.ReadRange(
+                        read_offset=0, read_length=len(payload), read_id=1
+                    ),
+                    range_end=True,
+                )
+            ]
+        )
+    )
+    response = parser.deserialize(message)
+    content = response.object_data_ranges[0].checksummed_data.content
+    assert isinstance(content, memoryview) and content.readonly
+    assert content.obj is message and len(content) == len(payload)
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    buf = DirectMemmoveBuffer(len(payload), executor, max_pending=2)
+    view = buf.get_view(0, len(payload))
+    view.write(content).result()
+    view.close()
+    buf.close()
+    result = buf.get_value()
+    del response, content, message
+    assert result == payload
     executor.shutdown()
 
 
@@ -1899,8 +2583,8 @@ def test_direct_memmove_buffer_pypy_fallback():
     falls back to using bytearray.
     """
     data1 = b"pypy_"
-    data2 = b"fallback"
-    size = len(data1) + len(data2)
+    source2 = bytearray(b"fallback")
+    size = len(data1) + len(source2)
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
     # Use max_pending=2 and split the write to prevent the zero-copy fast path
@@ -1909,10 +2593,12 @@ def test_direct_memmove_buffer_pypy_fallback():
     view = buf.get_view(0, size)
 
     future1 = view.write(data1)
-    future2 = view.write(data2)
+    future2 = view.write(memoryview(source2))
 
     future1.result()
     future2.result()
+    source2[:] = b"\x00" * len(source2)
+    source2.clear()
 
     view.close()
     buf.close()
@@ -1993,15 +2679,35 @@ async def test_init_mrd_attaches_features_metadata(monkeypatch, fw, dnt, ct, exp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "fw, dnt, exp",
+    "fw, dnt, kms_key_name, exp",
     [
-        ("pandas", False, [("x-goog-storage-gcsfs-features", "EAE=")]),
-        ("pandas", True, None),
-        (None, False, None),
+        ("pandas", False, None, [("x-goog-storage-gcsfs-features", "EAE=")]),
+        (
+            "pandas",
+            False,
+            "projects/p/locations/l/keyRings/r/cryptoKeys/k",
+            [("x-goog-storage-gcsfs-features", "EAE=")],
+        ),
+        ("pandas", True, None, None),
+        (
+            "pandas",
+            True,
+            "projects/p/locations/l/keyRings/r/cryptoKeys/k",
+            None,
+        ),
+        (None, False, None, None),
     ],
-    ids=["features_attached", "opted_out_zero_kwargs", "empty_zero_kwargs"],
+    ids=[
+        "features_attached",
+        "features_attached_kms",
+        "opted_out_zero_kwargs",
+        "opted_out_zero_kwargs_kms",
+        "empty_zero_kwargs",
+    ],
 )
-async def test_init_aaow_attaches_features_metadata(monkeypatch, fw, dnt, exp):
+async def test_init_aaow_attaches_features_metadata(
+    monkeypatch, fw, dnt, kms_key_name, exp
+):
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
     monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
     if dnt:
@@ -2012,14 +2718,19 @@ async def test_init_aaow_attaches_features_metadata(monkeypatch, fw, dnt, exp):
 
     spec = _zero_arg_open if exp is None else None
     writer = mock.Mock(open=mock.AsyncMock(spec=spec))
-    monkeypatch.setattr(
-        zb_hns_utils, "AsyncAppendableObjectWriter", mock.Mock(return_value=writer)
-    )
+    mock_writer_cls = mock.Mock(return_value=writer)
+    mock_writer_cls.from_blob.return_value = writer
+    monkeypatch.setattr(zb_hns_utils, "Preconditions", _Preconditions)
+    monkeypatch.setattr(zb_hns_utils, "AsyncAppendableObjectWriter", mock_writer_cls)
     token = set_telemetry_context(Dimension.FRAMEWORK, fw) if fw is not None else None
 
     try:
         res = await zb_hns_utils.init_aaow(
-            mock_grpc_client, bucket_name, object_name, generation
+            mock_grpc_client,
+            bucket_name,
+            object_name,
+            None if kms_key_name else generation,
+            kms_key_name=kms_key_name,
         )
     finally:
         if token is not None:
@@ -2027,4 +2738,10 @@ async def test_init_aaow_attaches_features_metadata(monkeypatch, fw, dnt, exp):
 
     kwargs = {"metadata": exp} if exp is not None else {}
     assert res is writer
+    if kms_key_name:
+        mock_writer_cls.from_blob.assert_called_once()
+        mock_writer_cls.assert_not_called()
+    else:
+        mock_writer_cls.assert_called_once()
+        mock_writer_cls.from_blob.assert_not_called()
     writer.open.assert_awaited_once_with(**kwargs)

@@ -84,7 +84,7 @@ The table below highlights how core filesystem and file-level operations change 
      - Downloads via gRPC MRD in configurable chunks.
    * - **put_file / pipe_file**
      - Uses HTTP multipart or resumable uploads.
-     - Uses Bidirectional RPC (`AsyncAppendableObjectWriter or AAOW <https://github.com/googleapis/python-storage/blob/8b7fbde10c80337c4b4a2f6c8a860e28371a770b/google/cloud/storage/asyncio/async_appendable_object_writer.py#L102>`_) for direct, high-performance writes. Upload parameters like ``contentType``, ``metadata``, ``fixed_key_metadata``, and ``kmsKeyName`` are not supported during uploads.
+     - Uses Bidirectional RPC (`AsyncAppendableObjectWriter or AAOW <https://github.com/googleapis/python-storage/blob/8b7fbde10c80337c4b4a2f6c8a860e28371a770b/google/cloud/storage/asyncio/async_appendable_object_writer.py#L102>`_) for direct, high-performance writes. Upload parameters like ``contentType``, ``metadata``, and ``fixed_key_metadata`` are not supported during uploads. ``kms_key_name`` is supported on Zonal buckets when ``google-cloud-storage`` provides ``Preconditions`` (raising ``NotImplementedError`` otherwise; appending to an existing object requires its key to match), and is rejected on Rapid Cache Ultra buckets when ``rcu_rapid_write=True`` (use the default ``rcu_rapid_write=False`` HTTP writes for CMEK).
    * - **cp_file (Copy)**
      - Server-side rewrite (``rewriteTo`` API).
      - **Not supported.** Raises ``NotImplementedError`` as zonal objects do not support rewrites.
@@ -169,6 +169,25 @@ To reproduce using more combinations, please see the `gcsfs/perf/microbenchmarks
      - 4722
      - ~2x
 
+Zero-copy reads
+---------------
+
+Each ``BidiReadObject`` response from a Rapid bucket carries up to 2 MiB of data. Older ``google-cloud-storage``
+releases parse the response into a protobuf object and copy the data out of it as ``bytes`` before it reaches
+``gcsfs``. Releases with the zero-copy ``BidiReadObject`` parser and ``AsyncMultiRangeDownloader.download_ranges(accepts_memoryview=...)``
+parse the response in place and, when asked, hand each chunk over as a ``memoryview`` of the received message
+(when ``google-crc32c`` can hash a ``memoryview``, or as a single ``bytes`` slice on older ``google-crc32c`` releases);
+the zonal read sinks in ``gcsfs`` copy straight from that view into the destination buffer, avoiding intermediate copies.
+CRC32C verification stays with the SDK.
+
+* When opening a gRPC read stream (``init_mrd``, used for Rapid and Rapid Cache Ultra buckets), ``gcsfs`` sets
+  ``GCS_PYTHON_CLIENT_ZERO_COPY_BIDI_READ=1`` if unset so ``google-cloud-storage`` enables its zero-copy parser;
+  importing ``gcsfs`` without opening a gRPC read stream leaves the environment unchanged. Set
+  ``GCS_PYTHON_CLIENT_ZERO_COPY_BIDI_READ=0`` explicitly in the environment to keep the SDK's generated parser.
+* ``gcsfs`` passes ``accepts_memoryview=True`` on every ``download_ranges`` call when the installed
+  ``google-cloud-storage`` accepts the keyword, and nothing otherwise. Other callers of ``download_ranges`` in the
+  same process keep receiving ``bytes`` unless they also pass ``accepts_memoryview=True``.
+
 Multiprocessing and gRPC
 ----------------------------------------------
 
@@ -209,7 +228,7 @@ When working with Rapid Storage in ``gcsfs``, keep the following GCS limitations
 2. **Append Semantics:** In a standard flat GCS bucket, appending to a file is typically a costly operation requiring a full object download and rewrite. Rapid Storage supports **native appends**. When you open a file in append mode (``ab``), ``gcsfs`` natively appends to the object and the object's size grows in real-time.
 3. **Single Writer:** Appendable objects can only have one active writer at a time. If a new write stream is established for an object, the original stream is interrupted and will return an error from Cloud Storage.
 4. **Finalization and Autocommit:** Once an object is finalized (e.g., the write stream is closed), you can no longer append to it. To take advantage of **native appends**, gcsfs keeps the object unfinalized by default. The ``autocommit`` argument will not work for Rapid buckets. If you want to finalize the object upon closing, you must specify ``finalize_on_close=True`` when opening the file.
-5. **Metadata and Object Size:** When fetching metadata, the object size might be stale for objects that are unfinalized and still being appended to. Additionally, setting ``contentType``, ``metadata``, ``fixed_key_metadata``, and ``kmsKeyName`` is not supported during upload to Rapid buckets.
+5. **Metadata and Object Size:** When fetching metadata, the object size might be stale for objects that are unfinalized and still being appended to. Additionally, setting ``contentType``, ``metadata``, and ``fixed_key_metadata`` is not supported during upload to Rapid buckets. ``kms_key_name`` works on Zonal buckets when ``google-cloud-storage`` provides ``Preconditions`` (and raises ``NotImplementedError`` otherwise); appending to an existing object requires its key to match, and Rapid Cache Ultra with ``rcu_rapid_write=True`` rejects ``kms_key_name`` (use the default ``rcu_rapid_write=False`` HTTP writes for CMEK).
 6. **Transactions:** ``transaction`` feature is not supported in Rapid buckets since it relies on ``discard()`` method which is not supported for Rapid buckets.
 7. **Write Buffering:** The flush interval is 16 MiB for writes in Rapid buckets, compared to 5 MiB in regional buckets. Calling ``flush`` is also more expensive in Rapid buckets because the gRPC stream must update the ``persisted_size``.
 8. **Incompatibilities:** Rapid buckets currently do not support certain standard GCS features, full list is here: https://docs.cloud.google.com/storage/docs/rapid/rapid-bucket#incompatibilities
