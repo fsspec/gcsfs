@@ -28,6 +28,7 @@ import gcsfs.tests.settings
 from gcsfs import GCSFileSystem
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFile
+from gcsfs.core import GCSFileSystem as CoreGCSFileSystem
 from gcsfs.credentials import GoogleCredentials
 from gcsfs.retry import GenerationMismatchError, HttpError
 from gcsfs.tests.conftest import (
@@ -2234,8 +2235,82 @@ def test_merge(gcs):
 
     with gcs.open(b, "wb") as f:
         f.write(b"a" * 10)
+
+    # Populate dircache before merge to verify cache invalidation.
+    gcs.ls(TEST_BUCKET)
+    assert TEST_BUCKET in gcs.dircache
+
     gcs.merge(TEST_BUCKET + "/joined", [a, b])
+    assert TEST_BUCKET not in gcs.dircache
+    assert TEST_BUCKET + "/joined" in gcs.ls(TEST_BUCKET)
     assert gcs.info(TEST_BUCKET + "/joined")["size"] == 20
+
+
+def test_merge_destination_generation_raises():
+    gcs_versioned = CoreGCSFileSystem(
+        token="anon", version_aware=True, skip_instance_cache=True
+    )
+    with pytest.raises(ValueError, match="Cannot write to specific object generation"):
+        gcs_versioned.merge(TEST_BUCKET + "/joined#12345", [a, b])
+
+
+def test_merge_empty_key_raises():
+    gcs_versioned = CoreGCSFileSystem(
+        token="anon", version_aware=True, skip_instance_cache=True
+    )
+    with pytest.raises(
+        ValueError, match="Cannot merge into bucket root without an object key"
+    ):
+        gcs_versioned.merge(TEST_BUCKET, [a, b])
+    with pytest.raises(ValueError, match="Source path must specify an object key"):
+        gcs_versioned.merge(TEST_BUCKET + "/joined", [TEST_BUCKET, b])
+
+
+def test_merge_bucket_mismatch_raises():
+    gcs_versioned = CoreGCSFileSystem(
+        token="anon", version_aware=True, skip_instance_cache=True
+    )
+    with pytest.raises(
+        ValueError,
+        match="Source bucket 'other_bucket' does not match destination bucket",
+    ):
+        gcs_versioned.merge(TEST_BUCKET + "/joined", ["other_bucket/file1", a])
+
+
+def test_merge_source_generations_forwarded():
+    gcs_versioned = CoreGCSFileSystem(
+        token="anon", version_aware=True, skip_instance_cache=True
+    )
+    calls = []
+
+    async def fake_call(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {}
+
+    with (
+        mock.patch.object(gcs_versioned, "_call", side_effect=fake_call),
+        mock.patch.object(
+            gcs_versioned, "_write_file_cache_update", new_callable=mock.AsyncMock
+        ) as mock_cache_update,
+    ):
+        gcs_versioned.merge(
+            TEST_BUCKET + "/joined",
+            [
+                f"{TEST_BUCKET}/src1#111",
+                f"{TEST_BUCKET}/src2?generation=222",
+                f"{TEST_BUCKET}/src3",
+            ],
+        )
+
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == ("POST", "b/{}/o/{}/compose", TEST_BUCKET, "joined")
+    assert kwargs["json"]["sourceObjects"] == [
+        {"name": "src1", "generation": 111},
+        {"name": "src2", "generation": 222},
+        {"name": "src3"},
+    ]
+    mock_cache_update.assert_awaited_once_with(TEST_BUCKET + "/joined")
 
 
 def test_bigger_than_block_read(gcs):
