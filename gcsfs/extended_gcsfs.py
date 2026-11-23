@@ -2735,7 +2735,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     callback.set_size(None)
                     os.makedirs(lparent, exist_ok=True)
                     with open(lpath, "wb") as f2:
-                        await mrd.download_ranges([(0, 0, f2)])
+                        await mrd.download_ranges(
+                            [(0, 0, f2)],
+                            **zb_hns_utils._download_ranges_kwargs(type(mrd)),
+                        )
                         bytes_written = f2.tell()
                     if bytes_written:
                         callback.relative_update(bytes_written)
