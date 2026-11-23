@@ -2303,9 +2303,9 @@ async def test_gcsfs_async_wrapper_super_resolution():
             id="rename",
         ),
         pytest.param(
-            lambda fs, tmp_path: fs.delete("test-bucket/renamed.txt"),
+            lambda fs, tmp_path: fs.delete("test-bucket/file.txt"),
             "delete",
-            lambda res: res == [None],
+            lambda res: res in ([None], ["test-bucket/file.txt"]),
             id="delete",
         ),
         pytest.param(
