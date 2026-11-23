@@ -111,6 +111,7 @@ def test_sdk_module_is_imported_from_the_regular_path_first(regular):
 @pytest.mark.asyncio
 async def test_upload_bytes_builds_the_blob(sdk):
     client = object()
+    kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
     await parallel_upload.parallel_upload_bytes(
         client,
         "bkt",
@@ -123,6 +124,7 @@ async def test_upload_bytes_builds_the_blob(sdk):
             "custom_time": "2026-01-02T03:04:05Z",
         },
         storage_class="RAPID",
+        kms_key_name=kms_key,
         segment_size=4096,
     )
     call = sdk.upload_chunks_concurrently_from_bytes.await_args
@@ -140,12 +142,14 @@ async def test_upload_bytes_builds_the_blob(sdk):
         2026, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc
     )
     assert blob.storage_class == "RAPID"
+    assert blob.kms_key_name == kms_key
 
 
 @pytest.mark.asyncio
-async def test_upload_bytes_sets_only_what_was_given(sdk):
+@pytest.mark.parametrize("kms_key_name", [None, ""])
+async def test_upload_bytes_sets_only_what_was_given(sdk, kms_key_name):
     await parallel_upload.parallel_upload_bytes(
-        object(), "bkt", "key", b"data", max_workers=3
+        object(), "bkt", "key", b"data", kms_key_name=kms_key_name, max_workers=3
     )
     call = sdk.upload_chunks_concurrently_from_bytes.await_args
     assert call.kwargs["max_workers"] == 3
@@ -179,14 +183,23 @@ async def test_upload_bytes_with_stub_sdk_raises_not_implemented(sdk):
 @pytest.mark.asyncio
 async def test_upload_file_calls_the_sdk(sdk):
     client = object()
+    kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
     await parallel_upload.parallel_upload_file(
-        client, "bkt", "key", "/tmp/data", storage_class="RAPID", max_workers=3
+        client,
+        "bkt",
+        "key",
+        "/tmp/data",
+        storage_class="RAPID",
+        kms_key_name=kms_key,
+        max_workers=3,
     )
     call = sdk.upload_chunks_concurrently_from_filename.await_args
     assert call.args == (client, "bkt", "key", "/tmp/data")
     assert set(call.kwargs) == {"blob", "preferred_segment_size_bytes", "max_workers"}
-    assert (call.kwargs["blob"].storage_class, call.kwargs["max_workers"]) == (
+    blob = call.kwargs["blob"]
+    assert (blob.storage_class, blob.kms_key_name, call.kwargs["max_workers"]) == (
         "RAPID",
+        kms_key,
         3,
     )
 

@@ -25,11 +25,20 @@ _UNSUPPORTED_MESSAGE = (
 )
 
 
-def _build_blob(bucket, key, content_type, metadata, fixed_key_metadata, storage_class):
+def _build_blob(
+    bucket,
+    key,
+    content_type,
+    metadata,
+    fixed_key_metadata,
+    storage_class,
+    kms_key_name,
+):
     """Returns the ``Blob`` describing the object to create.
 
-    A value of ``None`` leaves its field unset. ``fixed_key_metadata`` keys other
-    than the ones in ``SUPPORTED_FIXED_KEY_METADATA`` are ignored.
+    A value of ``None`` (or an empty ``kms_key_name``) leaves its field unset.
+    ``fixed_key_metadata`` keys other than the ones in
+    ``SUPPORTED_FIXED_KEY_METADATA`` are ignored.
     """
     blob = Blob(key, Bucket(None, bucket))
     if content_type is not None:
@@ -38,6 +47,8 @@ def _build_blob(bucket, key, content_type, metadata, fixed_key_metadata, storage
         blob.metadata = metadata
     if storage_class is not None:
         blob.storage_class = storage_class
+    if kms_key_name:
+        blob.kms_key_name = kms_key_name
     fixed_key_metadata = fixed_key_metadata or {}
     for name in SUPPORTED_FIXED_KEY_METADATA:
         value = fixed_key_metadata.get(name)
@@ -60,6 +71,7 @@ def _upload_kwargs(
     metadata,
     fixed_key_metadata,
     storage_class,
+    kms_key_name,
     segment_size,
     max_workers,
 ):
@@ -69,7 +81,13 @@ def _upload_kwargs(
     """
     kwargs = {
         "blob": _build_blob(
-            bucket, key, content_type, metadata, fixed_key_metadata, storage_class
+            bucket,
+            key,
+            content_type,
+            metadata,
+            fixed_key_metadata,
+            storage_class,
+            kms_key_name,
         ),
         "preferred_segment_size_bytes": segment_size,
     }
@@ -88,14 +106,15 @@ async def parallel_upload_bytes(
     metadata=None,
     fixed_key_metadata=None,
     storage_class=None,
+    kms_key_name=None,
     segment_size=None,
     max_workers=None,
 ) -> None:
     """Uploads ``data`` to ``bucket/key`` as one object, in parallel.
 
-    ``content_type``, ``metadata``, ``fixed_key_metadata`` and ``storage_class``
-    describe the object. ``segment_size``, in bytes, and ``max_workers`` are left
-    to the SDK when ``None``.
+    ``content_type``, ``metadata``, ``fixed_key_metadata``, ``storage_class``
+    and ``kms_key_name`` describe the object. ``segment_size``, in bytes, and
+    ``max_workers`` are left to the SDK when ``None``.
 
     Raises ``NotImplementedError`` when the installed google-cloud-storage
     release does not support parallel uploads.
@@ -109,6 +128,7 @@ async def parallel_upload_bytes(
         metadata,
         fixed_key_metadata,
         storage_class,
+        kms_key_name,
         segment_size,
         max_workers,
     )
@@ -130,6 +150,7 @@ async def parallel_upload_file(
     metadata=None,
     fixed_key_metadata=None,
     storage_class=None,
+    kms_key_name=None,
     segment_size=None,
     max_workers=None,
 ) -> None:
@@ -147,6 +168,7 @@ async def parallel_upload_file(
         metadata,
         fixed_key_metadata,
         storage_class,
+        kms_key_name,
         segment_size,
         max_workers,
     )
