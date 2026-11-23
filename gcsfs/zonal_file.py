@@ -296,10 +296,23 @@ class ZonalFile(GCSFile):
         kms_key_name = self.kms_key_name or None
         # generation is needed while creating aaow to append to existing objects
         if "a" in self.mode and kms_key_name:
-            generation, kms_key_name = await self._resolve_kms_append(
-                bucket_name, object_name, generation, kms_key_name
-            )
-        elif "a" in self.mode and generation is None:
+            for attempt in range(2):
+                gen, key = await self._resolve_kms_append(
+                    bucket_name, object_name, generation, kms_key_name
+                )
+                try:
+                    return await self.gcsfs._init_aaow(
+                        bucket_name,
+                        object_name,
+                        gen,
+                        flush_interval_bytes,
+                        if_generation_match=0 if gen is None else None,
+                        kms_key_name=key,
+                    )
+                except FileExistsError:
+                    if attempt:
+                        raise
+        if "a" in self.mode and generation is None:
             try:
                 # self.path might not be set yet, so reconstruct full path
                 info = await self.gcsfs._info(f"{bucket_name}/{object_name}")

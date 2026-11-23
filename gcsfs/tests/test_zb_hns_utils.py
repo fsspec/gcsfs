@@ -2184,15 +2184,35 @@ async def test_init_mrd_attaches_features_metadata(monkeypatch, fw, dnt, ct, exp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "fw, dnt, exp",
+    "fw, dnt, kms_key_name, exp",
     [
-        ("pandas", False, [("x-goog-storage-gcsfs-features", "EAE=")]),
-        ("pandas", True, None),
-        (None, False, None),
+        ("pandas", False, None, [("x-goog-storage-gcsfs-features", "EAE=")]),
+        (
+            "pandas",
+            False,
+            "projects/p/locations/l/keyRings/r/cryptoKeys/k",
+            [("x-goog-storage-gcsfs-features", "EAE=")],
+        ),
+        ("pandas", True, None, None),
+        (
+            "pandas",
+            True,
+            "projects/p/locations/l/keyRings/r/cryptoKeys/k",
+            None,
+        ),
+        (None, False, None, None),
     ],
-    ids=["features_attached", "opted_out_zero_kwargs", "empty_zero_kwargs"],
+    ids=[
+        "features_attached",
+        "features_attached_kms",
+        "opted_out_zero_kwargs",
+        "opted_out_zero_kwargs_kms",
+        "empty_zero_kwargs",
+    ],
 )
-async def test_init_aaow_attaches_features_metadata(monkeypatch, fw, dnt, exp):
+async def test_init_aaow_attaches_features_metadata(
+    monkeypatch, fw, dnt, kms_key_name, exp
+):
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
     monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
     if dnt:
@@ -2203,14 +2223,19 @@ async def test_init_aaow_attaches_features_metadata(monkeypatch, fw, dnt, exp):
 
     spec = _zero_arg_open if exp is None else None
     writer = mock.Mock(open=mock.AsyncMock(spec=spec))
-    monkeypatch.setattr(
-        zb_hns_utils, "AsyncAppendableObjectWriter", mock.Mock(return_value=writer)
-    )
+    mock_writer_cls = mock.Mock(return_value=writer)
+    mock_writer_cls.from_blob.return_value = writer
+    monkeypatch.setattr(zb_hns_utils, "Preconditions", _Preconditions)
+    monkeypatch.setattr(zb_hns_utils, "AsyncAppendableObjectWriter", mock_writer_cls)
     token = set_telemetry_context(Dimension.FRAMEWORK, fw) if fw is not None else None
 
     try:
         res = await zb_hns_utils.init_aaow(
-            mock_grpc_client, bucket_name, object_name, generation
+            mock_grpc_client,
+            bucket_name,
+            object_name,
+            None if kms_key_name else generation,
+            kms_key_name=kms_key_name,
         )
     finally:
         if token is not None:
@@ -2218,4 +2243,10 @@ async def test_init_aaow_attaches_features_metadata(monkeypatch, fw, dnt, exp):
 
     kwargs = {"metadata": exp} if exp is not None else {}
     assert res is writer
+    if kms_key_name:
+        mock_writer_cls.from_blob.assert_called_once()
+        mock_writer_cls.assert_not_called()
+    else:
+        mock_writer_cls.assert_called_once()
+        mock_writer_cls.from_blob.assert_not_called()
     writer.open.assert_awaited_once_with(**kwargs)

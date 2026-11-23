@@ -152,6 +152,11 @@ def _validate_grpc_write_kms_key_name(layout, kms_key_name):
             "kms_key_name on Zonal buckets requires a google-cloud-storage "
             "release whose AsyncAppendableObjectWriter.from_blob accepts Preconditions."
         )
+    if "/cryptoKeyVersions/" in kms_key_name:
+        raise ValueError(
+            "kms_key_name must not include /cryptoKeyVersions/: GCS encrypts "
+            "new objects with the key's primary version."
+        )
 
 
 @contextlib.asynccontextmanager

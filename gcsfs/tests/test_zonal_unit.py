@@ -1262,6 +1262,64 @@ async def test_zonal_uploads_forward_kms_key_name_when_preconditions_available(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "entry_point",
+    [
+        "open_wb",
+        "open_ab",
+        "open_xb",
+        "simple_upload",
+        "initiate_upload",
+        "pipe_file",
+        "put_file",
+        "_init_aaow",
+    ],
+)
+async def test_zonal_writes_reject_kms_key_name_with_crypto_key_version(
+    extended_gcsfs, async_gcs, zonal_write_mocks, file_path, entry_point, tmp_path
+):
+    """Zonal write entry points reject kms_key_name containing /cryptoKeyVersions/ up front."""
+    bucket, object_name, _ = async_gcs.split_path(file_path)
+    lpath = tmp_path / "payload.bin"
+    lpath.write_bytes(b"secret")
+    versioned_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"
+
+    with (
+        mock.patch("gcsfs.zb_hns_utils.Preconditions", object()),
+        pytest.raises(
+            ValueError,
+            match="kms_key_name must not include /cryptoKeyVersions/",
+        ),
+    ):
+        if entry_point.startswith("open_"):
+            mode = entry_point.removeprefix("open_")
+            extended_gcsfs.open(file_path, mode, kms_key_name=versioned_key)
+        elif entry_point == "simple_upload":
+            await simple_upload(
+                async_gcs,
+                bucket=bucket,
+                key=object_name,
+                datain=b"secret",
+                kms_key_name=versioned_key,
+            )
+        elif entry_point == "initiate_upload":
+            await initiate_upload(
+                fs=async_gcs,
+                bucket=bucket,
+                key=object_name,
+                kms_key_name=versioned_key,
+            )
+        elif entry_point == "pipe_file":
+            await async_gcs._pipe_file(file_path, b"secret", kms_key_name=versioned_key)
+        elif entry_point == "put_file":
+            await async_gcs._put_file(str(lpath), file_path, kms_key_name=versioned_key)
+        else:
+            await async_gcs._init_aaow(bucket, object_name, kms_key_name=versioned_key)
+
+    zonal_write_mocks["init_aaow"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_upload_chunk_zonal_exception_cleanup(
     async_gcs, zonal_write_mocks, file_path
 ):

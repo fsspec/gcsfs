@@ -1194,10 +1194,145 @@ def test_zonal_file_append_nonexistent_creates_with_kms_key_name(
         key,
         None,
         _DEFAULT_FLUSH_INTERVAL_BYTES,
-        if_generation_match=None,
+        if_generation_match=0,
         storage_class=None,
         kms_key_name=kms_key,
     )
+
+
+@pytest.mark.skipif(is_real_gcs(), reason="Unit test using mocked Preconditions.")
+@pytest.mark.parametrize(
+    "zonal_write_mocks", [layouts.ZONAL_HIERARCHICAL], indirect=True
+)
+def test_zonal_file_append_kms_key_name_retries_concurrent_create_matching_key(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """If another writer creates a matching-key object between GET 404 and open(if_generation_match=0),
+    ZonalFile._init_aaow re-checks GET and appends to the new generation."""
+    bucket, key, _ = extended_gcsfs.split_path(file_path)
+    kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
+    info_dict = {
+        "generation": "999",
+        "type": "file",
+        "name": file_path,
+        "kmsKeyName": f"{kms_key}/cryptoKeyVersions/5",
+    }
+    zonal_write_mocks["init_aaow"].side_effect = [
+        FileExistsError(file_path),
+        zonal_write_mocks["aaow"],
+    ]
+
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", object()),
+        mock.patch.object(
+            extended_gcsfs,
+            "_call",
+            new_callable=mock.AsyncMock,
+            side_effect=[FileNotFoundError, info_dict],
+        ) as m_call,
+    ):
+        with extended_gcsfs.open(
+            file_path, "ab", finalize_on_close=True, kms_key_name=kms_key
+        ) as f:
+            f.write(test_data)
+
+    assert m_call.await_args_list == [
+        mock.call("GET", "b/{}/o/{}", bucket, key, json_out=True),
+        mock.call("GET", "b/{}/o/{}", bucket, key, json_out=True),
+    ]
+    assert zonal_write_mocks["init_aaow"].await_args_list == [
+        mock.call(
+            extended_gcsfs.grpc_client,
+            bucket,
+            key,
+            None,
+            _DEFAULT_FLUSH_INTERVAL_BYTES,
+            if_generation_match=0,
+            storage_class=None,
+            kms_key_name=kms_key,
+        ),
+        mock.call(
+            extended_gcsfs.grpc_client,
+            bucket,
+            key,
+            "999",
+            _DEFAULT_FLUSH_INTERVAL_BYTES,
+            if_generation_match=None,
+            storage_class=None,
+        ),
+    ]
+
+
+@pytest.mark.skipif(is_real_gcs(), reason="Unit test using mocked Preconditions.")
+@pytest.mark.parametrize(
+    "existing_kms_key",
+    [None, "projects/p/locations/l/keyRings/r/cryptoKeys/other/cryptoKeyVersions/1"],
+    ids=["unencrypted", "different_key"],
+)
+@pytest.mark.parametrize(
+    "zonal_write_mocks", [layouts.ZONAL_HIERARCHICAL], indirect=True
+)
+def test_zonal_file_append_kms_key_name_concurrent_create_mismatched_key_raises(
+    extended_gcsfs, zonal_write_mocks, file_path, existing_kms_key
+):
+    """If another writer creates an unencrypted or differently-encrypted object between GET 404
+    and open(if_generation_match=0), the retry GET rejects the mismatched key."""
+    bucket, key, _ = extended_gcsfs.split_path(file_path)
+    kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
+    info_dict = {"generation": "999", "type": "file", "name": file_path}
+    if existing_kms_key is not None:
+        info_dict["kmsKeyName"] = existing_kms_key
+    zonal_write_mocks["init_aaow"].side_effect = FileExistsError(file_path)
+
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", object()),
+        mock.patch.object(
+            extended_gcsfs,
+            "_call",
+            new_callable=mock.AsyncMock,
+            side_effect=[FileNotFoundError, info_dict],
+        ) as m_call,
+    ):
+        with pytest.raises(ValueError, match="Cannot append with kms_key_name"):
+            with extended_gcsfs.open(
+                file_path, "ab", finalize_on_close=True, kms_key_name=kms_key
+            ) as f:
+                f.write(test_data)
+
+    assert m_call.await_count == 2
+    assert zonal_write_mocks["init_aaow"].await_count == 1
+    assert f.closed
+
+
+@pytest.mark.skipif(is_real_gcs(), reason="Unit test using mocked Preconditions.")
+@pytest.mark.parametrize(
+    "zonal_write_mocks", [layouts.ZONAL_HIERARCHICAL], indirect=True
+)
+def test_zonal_file_append_kms_key_name_second_file_exists_error_propagates(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """If both create-if-missing attempts hit FileExistsError, the second error propagates."""
+    kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
+    zonal_write_mocks["init_aaow"].side_effect = FileExistsError(file_path)
+
+    with (
+        mock.patch.object(zb_hns_utils, "Preconditions", object()),
+        mock.patch.object(
+            extended_gcsfs,
+            "_call",
+            new_callable=mock.AsyncMock,
+            side_effect=FileNotFoundError,
+        ) as m_call,
+    ):
+        with pytest.raises(FileExistsError):
+            with extended_gcsfs.open(
+                file_path, "ab", finalize_on_close=True, kms_key_name=kms_key
+            ) as f:
+                f.write(test_data)
+
+    assert m_call.await_count == 2
+    assert zonal_write_mocks["init_aaow"].await_count == 2
+    assert f.closed
 
 
 @pytest.mark.skipif(is_real_gcs(), reason="Unit test using mocked Preconditions.")
