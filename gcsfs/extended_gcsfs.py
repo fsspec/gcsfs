@@ -138,6 +138,27 @@ def _rapid_cache_ultra_disabled_error(bucket):
     )
 
 
+def _validate_grpc_write_kms_key_name(layout, kms_key_name):
+    """Validate ``kms_key_name`` before opening a gRPC appendable writer."""
+    if not kms_key_name:
+        return
+    if layout is not None and layout.is_rcu:
+        raise NotImplementedError(
+            "kms_key_name is not supported for gRPC RAPID uploads to RCU buckets; "
+            "use rcu_rapid_write=False to write with kms_key_name over HTTP."
+        )
+    if zb_hns_utils.Preconditions is None:
+        raise NotImplementedError(
+            "kms_key_name on Zonal buckets requires a google-cloud-storage "
+            "release whose AsyncAppendableObjectWriter.from_blob accepts Preconditions."
+        )
+    if "/cryptoKeyVersions/" in kms_key_name:
+        raise ValueError(
+            "kms_key_name must not include /cryptoKeyVersions/: GCS encrypts "
+            "new objects with the key's primary version."
+        )
+
+
 @contextlib.asynccontextmanager
 async def _get_mrd_from_pool_or_mrd(mrd_or_pool):
     """
@@ -240,9 +261,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             default, writes to RCU buckets use the HTTP upload path and create
             ``STANDARD`` objects, as on a bucket without the cache. Reads use
             gRPC either way. A ``RAPID`` object stays in one zone until GCS
-            copies it to regional storage, and these writes ignore
-            ``content_type``, ``metadata``, ``fixed_key_metadata`` and
-            ``kms_key_name``. Can also be set with
+            copies it to regional storage; these writes ignore
+            ``content_type``, ``metadata`` and ``fixed_key_metadata``, and
+            reject ``kms_key_name`` with ``NotImplementedError``. Can also be set with
             ``FSSPEC_GCS_RCU_RAPID_WRITE=true`` or
             ``fsspec.config.conf.setdefault("gcs", {})["rcu_rapid_write"] = True``.
             Has no effect on Zonal buckets, which always use the appendable
@@ -666,6 +687,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         generation=None,
         flush_interval_bytes=None,
         if_generation_match=None,
+        kms_key_name=None,
     ):
         """Open an AsyncAppendableObjectWriter for ``bucket/key``.
 
@@ -674,6 +696,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         ``storage_class="RAPID"``: the object lands in the zonal cache and the
         server later copies it to regional storage. Zonal buckets already
         default to ``RAPID``, so their writes leave ``storage_class`` unset.
+
+        ``kms_key_name`` is forwarded for Zonal buckets and rejected with
+        ``NotImplementedError`` on RCU buckets.
 
         If the cached layout is known and no longer uses the gRPC data path,
         for example in a file opened while the bucket was cached as RCU that
@@ -697,6 +722,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         ):
             raise _rapid_cache_ultra_disabled_error(bucket)
         is_rcu = layout.is_rcu
+        _validate_grpc_write_kms_key_name(layout, kms_key_name)
+        init_kwargs = {
+            "if_generation_match": if_generation_match,
+            "storage_class": "RAPID" if is_rcu else None,
+        }
+        if kms_key_name:
+            init_kwargs["kms_key_name"] = kms_key_name
         try:
             return await zb_hns_utils.init_aaow(
                 self.grpc_client,
@@ -704,8 +736,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 key,
                 generation,
                 flush_interval_bytes,
-                if_generation_match=if_generation_match,
-                storage_class="RAPID" if is_rcu else None,
+                **init_kwargs,
             )
         # Catch every API error on purpose: once RCU is disabled the server rejects
         # writes with more than one status, e.g. InvalidArgument for new objects
@@ -2405,6 +2436,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         fixed_key_metadata=None,
         mode="overwrite",
         if_generation_match=None,
+        kms_key_name=None,
         **kwargs,
     ):
         """Upload a local file.
@@ -2440,6 +2472,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             The write mode, either 'overwrite' or 'create'.
         if_generation_match: int, optional
             Only write if the object's current generation matches this value.
+        kms_key_name: str, optional
+            Customer-managed encryption key name. Supported on Zonal gRPC
+            uploads when ``google-cloud-storage`` provides ``Preconditions`` on
+            ``AsyncAppendableObjectWriter.from_blob``; raises
+            ``NotImplementedError`` on older SDK releases and on RCU
+            ``rcu_rapid_write`` uploads.
         """
         bucket, key, generation = self.split_path(rpath)
         layout = await self._lookup_bucket_layout(bucket)
@@ -2450,6 +2488,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             if generation:
                 raise ValueError("Cannot write to specific object generation")
 
+            _validate_grpc_write_kms_key_name(layout, kms_key_name)
             finalize_on_close = self._resolve_finalize_on_close(
                 layout, kwargs.get("finalize_on_close")
             )
@@ -2461,6 +2500,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         if_generation_match=_resolve_generation_match(
                             mode, if_generation_match
                         ),
+                        kms_key_name=kms_key_name,
                     )
                 except RapidCacheUltraDisabledError as e:
                     logger.warning("%s Retrying the write over HTTP.", e)
@@ -2509,6 +2549,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             fixed_key_metadata=fixed_key_metadata,
             mode=mode,
             if_generation_match=if_generation_match,
+            kms_key_name=kms_key_name,
             **kwargs,
         )
 
@@ -2523,6 +2564,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         chunksize=50 * 2**20,
         mode="overwrite",
         if_generation_match=None,
+        kms_key_name=None,
         **kwargs,
     ):
         """Upload bytes to a file.
@@ -2556,6 +2598,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             The write mode, either 'overwrite' or 'create'.
         if_generation_match: int, optional
             Only write if the object's current generation matches this value.
+        kms_key_name: str, optional
+            Customer-managed encryption key name. Supported on Zonal gRPC
+            uploads when ``google-cloud-storage`` provides ``Preconditions`` on
+            ``AsyncAppendableObjectWriter.from_blob``; raises
+            ``NotImplementedError`` on older SDK releases and on RCU
+            ``rcu_rapid_write`` uploads.
         """
         # Before the writer opens and replaces the object, so that data that is
         # not bytes-like fails first; chunksize then counts bytes.
@@ -2563,6 +2611,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         bucket, key, generation = self.split_path(path)
         layout = await self._lookup_bucket_layout(bucket)
         if self._uses_grpc_write_path(layout):
+            _validate_grpc_write_kms_key_name(layout, kms_key_name)
             finalize_on_close = self._resolve_finalize_on_close(
                 layout, kwargs.get("finalize_on_close")
             )
@@ -2573,6 +2622,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     if_generation_match=_resolve_generation_match(
                         mode, if_generation_match
                     ),
+                    kms_key_name=kms_key_name,
                 )
             except RapidCacheUltraDisabledError as e:
                 logger.warning("%s Retrying the write over HTTP.", e)
@@ -2618,6 +2668,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             chunksize=chunksize,
             mode=mode,
             if_generation_match=if_generation_match,
+            kms_key_name=kms_key_name,
         )
 
     async def _get_file_request(
@@ -2958,12 +3009,17 @@ async def initiate_upload(
     mode: str, optional
         The write mode, either 'overwrite' or 'create'.
     kms_key_name: str, optional
-        Ignored by gRPC uploads.
+        Customer-managed encryption key name. Supported on Zonal gRPC uploads
+        when ``google-cloud-storage`` provides ``Preconditions`` on
+        ``AsyncAppendableObjectWriter.from_blob``; raises
+        ``NotImplementedError`` on older SDK releases and on RCU
+        ``rcu_rapid_write`` uploads.
     if_generation_match: int, optional
         Only write if the object's current generation matches this value.
     """
     layout = await fs._lookup_bucket_layout(bucket)
     if fs._uses_grpc_write_path(layout):
+        _validate_grpc_write_kms_key_name(layout, kms_key_name)
         try:
             writer = await fs._init_aaow(
                 bucket,
@@ -2971,6 +3027,7 @@ async def initiate_upload(
                 if_generation_match=_resolve_generation_match(
                     mode, if_generation_match
                 ),
+                kms_key_name=kms_key_name,
             )
         except RapidCacheUltraDisabledError as e:
             logger.warning("%s Retrying the write over HTTP.", e)
@@ -2978,12 +3035,11 @@ async def initiate_upload(
             if (
                 metadata
                 or fixed_key_metadata
-                or kms_key_name
                 or (content_type and content_type != "application/octet-stream")
             ):
                 logger.warning(
-                    "Zonal and RCU buckets do not support content_type, metadata, fixed_key_metadata, "
-                    "or kms_key_name during upload. These parameters will be ignored."
+                    "Zonal and RCU buckets do not support content_type, metadata, "
+                    "or fixed_key_metadata during upload. These parameters will be ignored."
                 )
             return writer
 
@@ -3048,12 +3104,17 @@ async def simple_upload(
     mode: str, optional
         The write mode, either 'overwrite' or 'create'.
     kms_key_name: str, optional
-        Ignored by gRPC uploads.
+        Customer-managed encryption key name. Supported on Zonal gRPC uploads
+        when ``google-cloud-storage`` provides ``Preconditions`` on
+        ``AsyncAppendableObjectWriter.from_blob``; raises
+        ``NotImplementedError`` on older SDK releases and on RCU
+        ``rcu_rapid_write`` uploads.
     if_generation_match: int, optional
         Only write if the object's current generation matches this value.
     """
     layout = await fs._lookup_bucket_layout(bucket)
     if fs._uses_grpc_write_path(layout):
+        _validate_grpc_write_kms_key_name(layout, kms_key_name)
         finalize_on_close = fs._resolve_finalize_on_close(
             layout, kwargs.get("finalize_on_close")
         )
@@ -3064,6 +3125,7 @@ async def simple_upload(
                 if_generation_match=_resolve_generation_match(
                     mode, if_generation_match
                 ),
+                kms_key_name=kms_key_name,
             )
         except RapidCacheUltraDisabledError as e:
             logger.warning("%s Retrying the write over HTTP.", e)
@@ -3071,13 +3133,13 @@ async def simple_upload(
             if (
                 metadatain
                 or fixed_key_metadata
-                or kms_key_name
                 or consistency
                 or (content_type and content_type != "application/octet-stream")
             ):
                 logger.warning(
-                    "Zonal and RCU buckets do not support content_type, metadatain, fixed_key_metadata, "
-                    "consistency or kms_key_name during upload. These parameters will be ignored."
+                    "Zonal and RCU buckets do not support content_type, metadatain, "
+                    "fixed_key_metadata, or consistency during upload. "
+                    "These parameters will be ignored."
                 )
             try:
                 await writer.append(datain)
