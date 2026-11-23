@@ -10,12 +10,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from gcsfs.tests.perf.subsystembenchmarks.dataloading import (  # noqa: E402
-    device as device_lib,
-)
-from gcsfs.tests.perf.subsystembenchmarks.dataloading import (  # noqa: E402
-    driver as dl_driver,
-)
+from gcsfs.tests.perf.subsystembenchmarks.dataloading import device as device_lib
+from gcsfs.tests.perf.subsystembenchmarks.dataloading import driver as dl_driver
 
 FAKE_GPU = torch.device("meta")
 
