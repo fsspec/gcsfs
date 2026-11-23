@@ -1953,6 +1953,7 @@ def test_zonal_file_failed_init_closes_mrd_pool(mock_gcsfs):
                 gcsfs=mock_gcsfs,
                 path="gs://test-bucket/test-key",
                 mode="rb",
+                cache_type="adaptive",
                 fixed_key_metadata=123,
             )
 

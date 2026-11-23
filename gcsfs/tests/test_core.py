@@ -4076,21 +4076,110 @@ def test_gcsfile_failed_read_init_preserves_exception_when_prefetcher_close_fail
 
 
 @pytest.mark.parametrize("cache_type", ["background", "mmap"])
-def test_gcsfile_failed_read_init_drops_non_adaptive_cache(gcs, cache_type):
-    """A failed read open does not leave a non-adaptive cache attached to the file."""
-    f = GCSFile.__new__(GCSFile)
+def test_gcsfile_failed_read_init_drops_non_adaptive_cache(
+    gcs, cache_type, monkeypatch
+):
+    """A failed read open releases non-adaptive caches without waiting for GC or dropping the exception."""
+    import gc
+    import tempfile
+    import weakref
 
-    with pytest.raises(TypeError):
-        f.__init__(
-            gcs,
-            f"{TEST_BUCKET}/nested/file1",
-            "rb",
-            cache_type=cache_type,
-            fixed_key_metadata=123,
-        )
+    import fsspec.caching
 
-    assert f.closed is True
-    assert f.cache is None
+    refs = []
+    orig_cache_cls = fsspec.caching.caches[cache_type]
+
+    def tracking_cache(*args, **kwargs):
+        inst = orig_cache_cls(*args, **kwargs)
+        refs.append(weakref.ref(inst))
+        return inst
+
+    monkeypatch.setitem(fsspec.caching.caches, cache_type, tracking_cache)
+
+    check_tmp_fds = cache_type == "mmap" and os.path.isdir("/proc/self/fd")
+    tmpdir_prefix = os.path.realpath(tempfile.gettempdir()) + os.sep
+
+    def open_tmp_fds():
+        out = set()
+        for entry in os.listdir("/proc/self/fd"):
+            try:
+                target = os.readlink(f"/proc/self/fd/{entry}")
+            except OSError:
+                continue
+            if target.startswith(("/tmp/", tmpdir_prefix)):
+                out.add((entry, target))
+        return out
+
+    gc.collect()
+    fds_before = open_tmp_fds() if check_tmp_fds else set()
+    was_gc_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        f = GCSFile.__new__(GCSFile)
+        with pytest.raises(TypeError) as exc_info:
+            f.__init__(
+                gcs,
+                f"{TEST_BUCKET}/nested/file1",
+                "rb",
+                cache_type=cache_type,
+                fixed_key_metadata=123,
+            )
+
+        assert f.closed is True
+        assert f.cache is None
+        assert len(refs) == 1
+        assert refs[0]() is None
+        if check_tmp_fds:
+            assert open_tmp_fds() - fds_before == set()
+    finally:
+        if was_gc_enabled:
+            gc.enable()
+
+    gc.collect()
+    assert refs[0]() is None
+    assert exc_info.value is not None
+    del exc_info
+
+    # On Zonal/RCU buckets, ExtendedGcsFileSystem._open routes reads to ZonalFile,
+    # which fails at _checkout_pool before AbstractBufferedFile.__init__ builds a cache.
+    uses_grpc_read = (
+        hasattr(gcs, "_sync_lookup_bucket_layout")
+        and gcs._sync_lookup_bucket_layout(TEST_BUCKET).uses_grpc_data_path
+    )
+    expected_open_refs = 0 if uses_grpc_read else 1
+    missing = f"{TEST_BUCKET}/nonexistent"
+
+    refs.clear()
+    gc.collect()
+    fds_before = open_tmp_fds() if check_tmp_fds else set()
+    was_gc_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        try:
+            gcs.open(missing, "rb", size=4096, cache_type=cache_type)
+        except FileNotFoundError:
+            pass
+        else:
+            pytest.fail("Expected FileNotFoundError")
+        assert len(refs) == expected_open_refs
+        assert all(r() is None for r in refs)
+        if check_tmp_fds:
+            assert open_tmp_fds() - fds_before == set()
+    finally:
+        if was_gc_enabled:
+            gc.enable()
+
+    refs.clear()
+    gc.collect()
+    fds_before = open_tmp_fds() if check_tmp_fds else set()
+    with pytest.raises(FileNotFoundError) as open_exc_info:
+        gcs.open(missing, "rb", size=4096, cache_type=cache_type)
+    gc.collect()
+    assert len(refs) == expected_open_refs
+    assert all(r() is None for r in refs)
+    if check_tmp_fds:
+        assert open_tmp_fds() - fds_before == set()
+    assert open_exc_info.value is not None
 
 
 def test_gcsfile_failed_read_init_preserves_exception_when_cache_close_fails(

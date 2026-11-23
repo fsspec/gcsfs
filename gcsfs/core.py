@@ -2850,6 +2850,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                     self.blocksize = GCS_MIN_BLOCK_SIZE
                 self.location = None
         except BaseException:
+            cache = prefetcher = None
             self._abort_open()
             raise
 
