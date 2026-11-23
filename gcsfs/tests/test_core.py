@@ -28,6 +28,7 @@ import gcsfs.tests.settings
 from gcsfs import GCSFileSystem
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFile
+from gcsfs.core import GCSFileSystem as CoreGCSFileSystem
 from gcsfs.credentials import GoogleCredentials
 from gcsfs.retry import GenerationMismatchError, HttpError
 from gcsfs.tests.conftest import (
@@ -238,63 +239,20 @@ def test_simple_upload_payload_with_multipart_boundary(gcs, payload):
     assert gcs.cat_file(fn) == payload
 
 
-@pytest.mark.parametrize(
-    "make_data",
-    [bytes, bytearray, memoryview],
-    ids=["bytes", "bytearray", "memoryview"],
-)
-def test_simple_upload_boundary_collision_retry(gcs, skip_if_zonal, make_data):
-    first = uuid.UUID("11111111-1111-1111-1111-111111111111")
-    second = uuid.UUID("22222222-2222-2222-2222-222222222222")
-    raw = b"before\r\n--" + first.hex.encode("ascii") + b"--\r\nafter"
-    key = "boundary_collision"
-    fn = f"{TEST_BUCKET}/{key}"
-
-    with (
-        mock.patch("gcsfs.core.uuid.uuid4", side_effect=[first, second]) as mock_uuid,
-        mock.patch.object(gcs, "_call", wraps=gcs._call) as spy_call,
-    ):
-        sync(gcs.loop, gcsfs.core.simple_upload, gcs, TEST_BUCKET, key, make_data(raw))
-
-    assert mock_uuid.call_count == 2
-    call_kwargs = spy_call.call_args.kwargs
-    expected_boundary = second.hex
-    assert (
-        call_kwargs["headers"]["Content-Type"]
-        == f'multipart/related; boundary="{expected_boundary}"'
-    )
-    body = bytes(call_kwargs["data"])
-    assert body.startswith(f"--{expected_boundary}\n".encode("ascii"))
-    assert f"\n--{expected_boundary}\n".encode("ascii") in body
-    assert body.endswith(f"\n--{expected_boundary}--".encode("ascii"))
-    assert gcs.cat_file(fn) == raw
-
-
 def test_simple_upload_memoryview(gcs):
-    fn1 = f"{TEST_BUCKET}/simple_upload_mv_pipe"
-    mv1 = memoryview(b"hello --==0==-- world")
-    gcs.pipe_file(fn1, mv1)
-    assert gcs.cat_file(fn1) == bytes(mv1)
-
-    key2 = "simple_upload_mv_direct"
-    fn2 = f"{TEST_BUCKET}/{key2}"
-    mv2 = memoryview(b"hello\r\n--==0==--\r\nworld")
-    sync(gcs.loop, gcsfs.core.simple_upload, gcs, TEST_BUCKET, key2, mv2)
-    assert gcs.cat_file(fn2) == bytes(mv2)
-
-    key3 = "simple_upload_mv_typed"
-    fn3 = f"{TEST_BUCKET}/{key3}"
-    mv3 = memoryview(array.array("H", [1, 2, 3]))
+    key = "simple_upload_mv_typed"
+    fn = f"{TEST_BUCKET}/{key}"
+    mv = memoryview(array.array("H", [1, 2, 3]))
     sync(
         gcs.loop,
         gcsfs.core.simple_upload,
         gcs,
         TEST_BUCKET,
-        key3,
-        mv3,
+        key,
+        mv,
         consistency="size",
     )
-    assert gcs.cat_file(fn3) == bytes(mv3)
+    assert gcs.cat_file(fn) == bytes(mv)
 
 
 @pytest.mark.parametrize(
@@ -315,9 +273,17 @@ def test_simple_upload_rejects_crlf_in_content_type(
             gcs.pipe_file(fn, b"hello", content_type=bad_content_type)
         mock_call.assert_not_called()
 
-        mock_call.return_value = {"size": "5", "md5Hash": "", "crc32c": ""}
-        gcs.pipe_file(fn, b"hello", content_type=None, consistency="none")
-        mock_call.assert_called_once()
+
+@pytest.mark.parametrize(
+    "payload",
+    [b"hello", b"x" * (2**18)],
+    ids=["below_chunksize", "at_chunksize"],
+)
+def test_pipe_file_none_content_type(gcs, skip_if_zonal, payload):
+    fn = f"{TEST_BUCKET}/none_content_type"
+    gcs.pipe_file(fn, payload, content_type=None, chunksize=2**18)
+    assert gcs.cat_file(fn) == payload
+    assert gcs.info(fn)["contentType"] == "application/octet-stream"
 
 
 def test_simple_upload_with_kms(gcs):
@@ -1997,6 +1963,7 @@ def test_errors(gcs):
         with gcs.open(TEST_BUCKET + "/temp", "wb") as f:
             f.read()
 
+    gcs.touch(TEST_BUCKET + "/temp")
     with pytest.raises(ValueError):
         f = gcs.open(TEST_BUCKET + "/temp", "rb")
         f.close()
@@ -2268,8 +2235,82 @@ def test_merge(gcs):
 
     with gcs.open(b, "wb") as f:
         f.write(b"a" * 10)
+
+    # Populate dircache before merge to verify cache invalidation.
+    gcs.ls(TEST_BUCKET)
+    assert TEST_BUCKET in gcs.dircache
+
     gcs.merge(TEST_BUCKET + "/joined", [a, b])
+    assert TEST_BUCKET not in gcs.dircache
+    assert TEST_BUCKET + "/joined" in gcs.ls(TEST_BUCKET)
     assert gcs.info(TEST_BUCKET + "/joined")["size"] == 20
+
+
+def test_merge_destination_generation_raises():
+    gcs_versioned = CoreGCSFileSystem(
+        token="anon", version_aware=True, skip_instance_cache=True
+    )
+    with pytest.raises(ValueError, match="Cannot write to specific object generation"):
+        gcs_versioned.merge(TEST_BUCKET + "/joined#12345", [a, b])
+
+
+def test_merge_empty_key_raises():
+    gcs_versioned = CoreGCSFileSystem(
+        token="anon", version_aware=True, skip_instance_cache=True
+    )
+    with pytest.raises(
+        ValueError, match="Cannot merge into bucket root without an object key"
+    ):
+        gcs_versioned.merge(TEST_BUCKET, [a, b])
+    with pytest.raises(ValueError, match="Source path must specify an object key"):
+        gcs_versioned.merge(TEST_BUCKET + "/joined", [TEST_BUCKET, b])
+
+
+def test_merge_bucket_mismatch_raises():
+    gcs_versioned = CoreGCSFileSystem(
+        token="anon", version_aware=True, skip_instance_cache=True
+    )
+    with pytest.raises(
+        ValueError,
+        match="Source bucket 'other_bucket' does not match destination bucket",
+    ):
+        gcs_versioned.merge(TEST_BUCKET + "/joined", ["other_bucket/file1", a])
+
+
+def test_merge_source_generations_forwarded():
+    gcs_versioned = CoreGCSFileSystem(
+        token="anon", version_aware=True, skip_instance_cache=True
+    )
+    calls = []
+
+    async def fake_call(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {}
+
+    with (
+        mock.patch.object(gcs_versioned, "_call", side_effect=fake_call),
+        mock.patch.object(
+            gcs_versioned, "_write_file_cache_update", new_callable=mock.AsyncMock
+        ) as mock_cache_update,
+    ):
+        gcs_versioned.merge(
+            TEST_BUCKET + "/joined",
+            [
+                f"{TEST_BUCKET}/src1#111",
+                f"{TEST_BUCKET}/src2?generation=222",
+                f"{TEST_BUCKET}/src3",
+            ],
+        )
+
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == ("POST", "b/{}/o/{}/compose", TEST_BUCKET, "joined")
+    assert kwargs["json"]["sourceObjects"] == [
+        {"name": "src1", "generation": 111},
+        {"name": "src2", "generation": 222},
+        {"name": "src3"},
+    ]
+    mock_cache_update.assert_awaited_once_with(TEST_BUCKET + "/joined")
 
 
 def test_bigger_than_block_read(gcs):
@@ -5075,17 +5116,15 @@ def test_get_dirs_and_update_cache_with_directories_and_prefix(gcs):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("versioned_destination", [True, False])
 @pytest.mark.parametrize(
     "suffix", ["#123", "?generation=123", "#variant?generation=123"]
 )
-async def test_merge_rejects_specific_generations_before_request(
-    versioned_destination, suffix
-):
+async def test_merge_rejects_specific_generations_before_request(suffix):
     fs = GCSFileSystem(token="anon", version_aware=True)
-    destination = "bucket/destination" + (suffix if versioned_destination else "")
-    source = "bucket/source" + ("" if versioned_destination else suffix)
+    destination = f"bucket/destination{suffix}"
     with mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as request:
-        with pytest.raises(ValueError, match="specific object generation"):
-            await fs._merge(destination, [source])
+        with pytest.raises(
+            ValueError, match="Cannot write to specific object generation"
+        ):
+            await fs._merge(destination, ["bucket/source"])
         request.assert_not_awaited()

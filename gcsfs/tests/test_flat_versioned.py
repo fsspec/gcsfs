@@ -8,6 +8,7 @@ import pytest
 from google.cloud import storage
 
 from gcsfs import GCSFileSystem
+from gcsfs.tests.conftest import requires_real_gcs
 from gcsfs.tests.settings import TEST_VERSIONED_BUCKET
 from gcsfs.tests.utils import is_real_gcs
 
@@ -136,6 +137,29 @@ def test_write_captures_generation_multipart(gcs_versioned):
         wo.write(b"second chunk")
     assert wo.generation is not None
     assert wo.generation == gcs_versioned.info(b)["generation"]
+
+
+# fake-gcs-server ignores sourceObjects[].generation during compose and uses the live object.
+@requires_real_gcs
+def test_merge_versioned(gcs_versioned):
+    with gcs_versioned.open(a, "wb") as wo:
+        wo.write(b"a_v1")
+    a_v1 = gcs_versioned.info(a)["generation"]
+
+    with gcs_versioned.open(a, "wb") as wo:
+        wo.write(b"a_v2")
+
+    with gcs_versioned.open(b, "wb") as wo:
+        wo.write(b"b_v1")
+    b_v1 = gcs_versioned.info(b)["generation"]
+
+    with gcs_versioned.open(b, "wb") as wo:
+        wo.write(b"b_v2")
+
+    merged = TEST_VERSIONED_BUCKET + "/tmp/test/merged"
+    gcs_versioned.merge(merged, [f"{a}#{a_v1}", f"{b}#{b_v1}"])
+
+    assert gcs_versioned.cat(merged) == b"a_v1b_v1"
 
 
 @pytest.mark.parametrize(
