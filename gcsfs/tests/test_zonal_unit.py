@@ -2528,6 +2528,7 @@ async def test_get_file_zonal_coalesces_generation_and_rejects_conflict(
 
     # 1. Positive path on default (version_aware=False) filesystem: both _get_file_request
     #    and _get_file_concurrent download generation="111" even when 222 is live.
+    fs.MIN_CHUNK_SIZE_FOR_CONCURRENCY = 4
     try:
         with (
             mock.patch.object(
@@ -2535,7 +2536,13 @@ async def test_get_file_zonal_coalesces_generation_and_rejects_conflict(
                 "_lookup_bucket_layout",
                 new=mock.AsyncMock(return_value=bucket_layout),
             ),
+            mock.patch.object(
+                fs,
+                "_get_threshold_for_disk_reads",
+                new=mock.AsyncMock(return_value=0),
+            ),
             mock.patch.object(fs, "_call", new=mock.AsyncMock(side_effect=fake_call)),
+            mock.patch.object(fs, "_cat_file", wraps=fs._cat_file) as spy_cat_file,
             mock.patch(
                 "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
                 new=mock.AsyncMock(side_effect=fake_create_mrd),
@@ -2554,6 +2561,11 @@ async def test_get_file_zonal_coalesces_generation_and_rejects_conflict(
                 generation="111",
             )
             assert lpath_conc.read_bytes() == b"v1-payload"
+            assert spy_cat_file.await_count >= 2
+            assert all(
+                c.kwargs.get("generation") == "111" and c.kwargs.get("mrd") is not None
+                for c in spy_cat_file.await_args_list
+            )
     finally:
         await fs._mrd_pool_cache.close()
 

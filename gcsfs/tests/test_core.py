@@ -5166,13 +5166,15 @@ async def test_info_and_get_object_with_generation_handle_cache_and_fallbacks():
         mock_call.assert_awaited_once()
 
     # 4. _get_object Forbidden fallback lists versions when generation is set, and
-    #    handles generation=None cache hit/miss.
+    #    handles generation=None cache hit/miss (both parent cache miss and cached directory).
     fs.dircache.clear()
     fs.dircache["bucket/dir"] = [
         {"name": "bucket/dir/other.txt", "size": 3, "generation": "999", "type": "file"}
     ]
     with pytest.raises(FileNotFoundError):
         await fs._get_object(path)
+    with pytest.raises(FileNotFoundError):
+        await fs._get_object("bucket/dir")
     fs.dircache["bucket/dir"].append(
         {"name": path, "size": 5, "generation": "111", "type": "file"}
     )
@@ -5304,3 +5306,138 @@ def test_gcsfile_open_with_generation_pins_size_and_reads(cache_type):
             overwritten_after_open = True
             with pytest.raises(FileNotFoundError):
                 f.read()
+
+
+@pytest.mark.parametrize("concurrency", [1, 2])
+def test_cat_file_negative_offsets_with_pinned_generation_differing_live_size(
+    concurrency,
+):
+    """Negative start/end with generation= resolves against pinned size, even when live differs or is deleted."""
+    from urllib.parse import parse_qs, urlsplit
+
+    from gcsfs.retry import HttpError
+
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    fs.MIN_CHUNK_SIZE_FOR_CONCURRENCY = 4
+    path = "bucket/file.bin"
+    v1 = b"0123456789ab"  # 12 bytes
+    v2 = b"ABCDEFGHIJKLMNOPQRST"  # 20 bytes (live)
+    versions = {"111": v1, "222": v2}
+    live_gen = "222"
+    info_generations = []
+
+    async def fake_call(method, url_or_tmpl, *args, **kwargs):
+        if url_or_tmpl == "b/{}/o/{}":
+            gen_arg = kwargs.get("generation")
+            info_generations.append(gen_arg)
+            gen = str(gen_arg) if gen_arg is not None else live_gen
+            if gen is None or gen not in versions:
+                raise FileNotFoundError(path)
+            return {
+                "name": "file.bin",
+                "size": str(len(versions[gen])),
+                "generation": gen,
+            }
+        parsed = urlsplit(url_or_tmpl)
+        qs = parse_qs(parsed.query)
+        gen = qs.get("generation", [live_gen])[0]
+        if gen is None or gen not in versions:
+            raise FileNotFoundError(path)
+        data = versions[gen]
+        headers = kwargs.get("headers") or {}
+        if "Range" in headers:
+            rng = headers["Range"].removeprefix("bytes=")
+            start_s, end_s = rng.split("-", 1)
+            if start_s == "":
+                suffix_len = int(end_s)
+                if suffix_len <= 0 or not data:
+                    raise HttpError({"code": 416, "message": "Range Not Satisfiable"})
+                data = data[-suffix_len:]
+            else:
+                start_i = int(start_s)
+                end_i = int(end_s) + 1 if end_s else len(data)
+                if start_i < 0 or start_i >= len(data) or start_i >= end_i:
+                    raise HttpError({"code": 416, "message": "Range Not Satisfiable"})
+                data = data[start_i:end_i]
+        return {}, data
+
+    with mock.patch.object(fs, "_call", side_effect=fake_call):
+        # Negative start with end=None (both small tail and multi-chunk tail).
+        assert (
+            fs.cat_file(path, start=-4, concurrency=concurrency, generation="111")
+            == v1[-4:]
+        )
+        info_generations.clear()
+        assert (
+            fs.cat_file(path, start=-10, concurrency=concurrency, generation="111")
+            == v1[-10:]
+        )
+        if concurrency == 1:
+            assert info_generations == []
+        else:
+            assert info_generations == ["111"]
+
+        # Negative start and negative end when pinned size (12) != live size (20),
+        # plus positive/omitted start with negative or omitted end.
+        info_generations.clear()
+        assert (
+            fs.cat_file(
+                path, start=-10, end=-2, concurrency=concurrency, generation="111"
+            )
+            == v1[-10:-2]
+        )
+        assert info_generations == ["111"]
+        assert (
+            fs.cat_file(path, end=-2, concurrency=concurrency, generation="111")
+            == v1[:-2]
+        )
+        assert (
+            fs.cat_file(
+                path, start=2, end=-2, concurrency=concurrency, generation="111"
+            )
+            == v1[2:-2]
+        )
+        assert (
+            fs.cat_file(path, start=2, concurrency=concurrency, generation="111")
+            == v1[2:]
+        )
+
+        # Clamped negative start beyond file size and empty negative ranges.
+        assert (
+            fs.cat_file(
+                path, start=-50, end=-8, concurrency=concurrency, generation="111"
+            )
+            == v1[-50:-8]
+        )
+        assert (
+            fs.cat_file(
+                path, start=-2, end=-8, concurrency=concurrency, generation="111"
+            )
+            == b""
+        )
+        assert (
+            fs.cat_file(
+                path, start=-50, end=-40, concurrency=concurrency, generation="111"
+            )
+            == b""
+        )
+        assert (
+            fs.cat_file(
+                path, start=-5, end=0, concurrency=concurrency, generation="111"
+            )
+            == b""
+        )
+
+        # Once the live version is deleted on a versioned bucket, pinned negative-offset
+        # reads still succeed instead of raising FileNotFoundError on unpinned _info.
+        live_gen = None
+        assert (
+            fs.cat_file(
+                path, start=-10, end=-2, concurrency=concurrency, generation="111"
+            )
+            == v1[-10:-2]
+        )
+        assert (
+            fs.cat_file(path, start=-4, concurrency=concurrency, generation="111")
+            == v1[-4:]
+        )

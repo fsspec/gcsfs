@@ -1737,8 +1737,12 @@ def test_generation_pinned_reads_after_overwrite_zb(extended_gcsfs, tmp_path):
 
         with pytest.raises(FileNotFoundError):
             extended_gcsfs.cat_file(target, generation=gen1)
+        err_res = extended_gcsfs.cat_ranges([target], [0], [5], generation=gen1)
+        assert len(err_res) == 1 and isinstance(err_res[0], FileNotFoundError)
         with pytest.raises(FileNotFoundError):
-            extended_gcsfs.cat_ranges([target], [0], [5], generation=gen1)
+            extended_gcsfs.cat_ranges(
+                [target], [0], [5], on_error="raise", generation=gen1
+            )
         with pytest.raises(FileNotFoundError):
             extended_gcsfs.get_file(target, str(tmp_path / "gen1.bin"), generation=gen1)
     finally:

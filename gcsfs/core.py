@@ -1437,14 +1437,47 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             f"&generation={generation}" if generation is not None else "",
         )
 
+    async def _process_limits(self, url, start, end, generation=None):
+        """Helper for "Range"-based _cat_file"""
+        size = None
+        suff = False
+        info_kwargs = {"generation": generation} if generation is not None else {}
+        if start is not None and start < 0:
+            # if start is negative and end None, end is the "suffix length"
+            if end is None:
+                end = -start
+                start = ""
+                suff = True
+            else:
+                size = (await self._info(url, **info_kwargs))["size"]
+                start = max(0, size + start)
+        elif start is None:
+            start = 0
+        if not suff:
+            if end is not None and end < 0:
+                if size is None:
+                    size = (await self._info(url, **info_kwargs))["size"]
+                end = max(0, size + end)
+            elif end is None:
+                end = ""
+            if isinstance(end, numbers.Integral):
+                end -= 1  # bytes range is inclusive
+        return f"bytes={start}-{end}"
+
     async def _cat_file_sequential(self, path, start=None, end=None, **kwargs):
         """Simple one-shot get of file data"""
         if is_empty_range(start, end):
             return b""
 
-        u2 = self.url(path, generation=kwargs.get("generation"))
+        generation = kwargs.get("generation")
+        u2 = self.url(path, generation=generation)
         if start is not None or end is not None:
-            head = {"Range": await self._process_limits(path, start, end)}
+            rng = await self._process_limits(path, start, end, generation=generation)
+            if not rng.startswith("bytes=-"):
+                first_s, last_s = rng.removeprefix("bytes=").split("-", 1)
+                if first_s and last_s and int(first_s) > int(last_s):
+                    return b""
+            head = {"Range": rng}
         else:
             head = {}
 
@@ -1459,15 +1492,18 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self, path, start=None, end=None, concurrency=DEFAULT_CONCURRENCY, **kwargs
     ):
         """Concurrent fetch of file data"""
+        if is_empty_range(start, end):
+            return b""
         if start is None:
             start = 0
-        if end is None:
+        if start < 0 or end is None or end < 0:
             info_kwargs = (
                 {"generation": kwargs["generation"]}
                 if kwargs.get("generation") is not None
                 else {}
             )
-            end = (await self._info(path, **info_kwargs))["size"]
+            size = (await self._info(path, **info_kwargs))["size"]
+            start, end, _ = slice(start, end).indices(size)
         if start >= end:
             return b""
 
