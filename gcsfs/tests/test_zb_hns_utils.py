@@ -1453,6 +1453,7 @@ class _MemoryviewDownloader:
 
     bucket_name = "bucket"
     object_name = "obj"
+    persisted_size = None
 
     def __init__(self):
         self.accepts_memoryview_args = []
@@ -1460,7 +1461,8 @@ class _MemoryviewDownloader:
     async def download_ranges(self, read_ranges, accepts_memoryview=False):
         self.accepts_memoryview_args.append(accepts_memoryview)
         for _, length, buffer in read_ranges:
-            buffer.write(memoryview(b"x" * length))
+            n = 6 if length == 0 else length
+            buffer.write(memoryview(b"x" * n))
 
 
 class _LegacyDownloader:
@@ -1468,6 +1470,7 @@ class _LegacyDownloader:
 
     bucket_name = "bucket"
     object_name = "obj"
+    persisted_size = None
 
     def __init__(self):
         self.calls = 0
@@ -1475,7 +1478,8 @@ class _LegacyDownloader:
     async def download_ranges(self, read_ranges):
         self.calls += 1
         for _, length, buffer in read_ranges:
-            buffer.write(b"x" * length)
+            n = 6 if length == 0 else length
+            buffer.write(b"x" * n)
 
 
 def test_download_ranges_kwargs_follow_the_downloader_signature():
@@ -1525,7 +1529,9 @@ async def test_download_ranges_requests_memoryview_chunks_when_supported():
 
 
 @pytest.mark.asyncio
-async def test_extended_gcsfs_mrd_downloads_forward_accepts_memoryview():
+async def test_extended_gcsfs_mrd_downloads_forward_accepts_memoryview(tmp_path):
+    from fsspec.callbacks import Callback
+
     from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
@@ -1534,9 +1540,15 @@ async def test_extended_gcsfs_mrd_downloads_forward_accepts_memoryview():
     fs.MIN_CHUNK_SIZE_FOR_CONCURRENCY = (
         ExtendedGcsFileSystem.MIN_CHUNK_SIZE_FOR_CONCURRENCY
     )
+    fs.version_aware = False
+    fs._uses_grpc_data_path = mock.AsyncMock(return_value=True)
+    fs._mrd_pool_cache = mock.Mock(get=mock.AsyncMock())
 
     def _pool_for(mrd):
         pool = mock.MagicMock(spec=MRDPool)
+        pool.finalized = False
+        pool.persisted_size = None
+        pool.close = mock.AsyncMock()
 
         @contextlib.asynccontextmanager
         async def _get_mrd():
@@ -1553,13 +1565,23 @@ async def test_extended_gcsfs_mrd_downloads_forward_accepts_memoryview():
             b"xx",
             b"xxx",
         ]
-        assert mv_mrd.accepts_memoryview_args == [True, True]
+        fs._mrd_pool_cache.get.return_value = mv_pool
+        mv_out = tmp_path / "mv_out"
+        cb = Callback()
+        await fs._get_file_request("bucket/obj", str(mv_out), callback=cb)
+        assert mv_mrd.accepts_memoryview_args == [True, True, True]
+        assert mv_out.read_bytes() == b"xxxxxx"
+        assert cb.value == 6
 
         legacy_mrd = _LegacyDownloader()
         legacy_pool = _pool_for(legacy_mrd)
         assert await fs._concurrent_mrd_fetch(0, 5, 1, legacy_pool) == b"xxxxx"
         assert await fs._download_range_group(legacy_pool, [(0, 0, 4)]) == [b"xxxx"]
-        assert legacy_mrd.calls == 2
+        fs._mrd_pool_cache.get.return_value = legacy_pool
+        legacy_out = tmp_path / "legacy_out"
+        await fs._get_file_request("bucket/obj", str(legacy_out))
+        assert legacy_mrd.calls == 3
+        assert legacy_out.read_bytes() == b"xxxxxx"
     finally:
         executor.shutdown()
 
