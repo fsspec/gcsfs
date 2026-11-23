@@ -213,6 +213,24 @@ def _parse_bool_flag(value, name):
     return bool(value)
 
 
+def _parse_int_flag(value, name, *, default=None, minimum=0):
+    """Normalize an integer option that may arrive as a string from config or env."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
+    if isinstance(value, str):
+        try:
+            value = int(value.strip())
+        except ValueError:
+            raise ValueError(
+                f"{name} must be an integer >= {minimum}, got {value!r}"
+            ) from None
+    if not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
+    return value
+
+
 class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     """
     This class will be used when GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT env variable is set to true.
@@ -294,8 +312,16 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         self.fast_lro_polling = fast_lro_polling
         self.rcu_rapid_write = _parse_bool_flag(rcu_rapid_write, "rcu_rapid_write")
         self.parallel_upload = _parse_bool_flag(parallel_upload, "parallel_upload")
-        self.parallel_upload_threshold = parallel_upload_threshold
-        self.parallel_upload_segment_size = parallel_upload_segment_size
+        self.parallel_upload_threshold = _parse_int_flag(
+            parallel_upload_threshold,
+            "parallel_upload_threshold",
+            default=DEFAULT_PARALLEL_UPLOAD_THRESHOLD,
+        )
+        self.parallel_upload_segment_size = _parse_int_flag(
+            parallel_upload_segment_size,
+            "parallel_upload_segment_size",
+            minimum=1,
+        )
         valid_keys = DEFAULT_RETRY_CONFIG.keys()
         self.retry_config = {
             k[6:]: v

@@ -4,8 +4,10 @@
 describes the object and call the SDK's parallel upload functions.
 """
 
+import base64
 import datetime
 
+from fsspec.utils import stringify_path
 from google.cloud.storage import Blob, Bucket
 
 from gcsfs.core import SUPPORTED_FIXED_KEY_METADATA
@@ -96,6 +98,16 @@ def _upload_kwargs(
     return kwargs
 
 
+def _object_info(obj) -> dict[str, str]:
+    """Returns JSON-API-style metadata fields from an uploaded object."""
+    info = {"size": str(obj.size), "generation": str(obj.generation)}
+    if "crc32c" in obj.checksums:
+        info["crc32c"] = base64.b64encode(
+            obj.checksums.crc32c.to_bytes(4, "big")
+        ).decode()
+    return info
+
+
 async def parallel_upload_bytes(
     client,
     bucket,
@@ -109,12 +121,15 @@ async def parallel_upload_bytes(
     kms_key_name=None,
     segment_size=None,
     max_workers=None,
-) -> None:
+) -> dict[str, str]:
     """Uploads ``data`` to ``bucket/key`` as one object, in parallel.
 
     ``content_type``, ``metadata``, ``fixed_key_metadata``, ``storage_class``
     and ``kms_key_name`` describe the object. ``segment_size``, in bytes, and
     ``max_workers`` are left to the SDK when ``None``.
+
+    Returns a dict with ``size``, ``generation``, and ``crc32c`` (when present)
+    from the created object.
 
     Raises ``NotImplementedError`` when the installed google-cloud-storage
     release does not support parallel uploads.
@@ -133,11 +148,12 @@ async def parallel_upload_bytes(
         max_workers,
     )
     try:
-        await async_transfer_manager.upload_chunks_concurrently_from_bytes(
+        obj = await async_transfer_manager.upload_chunks_concurrently_from_bytes(
             client, bucket, key, data, **kwargs
         )
     except NotImplementedError as e:
         raise NotImplementedError(_UNSUPPORTED_MESSAGE) from e
+    return _object_info(obj)
 
 
 async def parallel_upload_file(
@@ -153,10 +169,10 @@ async def parallel_upload_file(
     kms_key_name=None,
     segment_size=None,
     max_workers=None,
-) -> None:
+) -> dict[str, str]:
     """Uploads the local file ``lpath`` to ``bucket/key`` as one object, in parallel.
 
-    The keyword arguments and the error raised are those of
+    The keyword arguments, return value, and error raised are those of
     ``parallel_upload_bytes``.
     """
     if async_transfer_manager is None:
@@ -173,8 +189,9 @@ async def parallel_upload_file(
         max_workers,
     )
     try:
-        await async_transfer_manager.upload_chunks_concurrently_from_filename(
-            client, bucket, key, lpath, **kwargs
+        obj = await async_transfer_manager.upload_chunks_concurrently_from_filename(
+            client, bucket, key, stringify_path(lpath), **kwargs
         )
     except NotImplementedError as e:
         raise NotImplementedError(_UNSUPPORTED_MESSAGE) from e
+    return _object_info(obj)
