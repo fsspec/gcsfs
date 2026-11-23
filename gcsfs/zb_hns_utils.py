@@ -22,6 +22,8 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 )
 
 from gcsfs.retry import GenerationMismatchError
+from gcsfs.telemetry import manager as telemetry_manager
+from gcsfs.telemetry.context import GRPC_METADATA_KEY
 
 try:
     from google.cloud.storage.asyncio.async_appendable_object_writer import (
@@ -68,10 +70,14 @@ async def init_mrd(
     """
     from gcsfs.core import _get_cache_type_header_value
 
-    metadata = None
+    metadata = []
     cache_val = _get_cache_type_header_value(cache_type, cache_source)
     if cache_val:
-        metadata = [("x-goog-api-client", cache_val)]
+        metadata.append(("x-goog-api-client", cache_val))
+
+    encoded = telemetry_manager.default_usage_tracker.encode_features()
+    if encoded:
+        metadata.append((GRPC_METADATA_KEY, encoded))
 
     kwargs = {}
     if metadata:
@@ -279,8 +285,10 @@ async def init_aaow(
             writer_options=writer_options,
             **kwargs,
         )
+    encoded = telemetry_manager.default_usage_tracker.encode_features()
+    open_kwargs = {"metadata": [(GRPC_METADATA_KEY, encoded)]} if encoded else {}
     try:
-        await writer.open()
+        await writer.open(**open_kwargs)
     except FailedPrecondition as e:
         if if_generation_match is None:
             # No precondition was requested (e.g. appending to a finalized

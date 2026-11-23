@@ -45,7 +45,7 @@ from .retry import (
     validate_response,
 )
 from .telemetry import manager as telemetry_manager
-from .telemetry.context import Dimension
+from .telemetry.context import HTTP_HEADER_KEY, Dimension
 from .telemetry.wrapper import (
     _run_sync,
     bind_gcs_sync_methods,
@@ -311,7 +311,10 @@ def _get_cache_type_header_value(cache_type, cache_source=None):
     return f"cache_type/{cache_type}{suffix}"
 
 
-def _build_user_agent(cache_type=None, cache_source=None):
+_HTTP_HEADER_KEY_LOWER = HTTP_HEADER_KEY.lower()
+
+
+def _build_user_agent(cache_type=None, cache_source=None, telemetry_tokens=()):
     """Build the standard User-Agent header string for HTTP requests."""
     tokens = [f"python-gcsfs/{version}"]
 
@@ -319,7 +322,6 @@ def _build_user_agent(cache_type=None, cache_source=None):
     if cache_val:
         tokens.append(cache_val)
 
-    telemetry_tokens = telemetry_manager.default_usage_tracker.get_tokens()
     if telemetry_tokens:
         tokens.extend(telemetry_tokens)
 
@@ -663,14 +665,30 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         return params
 
     def _get_headers(self, headers, cache_type=None, cache_source=None):
-        out = {}
-        if headers is not None:
-            out.update(headers)
-        if "User-Agent" not in out:
-            out["User-Agent"] = _build_user_agent(
-                cache_type=cache_type,
-                cache_source=cache_source,
+        out = dict(headers) if headers else {}
+        need_ua = True
+        need_features = True
+        for k in out:
+            k_lower = k.lower()
+            if k_lower == "user-agent":
+                need_ua = False
+            elif k_lower == _HTTP_HEADER_KEY_LOWER:
+                need_features = False
+        if need_ua or need_features:
+            ua_tokens, encoded = (
+                telemetry_manager.default_usage_tracker.get_http_telemetry(
+                    include_tokens=need_ua,
+                    include_features=need_features,
+                )
             )
+            if need_ua:
+                out["User-Agent"] = _build_user_agent(
+                    cache_type=cache_type,
+                    cache_source=cache_source,
+                    telemetry_tokens=ua_tokens,
+                )
+            if encoded:
+                out[HTTP_HEADER_KEY] = encoded
         self.credentials.apply(out)
         return out
 
@@ -1535,7 +1553,23 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     async def _merge(self, path, paths, acl=None):
         """Concatenate objects within a single bucket"""
         bucket, key, generation = self.split_path(path)
-        source = [{"name": self.split_path(p)[1]} for p in paths]
+        if not key:
+            raise ValueError("Cannot merge into bucket root without an object key")
+        if generation is not None:
+            raise ValueError("Cannot write to specific object generation")
+        source = []
+        for p in paths:
+            src_bucket, src_key, src_generation = self.split_path(p)
+            if not src_key:
+                raise ValueError("Source path must specify an object key")
+            if src_bucket != bucket:
+                raise ValueError(
+                    f"Source bucket '{src_bucket}' does not match destination bucket '{bucket}'"
+                )
+            entry = {"name": src_key}
+            if src_generation is not None:
+                entry["generation"] = int(src_generation)
+            source.append(entry)
         await self._call(
             "POST",
             "b/{}/o/{}/compose",
@@ -1549,6 +1583,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 "destination": {"name": key, "bucket": bucket},
             },
         )
+        await self._write_file_cache_update(path)
 
     merge = asyn.sync_wrapper(_merge)
 
@@ -1878,6 +1913,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         kms_key_name=None,
     ):
         # enforce blocksize should be a multiple of 2**18
+        if content_type is None:
+            content_type = "application/octet-stream"
         consistency = consistency or self.consistency
         bucket, key, generation = self.split_path(path)
         if_generation_match = _resolve_generation_match(mode, if_generation_match)
@@ -3390,13 +3427,6 @@ async def simple_upload(
     metadata = json.dumps(metadata)
     datain = as_byte_buffer(datain)
     boundary = uuid.uuid4().hex
-    # `in` on a memoryview compares integer elements, so search views with re.
-    while (
-        boundary.encode("ascii") in datain
-        if isinstance(datain, bytes)
-        else re.search(boundary.encode("ascii"), datain)
-    ) or boundary in metadata:
-        boundary = uuid.uuid4().hex
     template = (
         f"--{boundary}"
         "\nContent-Type: application/json; charset=UTF-8"
@@ -3404,20 +3434,13 @@ async def simple_upload(
     )
 
     data = b"".join((template.encode(), datain, f"\n--{boundary}--".encode("ascii")))
-    # aiohttp handles bytes and memoryview natively and zero-copy;
-    # no need to wrap in UnclosableBytesIO.
-    payload = (
-        data
-        if isinstance(data, (bytes, bytearray, memoryview))
-        else UnclosableBytesIO(data)
-    )
     with _translate_generation_mismatch(f"{bucket}/{key}", if_generation_match):
         j = await fs._call(
             "POST",
             path,
             uploadType="multipart",
             headers={"Content-Type": f'multipart/related; boundary="{boundary}"'},
-            data=payload,
+            data=data,
             json_out=True,
             **kw,
         )
