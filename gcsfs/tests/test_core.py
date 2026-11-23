@@ -4,6 +4,7 @@ import base64
 import builtins
 import io
 import json
+import logging
 import os
 import ssl
 import uuid
@@ -21,10 +22,13 @@ import google.auth.compute_engine
 import pytest
 import requests
 from fsspec.asyn import sync
+from fsspec.caching import BackgroundBlockCache
+from fsspec.prefetcher import BackgroundPrefetcher
 from fsspec.utils import seek_delimiter
 
 import gcsfs.checkers
 import gcsfs.tests.settings
+import gcsfs.zb_hns_utils as zb_hns_utils
 from gcsfs import GCSFileSystem
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFile
@@ -290,10 +294,82 @@ def test_simple_upload_with_kms(gcs):
     if not gcs.on_google:
         pytest.skip("emulator does not support kmsKeyName")
     fn = TEST_BUCKET + "/test"
-    with gcs.open(fn, "wb", content_type="text/plain", kms_key_name=TEST_KMS_KEY) as f:
-        f.write(b"zz")
+    try:
+        with gcs.open(
+            fn, "wb", content_type="text/plain", kms_key_name=TEST_KMS_KEY
+        ) as f:
+            f.write(b"zz")
+    except NotImplementedError:
+        if getattr(gcs, "_uses_grpc_write_path", None):
+            layout = gcs._sync_lookup_bucket_layout(TEST_BUCKET)
+            if gcs._uses_grpc_write_path(layout) and (
+                layout.is_rcu or zb_hns_utils.Preconditions is None
+            ):
+                pytest.skip(
+                    "gRPC kms_key_name is unsupported on RCU rapid writes or without Preconditions"
+                )
+        raise
     assert gcs.cat(fn) == b"zz"
     assert TEST_KMS_KEY in gcs.info(fn)["kmsKeyName"]
+
+
+def test_pipe_and_put_file_forward_kms_key_name(gcs, skip_if_zonal, tmp_path):
+    """pipe_file and put_file forward kms_key_name on both simple and resumable HTTP uploads."""
+    location = (
+        "https://storage.googleapis.com/upload/storage/v1/b/"
+        f"{TEST_BUCKET}/o?uploadType=resumable&upload_id=abc123"
+    )
+    small_file = tmp_path / "small.bin"
+    small_file.write_bytes(b"abc")
+    large_file = tmp_path / "large.bin"
+    large_file.write_bytes(b"x" * (5 * 2**20))
+
+    with (
+        mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call,
+        mock.patch(
+            "gcsfs.core.upload_chunk", new_callable=mock.AsyncMock, return_value={}
+        ),
+    ):
+        mock_call.return_value = {"size": "3", "md5Hash": "", "crc32c": ""}
+        gcs.pipe_file(
+            TEST_BUCKET + "/kms-pipe-small",
+            b"abc",
+            consistency="none",
+            kms_key_name="kms-key",
+        )
+        assert mock_call.await_args.kwargs["kmsKeyName"] == "kms-key"
+
+        mock_call.reset_mock()
+        mock_call.return_value = ({"Location": location}, None)
+        gcs.pipe_file(
+            TEST_BUCKET + "/kms-pipe-large",
+            b"x" * 2**20,
+            chunksize=2**19,
+            consistency="none",
+            kms_key_name="kms-key",
+        )
+        assert mock_call.await_args.kwargs["kmsKeyName"] == "kms-key"
+
+        mock_call.reset_mock()
+        mock_call.return_value = {"size": "3", "md5Hash": "", "crc32c": ""}
+        gcs.put_file(
+            str(small_file),
+            TEST_BUCKET + "/kms-put-small",
+            consistency="none",
+            kms_key_name="kms-key",
+        )
+        assert mock_call.await_args.kwargs["kmsKeyName"] == "kms-key"
+
+        mock_call.reset_mock()
+        mock_call.return_value = ({"Location": location}, None)
+        gcs.put_file(
+            str(large_file),
+            TEST_BUCKET + "/kms-put-large",
+            chunksize=2**20,
+            consistency="none",
+            kms_key_name="kms-key",
+        )
+        assert mock_call.await_args.kwargs["kmsKeyName"] == "kms-key"
 
 
 def test_large_upload(gcs):
@@ -321,10 +397,24 @@ def test_large_upload_with_kms(gcs):
     try:
         fn = TEST_BUCKET + "/test"
         d = b"7123" * 262144
-        with gcs.open(
-            fn, "wb", content_type="application/octet-stream", kms_key_name=TEST_KMS_KEY
-        ) as f:
-            f.write(d)
+        try:
+            with gcs.open(
+                fn,
+                "wb",
+                content_type="application/octet-stream",
+                kms_key_name=TEST_KMS_KEY,
+            ) as f:
+                f.write(d)
+        except NotImplementedError:
+            if getattr(gcs, "_uses_grpc_write_path", None):
+                layout = gcs._sync_lookup_bucket_layout(TEST_BUCKET)
+                if gcs._uses_grpc_write_path(layout) and (
+                    layout.is_rcu or zb_hns_utils.Preconditions is None
+                ):
+                    pytest.skip(
+                        "gRPC kms_key_name is unsupported on RCU rapid writes or without Preconditions"
+                    )
+            raise
         assert gcs.cat(fn) == d
         assert TEST_KMS_KEY in gcs.info(fn)["kmsKeyName"]
     finally:
@@ -4069,6 +4159,249 @@ def test_gcsfile_prefetcher_producer_fetcher_integration(fake_fs):
         prefetcher = getattr(f.cache, "_prefetcher", None)
         assert prefetcher is not None
         assert prefetcher.producer.fetcher == f._async_fetch_range
+
+
+def test_gcsfile_failed_read_init_closes_file_and_prefetcher(gcs):
+    """If GCSFile.__init__ fails after the cache is built, the file and its prefetcher are closed."""
+    f = GCSFile.__new__(GCSFile)
+    real_close = BackgroundPrefetcher.close
+
+    with mock.patch.object(
+        BackgroundPrefetcher, "close", autospec=True, side_effect=real_close
+    ) as prefetcher_close:
+        # An invalid fixed_key_metadata fails after AbstractBufferedFile.__init__ built the cache.
+        with pytest.raises(TypeError):
+            f.__init__(
+                gcs,
+                f"{TEST_BUCKET}/nested/file1",
+                "rb",
+                cache_type="adaptive",
+                fixed_key_metadata=123,
+            )
+
+    assert f.closed is True
+    prefetcher_close.assert_called_once()
+    assert f.cache is None
+
+
+def test_gcsfile_failed_read_init_preserves_exception_when_prefetcher_close_fails(
+    gcs, caplog
+):
+    """If prefetcher teardown fails during failed __init__, log a warning and propagate the init error."""
+    f = GCSFile.__new__(GCSFile)
+    real_close = BackgroundPrefetcher.close
+
+    def failing_close(self):
+        real_close(self)
+        raise RuntimeError("prefetcher close boom")
+
+    with (
+        caplog.at_level(logging.WARNING, logger="gcsfs"),
+        mock.patch.object(
+            BackgroundPrefetcher, "close", autospec=True, side_effect=failing_close
+        ) as prefetcher_close,
+        pytest.raises(TypeError),
+    ):
+        f.__init__(
+            gcs,
+            f"{TEST_BUCKET}/nested/file1",
+            "rb",
+            cache_type="adaptive",
+            fixed_key_metadata=123,
+        )
+
+    assert f.closed is True
+    prefetcher_close.assert_called_once()
+    assert f.cache is None
+    assert any(
+        r.levelno == logging.WARNING and "prefetcher close boom" in r.message
+        for r in caplog.records
+    )
+
+
+@pytest.mark.parametrize("cache_type", ["background", "mmap"])
+def test_gcsfile_failed_read_init_drops_non_adaptive_cache(
+    gcs, cache_type, monkeypatch
+):
+    """A failed read open releases non-adaptive caches without waiting for GC or dropping the exception."""
+    import gc
+    import tempfile
+    import weakref
+
+    import fsspec.caching
+
+    refs = []
+    orig_cache_cls = fsspec.caching.caches[cache_type]
+
+    def tracking_cache(*args, **kwargs):
+        inst = orig_cache_cls(*args, **kwargs)
+        refs.append(weakref.ref(inst))
+        return inst
+
+    monkeypatch.setitem(fsspec.caching.caches, cache_type, tracking_cache)
+
+    check_tmp_fds = cache_type == "mmap" and os.path.isdir("/proc/self/fd")
+    tmpdir_prefix = os.path.realpath(tempfile.gettempdir()) + os.sep
+
+    def open_tmp_fds():
+        out = set()
+        for entry in os.listdir("/proc/self/fd"):
+            try:
+                target = os.readlink(f"/proc/self/fd/{entry}")
+            except OSError:
+                continue
+            if target.startswith(("/tmp/", tmpdir_prefix)):
+                out.add((entry, target))
+        return out
+
+    gc.collect()
+    fds_before = open_tmp_fds() if check_tmp_fds else set()
+    was_gc_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        f = GCSFile.__new__(GCSFile)
+        with pytest.raises(TypeError) as exc_info:
+            f.__init__(
+                gcs,
+                f"{TEST_BUCKET}/nested/file1",
+                "rb",
+                cache_type=cache_type,
+                fixed_key_metadata=123,
+            )
+
+        assert f.closed is True
+        assert f.cache is None
+        assert len(refs) == 1
+        assert refs[0]() is None
+        if check_tmp_fds:
+            assert open_tmp_fds() - fds_before == set()
+    finally:
+        if was_gc_enabled:
+            gc.enable()
+
+    gc.collect()
+    assert refs[0]() is None
+    assert exc_info.value is not None
+    del exc_info
+
+    # On Zonal/RCU buckets, ExtendedGcsFileSystem._open routes reads to ZonalFile,
+    # which fails at _checkout_pool before AbstractBufferedFile.__init__ builds a cache.
+    uses_grpc_read = (
+        hasattr(gcs, "_sync_lookup_bucket_layout")
+        and gcs._sync_lookup_bucket_layout(TEST_BUCKET).uses_grpc_data_path
+    )
+    expected_open_refs = 0 if uses_grpc_read else 1
+    missing = f"{TEST_BUCKET}/nonexistent"
+
+    refs.clear()
+    gc.collect()
+    fds_before = open_tmp_fds() if check_tmp_fds else set()
+    was_gc_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        try:
+            gcs.open(missing, "rb", size=4096, cache_type=cache_type)
+        except FileNotFoundError:
+            pass
+        else:
+            pytest.fail("Expected FileNotFoundError")
+        assert len(refs) == expected_open_refs
+        assert all(r() is None for r in refs)
+        if check_tmp_fds:
+            assert open_tmp_fds() - fds_before == set()
+    finally:
+        if was_gc_enabled:
+            gc.enable()
+
+    refs.clear()
+    gc.collect()
+    fds_before = open_tmp_fds() if check_tmp_fds else set()
+    with pytest.raises(FileNotFoundError) as open_exc_info:
+        gcs.open(missing, "rb", size=4096, cache_type=cache_type)
+    gc.collect()
+    assert len(refs) == expected_open_refs
+    assert all(r() is None for r in refs)
+    if check_tmp_fds:
+        assert open_tmp_fds() - fds_before == set()
+    assert open_exc_info.value is not None
+
+
+def test_gcsfile_failed_read_init_preserves_exception_when_cache_close_fails(
+    gcs, caplog
+):
+    """If cache.close() fails during failed __init__, log a warning and propagate the init error."""
+    f = GCSFile.__new__(GCSFile)
+    real_close = BackgroundBlockCache.close
+
+    def failing_close(self):
+        real_close(self)
+        raise RuntimeError("cache close boom")
+
+    with (
+        caplog.at_level(logging.WARNING, logger="gcsfs"),
+        mock.patch.object(
+            BackgroundBlockCache, "close", autospec=True, side_effect=failing_close
+        ) as cache_close,
+        pytest.raises(TypeError),
+    ):
+        f.__init__(
+            gcs,
+            f"{TEST_BUCKET}/nested/file1",
+            "rb",
+            cache_type="background",
+            fixed_key_metadata=123,
+        )
+
+    assert f.closed is True
+    cache_close.assert_called_once()
+    assert f.cache is None
+    assert any(
+        r.levelno == logging.WARNING and "cache close boom" in r.message
+        for r in caplog.records
+    )
+
+
+def test_gcsfile_failed_write_init_is_marked_closed(gcs):
+    """A failed write-mode open is marked closed, so close() and __del__ never flush it."""
+    import gc
+    import threading
+    import warnings
+
+    from gcsfs.core import GCS_MIN_BLOCK_SIZE
+
+    small_path = f"{TEST_BUCKET}/small_blocksize_ok"
+    with pytest.warns(UserWarning, match="Setting block size to minimum value"):
+        with gcs.open(small_path, "wb", block_size=1024) as f_ok:
+            assert f_ok.blocksize == GCS_MIN_BLOCK_SIZE
+            f_ok.write(b"ok")
+    assert gcs.cat(small_path) == b"ok"
+
+    existing = f"{TEST_BUCKET}/existing_not_clobbered"
+    phantom = f"{TEST_BUCKET}/failed_open"
+    gcs.pipe(existing, b"keep-me")
+
+    f = GCSFile.__new__(GCSFile)
+    with pytest.raises(TypeError):
+        f.__init__(gcs, phantom, "wb", fixed_key_metadata=123)
+    assert f.closed is True
+    with mock.patch.object(GCSFile, "flush") as flush:
+        f.close()
+    flush.assert_not_called()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        with pytest.raises(UserWarning, match="Setting block size to minimum value"):
+            gcs.open(existing, "wb", block_size=1024)
+        with pytest.raises(UserWarning, match="Setting block size to minimum value"):
+            gcs.open(phantom, "wb", block_size=1024)
+
+    gc.collect()
+    done = threading.Event()
+    gcsfs.core._deferred_close_queue.put(done.set)
+    assert done.wait(timeout=5)
+
+    assert gcs.cat(existing) == b"keep-me"
+    assert not gcs.exists(phantom)
 
 
 def test_gcsfile_prefetch_sequential_integrity(gcs):

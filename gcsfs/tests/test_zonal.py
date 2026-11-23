@@ -18,6 +18,7 @@ from unittest import mock
 import fsspec
 import pytest
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
+    _DEFAULT_FLUSH_INTERVAL_BYTES,
     AsyncAppendableObjectWriter,
 )
 from google.cloud.storage.asyncio.async_multi_range_downloader import (
@@ -25,7 +26,7 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 )
 from google.cloud.storage.exceptions import DataCorruption
 
-from gcsfs import caching
+from gcsfs import caching, zb_hns_utils
 from gcsfs.extended_gcsfs import (
     ExtendedGcsFileSystem,
     _get_mrd_from_pool_or_mrd,
@@ -42,7 +43,7 @@ from gcsfs.tests.conftest import (
     requires_rapid,
     text_files,
 )
-from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
+from gcsfs.tests.settings import TEST_BUCKET, TEST_KMS_KEY, TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
 from gcsfs.zb_hns_utils import MRDPool
 from gcsfs.zonal_file import ZonalFile
@@ -1065,6 +1066,75 @@ async def test_pipe_file_zonal(
         zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=True)
     else:
         assert await async_gcs._cat(file_path) == data
+
+
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_kms_key_name(extended_gcsfs, zonal_write_mocks, file_path):
+    """Zonal writes support kms_key_name when Preconditions is available and fail
+    closed otherwise; RCU rapid writes always reject kms_key_name."""
+    bucket, key, _ = extended_gcsfs.split_path(file_path)
+    layout = extended_gcsfs._sync_lookup_bucket_layout(bucket)
+    data = b"cmek-zonal-payload"
+
+    if layout.is_rcu or zb_hns_utils.Preconditions is None:
+        with pytest.raises(NotImplementedError, match="kms_key_name"):
+            extended_gcsfs.open(
+                file_path, "wb", finalize_on_close=True, kms_key_name=TEST_KMS_KEY
+            )
+        if zonal_write_mocks:
+            zonal_write_mocks["init_aaow"].assert_not_called()
+        else:
+            assert not extended_gcsfs.exists(file_path)
+        return
+
+    if zonal_write_mocks:
+        with extended_gcsfs.open(
+            file_path, "wb", finalize_on_close=True, kms_key_name=TEST_KMS_KEY
+        ) as f:
+            f.write(data)
+        zonal_write_mocks["init_aaow"].assert_awaited_once_with(
+            extended_gcsfs.grpc_client,
+            bucket,
+            key,
+            None,
+            _DEFAULT_FLUSH_INTERVAL_BYTES,
+            if_generation_match=None,
+            storage_class=None,
+            kms_key_name=TEST_KMS_KEY,
+        )
+    else:
+        append_path = f"{file_path}-append"
+        plain_path = f"{file_path}-plain"
+        try:
+            with extended_gcsfs.open(
+                file_path, "wb", finalize_on_close=True, kms_key_name=TEST_KMS_KEY
+            ) as f:
+                f.write(data)
+            assert extended_gcsfs.cat(file_path) == data
+            assert TEST_KMS_KEY in extended_gcsfs.info(file_path)["kmsKeyName"]
+
+            with extended_gcsfs.open(
+                append_path, "ab", finalize_on_close=False, kms_key_name=TEST_KMS_KEY
+            ) as f:
+                f.write(b"part1-")
+            with extended_gcsfs.open(
+                append_path, "ab", finalize_on_close=True, kms_key_name=TEST_KMS_KEY
+            ) as f:
+                f.write(b"part2")
+            assert extended_gcsfs.cat(append_path) == b"part1-part2"
+            assert TEST_KMS_KEY in extended_gcsfs.info(append_path)["kmsKeyName"]
+
+            with extended_gcsfs.open(plain_path, "wb", finalize_on_close=False) as f:
+                f.write(b"plain")
+            with pytest.raises(ValueError, match="Cannot append with kms_key_name"):
+                with extended_gcsfs.open(
+                    plain_path, "ab", kms_key_name=TEST_KMS_KEY
+                ) as f:
+                    f.write(b"-more")
+        finally:
+            for p in (file_path, append_path, plain_path):
+                with contextlib.suppress(FileNotFoundError):
+                    extended_gcsfs.rm_file(p)
 
 
 def test_get_file_from_zonal_bucket(extended_gcsfs, gcs_bucket_mocks):

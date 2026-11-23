@@ -27,6 +27,15 @@ from .caching import (  # noqa: F401 Unused import to register GCS-Specific cach
 logger = logging.getLogger("gcsfs.zonal_file")
 
 
+def _kms_key_matches(existing_kms_key, requested_kms_key):
+    """Return True if ``existing_kms_key`` is ``requested_kms_key`` or a version of it."""
+    if not existing_kms_key:
+        return False
+    return existing_kms_key == requested_kms_key or existing_kms_key.startswith(
+        f"{requested_kms_key}/cryptoKeyVersions/"
+    )
+
+
 class ZonalFile(GCSFile):
     """
     ZonalFile is subclass of GCSFile and handles data operations from
@@ -84,6 +93,12 @@ class ZonalFile(GCSFile):
         persisting data to GCS (default: 16 MiB). This value must be a multiple
         of `_MAX_CHUNK_SIZE_BYTES` (2 MiB). Note that this higher default value may
         increase memory usage.
+
+        Passing `kms_key_name` in write modes is supported on Zonal buckets
+        when `google-cloud-storage` provides `Preconditions` on
+        `AsyncAppendableObjectWriter.from_blob` (raising `NotImplementedError`
+        on older SDK releases), and always raises `NotImplementedError` for RCU
+        `rcu_rapid_write` uploads.
         """
         bucket, key, path_generation = gcsfs.split_path(path)
         generation = _coalesce_generation(generation, path_generation)
@@ -97,13 +112,26 @@ class ZonalFile(GCSFile):
         # MRD pool below has been opened; validate first so an invalid value
         # fails without a lookup.
         _resolve_open_generation_match(mode, if_generation_match)
-        if finalize_on_close is None:
-            from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+        bucket_layout = None
+        if (mode != "rb" and kms_key_name) or finalize_on_close is None:
+            from gcsfs.extended_gcsfs import (
+                ExtendedGcsFileSystem,
+                _validate_grpc_write_kms_key_name,
+            )
 
             if isinstance(gcsfs, ExtendedGcsFileSystem):
-                finalize_on_close = gcsfs._resolve_finalize_on_close(
-                    gcsfs._sync_lookup_bucket_layout(bucket)
-                )
+                bucket_layout = gcsfs._sync_lookup_bucket_layout(bucket)
+        if mode != "rb" and kms_key_name:
+            _validate_grpc_write_kms_key_name(bucket_layout, kms_key_name)
+            if generation is not None:
+                gen_int = zb_hns_utils._normalize_kms_generation(generation)
+                if "a" not in mode and gen_int > 0:
+                    raise ValueError(
+                        "kms_key_name cannot be set for an existing object generation"
+                    )
+        if finalize_on_close is None:
+            if bucket_layout is not None:
+                finalize_on_close = gcsfs._resolve_finalize_on_close(bucket_layout)
             else:
                 finalize_on_close = False
         self.aaow = None
@@ -126,12 +154,11 @@ class ZonalFile(GCSFile):
         elif (
             metadata
             or fixed_key_metadata
-            or kms_key_name
             or (content_type and content_type != "application/octet-stream")
         ):
             logger.warning(
-                "Zonal and RCU buckets do not support content_type, metadata, fixed_key_metadata, "
-                "or kms_key_name during upload. These parameters will be ignored."
+                "Zonal and RCU buckets do not support content_type, metadata, "
+                "or fixed_key_metadata during upload. These parameters will be ignored."
             )
 
         # asyn.sync() does not cancel the checkout when the caller is interrupted
@@ -197,16 +224,7 @@ class ZonalFile(GCSFile):
                 handoff["aborted"] = True
                 if self.mrd_pool is None:
                     self.mrd_pool = handoff["pool"]
-            self.closed = True
-            # GCSFile.__init__ leaves the prefetcher to _close_impl(), which a
-            # file marked closed never reaches, so stop it here. Like
-            # _close_impl(), rely on BackgroundPrefetcher.close() to log its
-            # own teardown errors.
-            cache = getattr(self, "cache", None)
-            prefetcher = getattr(cache, "_prefetcher", None)
-            if prefetcher is not None:
-                cache._prefetcher = None
-                prefetcher.close()
+            self._abort_open()
             if self.mrd_pool is not None:
                 pool, self.mrd_pool = self.mrd_pool, None
                 try:
@@ -235,13 +253,56 @@ class ZonalFile(GCSFile):
             self.gcsfs.grpc_client, bucket_name, object_name, generation
         )
 
+    async def _resolve_kms_append(
+        self, bucket_name, object_name, generation, kms_key_name
+    ):
+        call_kwargs = {"json_out": True}
+        if generation is not None:
+            gen_int = zb_hns_utils._normalize_kms_generation(generation)
+            if gen_int == 0:
+                return 0, kms_key_name
+            call_kwargs["generation"] = str(gen_int)
+        try:
+            info = await self.gcsfs._call(
+                "GET", "b/{}/o/{}", bucket_name, object_name, **call_kwargs
+            )
+        except FileNotFoundError:
+            if generation is None:
+                return None, kms_key_name
+            raise
+        existing_kms_key = info.get("kmsKeyName")
+        if not _kms_key_matches(existing_kms_key, kms_key_name):
+            raise ValueError(
+                f"Cannot append with kms_key_name={kms_key_name!r}: existing "
+                f"object {bucket_name}/{object_name} uses {existing_kms_key!r}"
+            )
+        return generation or info.get("generation"), None
+
     async def _init_aaow(
         self, bucket_name, object_name, generation=None, flush_interval_bytes=None
     ):
         """
         Initializes the AsyncAppendableObjectWriter.
         """
+        kms_key_name = self.kms_key_name or None
         # generation is needed while creating aaow to append to existing objects
+        if "a" in self.mode and kms_key_name:
+            for attempt in range(2):
+                gen, key = await self._resolve_kms_append(
+                    bucket_name, object_name, generation, kms_key_name
+                )
+                try:
+                    return await self.gcsfs._init_aaow(
+                        bucket_name,
+                        object_name,
+                        gen,
+                        flush_interval_bytes,
+                        if_generation_match=0 if gen is None else None,
+                        kms_key_name=key,
+                    )
+                except FileExistsError:
+                    if attempt:
+                        raise
         if "a" in self.mode and generation is None:
             try:
                 # self.path might not be set yet, so reconstruct full path
@@ -250,12 +311,19 @@ class ZonalFile(GCSFile):
             except FileNotFoundError:
                 # if file doesn't exist, we don't need generation
                 pass
+        elif (
+            kms_key_name
+            and generation is not None
+            and zb_hns_utils._normalize_kms_generation(generation) == 0
+        ):
+            generation = 0
         return await self.gcsfs._init_aaow(
             bucket_name,
             object_name,
             generation,
             flush_interval_bytes,
             if_generation_match=self.if_generation_match,
+            kms_key_name=kms_key_name,
         )
 
     def _ensure_aaow(self):
