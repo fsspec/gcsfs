@@ -7,6 +7,14 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
+* **HTTP requests no longer wait forever for a response.** ``requests_timeout``
+  now defaults to a 30 s connect and 60 s read timeout with no total limit, so
+  a request whose response never arrives fails and is retried instead of
+  hanging the call, while long uploads and downloads that keep receiving data
+  are unaffected. A ``timeout`` in ``session_kwargs`` is now honored when
+  ``requests_timeout`` is not given (#633). Pass
+  ``requests_timeout=aiohttp.ClientTimeout()`` to restore the old unbounded
+  behavior.
 * ``sign()`` now works with credentials that have no private key, such as
   Compute Engine and GKE Workload Identity credentials. When the credentials
   cannot sign, the URL is signed through the IAM Credentials ``signBlob`` API
