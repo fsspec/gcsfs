@@ -56,10 +56,13 @@ def _rank_save(rank, world_size, port, prefix, params, q, *, weights, stats_dir)
             durations.append(
                 timed(device, dcp.save, state, storage_writer=writer, planner=planner)
             )
-            if r > 0 and rank == 0:
-                prev_fs, prev_root = fsspec.core.url_to_fs(_step_prefix(prefix, r - 1))
-                prev_fs.rm(prev_root, recursive=True)
-            dist.barrier()
+            if r > 0:
+                if rank == 0:
+                    prev_fs, prev_root = fsspec.core.url_to_fs(
+                        _step_prefix(prefix, r - 1)
+                    )
+                    prev_fs.rm(prev_root, recursive=True)
+                dist.barrier()
 
         write_stats(stats_dir, rank, {"bytes_written": planner.bytes_written})
         q.put(durations)
@@ -89,10 +92,13 @@ class PyTorchCheckpointWriteDriver(DCPDriver):
 
     def run(self, prefix, params):
         weights = load_weights(params.model_id)
-        world_size = params.target_layout().world_size
-        ranks, stats = spawn_with_stats(prefix, params, _rank_save, world_size, weights)
         try:
+            world_size = params.target_layout().world_size
+            ranks, stats = spawn_with_stats(
+                prefix, params, _rank_save, world_size, weights
+            )
             ranks.join()
+            max_written = max(s["bytes_written"] for s in stats)
         except BaseException:
             weights.clear()
             raise
@@ -110,8 +116,7 @@ class PyTorchCheckpointWriteDriver(DCPDriver):
 
         return CheckpointResult(
             durations=ranks.durations,
-            extra_columns={
-                "dcp_write_bytes_per_rank_max": max(s["bytes_written"] for s in stats)
-            },
+            extra_columns={"dcp_write_bytes_per_rank_max": max_written},
             verify=_verify,
+            close=weights.clear,
         )

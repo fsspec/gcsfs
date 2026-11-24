@@ -156,3 +156,104 @@ def test_verify_reader_uses_blockcache_on_gcs_only(monkeypatch, prefix, kwargs):
 @pytest.mark.parametrize("prefix", ["gcs://b/ckpt", "gcs://b/ckpt/"])
 def test_step_prefix_is_normalized(prefix):
     assert write_driver_mod._step_prefix(prefix, 1) == "gcs://b/ckpt/step-1/"
+
+
+@pytest.mark.parametrize("rounds, expected_barriers", [(1, 2), (3, 8)])
+def test_rank_save_skips_post_round_barrier_on_round_zero(
+    tmp_path, monkeypatch, rounds, expected_barriers
+):
+    import contextlib
+    import os
+    import queue
+
+    barriers = []
+    monkeypatch.setattr(
+        write_driver_mod,
+        "rank_session",
+        lambda *a, **kw: contextlib.nullcontext(torch.device("cpu")),
+    )
+    monkeypatch.setattr(write_driver_mod, "build_state", lambda *a, **kw: {})
+    monkeypatch.setattr(write_driver_mod, "warm_up", lambda *a, **kw: None)
+    monkeypatch.setattr(write_driver_mod.dist, "barrier", lambda: barriers.append(1))
+
+    def fake_dcp_save(state, *, storage_writer, planner):
+        fs, root = fsspec.core.url_to_fs(storage_writer.path)
+        os.makedirs(root, exist_ok=True)
+        with open(os.path.join(root, ".metadata"), "wb") as f:
+            f.write(b"ok")
+
+    monkeypatch.setattr(write_driver_mod.dcp, "save", fake_dcp_save)
+
+    ckpt_dir = tmp_path / f"ckpt-r{rounds}"
+    stats_dir = tmp_path / f"stats-r{rounds}"
+    stats_dir.mkdir()
+    q = queue.Queue()
+    params = _params("fake", strategy="fsdp", dp=2, world_size=2, rounds=rounds)
+
+    write_driver_mod._rank_save(
+        0,
+        2,
+        29500,
+        ckpt_dir.as_uri(),
+        params,
+        q,
+        weights={},
+        stats_dir=str(stats_dir),
+    )
+
+    assert len(q.get_nowait()) == rounds
+    assert len(barriers) == expected_barriers
+    assert [p.name for p in ckpt_dir.iterdir()] == [f"step-{rounds - 1}"]
+
+
+def test_write_driver_close_clears_weights_without_verify(
+    tmp_path, tiny_models, monkeypatch
+):
+    from unittest.mock import MagicMock
+
+    params = _params(
+        tiny_models["llama"], strategy="fsdp", dp=2, world_size=2, rounds=1
+    )
+    prefix = (tmp_path / "ckpt_close").as_uri()
+    driver = PyTorchCheckpointWriteDriver()
+    driver.setup(prefix, params)
+
+    captured_weights = []
+    orig_load_weights = write_driver_mod.load_weights
+
+    def spy_load_weights(mid):
+        w = orig_load_weights(mid)
+        captured_weights.append(w)
+        return w
+
+    verify_spawns = []
+    orig_run_split = write_driver_mod.run_split
+
+    def spy_run_split(*args, **kwargs):
+        verify_spawns.append(args)
+        return orig_run_split(*args, **kwargs)
+
+    monkeypatch.setattr(write_driver_mod, "load_weights", spy_load_weights)
+    monkeypatch.setattr(write_driver_mod, "run_split", spy_run_split)
+
+    result = driver.run(prefix, params)
+    assert getattr(result, "close", None) is not None
+    assert len(captured_weights) == 1 and len(captured_weights[0]) > 0
+    result.close()
+    result.close()
+    assert captured_weights == [{}]
+    assert verify_spawns == []
+
+    # Error after load_weights before CheckpointResult return also clears weights.
+    weights_err = {"w": 1}
+    fake_ranks = MagicMock()
+    monkeypatch.setattr(write_driver_mod, "load_weights", lambda mid: weights_err)
+    monkeypatch.setattr(
+        write_driver_mod,
+        "spawn_with_stats",
+        lambda *a, **kw: (fake_ranks, [{"corrupt": 1}]),
+    )
+    with pytest.raises(KeyError):
+        driver.run(prefix, params)
+    fake_ranks.join.assert_called_once_with()
+    assert weights_err == {}

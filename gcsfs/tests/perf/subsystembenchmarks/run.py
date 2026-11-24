@@ -134,6 +134,22 @@ def parse_args(argv=None):
     groups = discover_groups()
     if args.group not in groups:
         parser.error(f"unknown --group {args.group!r}; available: {', '.join(groups)}")
+    if rcu_state(args.bucket_type) in ("warm", "cold"):
+        import yaml
+
+        config_name = os.environ.get("GCSFS_SUBSYSTEM_CONFIG") or "configs.yaml"
+        config_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), args.group, config_name
+        )
+        if os.path.isfile(config_path):
+            with open(config_path) as f:
+                scenarios = (yaml.safe_load(f) or {}).get("scenarios") or []
+            if scenarios and all("write" in s.get("scenario", "") for s in scenarios):
+                parser.error(
+                    f"--group={args.group} has only write scenarios, which are "
+                    f"skipped on --bucket-type={args.bucket_type} "
+                    "(use *_rcu_z for RCU checkpoint saves)"
+                )
     return args
 
 

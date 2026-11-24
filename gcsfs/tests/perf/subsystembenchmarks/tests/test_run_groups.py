@@ -440,3 +440,60 @@ def test_ci_workflow_subsystembenchmark_requirements_exist():
         if not os.path.isfile(os.path.join(repo_root, rel_path))
     ]
     assert missing == []
+
+
+@pytest.mark.parametrize(
+    "bucket_type",
+    ["standard_rcu_warm", "standard_rcu_cold", "hns_rcu_warm", "hns_rcu_cold"],
+)
+def test_parse_args_rejects_write_only_group_on_rcu_warm_and_cold(capsys, bucket_type):
+    with pytest.raises(SystemExit):
+        run.parse_args(
+            [
+                "--group=checkpointing/pytorch_save",
+                f"--bucket-type={bucket_type}",
+                "--zone=us-central1-a",
+            ]
+            + _REQUIRED
+        )
+    err = capsys.readouterr().err
+    assert "only write scenarios" in err
+    assert "*_rcu_z" in err
+
+
+@pytest.mark.parametrize("bucket_type", ["standard_rcu_z", "hns_rcu_z"])
+def test_parse_args_allows_write_only_group_on_rcu_z(bucket_type):
+    args = run.parse_args(
+        [
+            "--group=checkpointing/pytorch_save",
+            f"--bucket-type={bucket_type}",
+            "--zone=us-central1-a",
+        ]
+        + _REQUIRED
+    )
+    assert args.bucket_type == bucket_type
+
+
+@pytest.mark.parametrize(
+    "group",
+    [
+        "checkpointing/pytorch_lightning",
+        "checkpointing/ray_pytorch",
+        "checkpointing/pytorch_load",
+        "checkpointing/pytorch_reshard",
+        "dataloading/webdataset",
+    ],
+)
+@pytest.mark.parametrize("bucket_type", ["standard_rcu_warm", "hns_rcu_cold"])
+def test_parse_args_allows_read_and_mixed_groups_on_rcu_warm_and_cold(
+    group, bucket_type
+):
+    args = run.parse_args(
+        [
+            f"--group={group}",
+            f"--bucket-type={bucket_type}",
+            "--zone=us-central1-a",
+        ]
+        + _REQUIRED
+    )
+    assert args.group == group
