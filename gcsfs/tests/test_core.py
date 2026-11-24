@@ -4,6 +4,7 @@ import base64
 import builtins
 import io
 import json
+import logging
 import os
 import ssl
 import uuid
@@ -21,10 +22,13 @@ import google.auth.compute_engine
 import pytest
 import requests
 from fsspec.asyn import sync
+from fsspec.caching import BackgroundBlockCache
+from fsspec.prefetcher import BackgroundPrefetcher
 from fsspec.utils import seek_delimiter
 
 import gcsfs.checkers
 import gcsfs.tests.settings
+import gcsfs.zb_hns_utils as zb_hns_utils
 from gcsfs import GCSFileSystem
 from gcsfs import __version__ as version
 from gcsfs.core import GCSFile
@@ -290,10 +294,82 @@ def test_simple_upload_with_kms(gcs):
     if not gcs.on_google:
         pytest.skip("emulator does not support kmsKeyName")
     fn = TEST_BUCKET + "/test"
-    with gcs.open(fn, "wb", content_type="text/plain", kms_key_name=TEST_KMS_KEY) as f:
-        f.write(b"zz")
+    try:
+        with gcs.open(
+            fn, "wb", content_type="text/plain", kms_key_name=TEST_KMS_KEY
+        ) as f:
+            f.write(b"zz")
+    except NotImplementedError:
+        if getattr(gcs, "_uses_grpc_write_path", None):
+            layout = gcs._sync_lookup_bucket_layout(TEST_BUCKET)
+            if gcs._uses_grpc_write_path(layout) and (
+                layout.is_rcu or zb_hns_utils.Preconditions is None
+            ):
+                pytest.skip(
+                    "gRPC kms_key_name is unsupported on RCU rapid writes or without Preconditions"
+                )
+        raise
     assert gcs.cat(fn) == b"zz"
     assert TEST_KMS_KEY in gcs.info(fn)["kmsKeyName"]
+
+
+def test_pipe_and_put_file_forward_kms_key_name(gcs, skip_if_zonal, tmp_path):
+    """pipe_file and put_file forward kms_key_name on both simple and resumable HTTP uploads."""
+    location = (
+        "https://storage.googleapis.com/upload/storage/v1/b/"
+        f"{TEST_BUCKET}/o?uploadType=resumable&upload_id=abc123"
+    )
+    small_file = tmp_path / "small.bin"
+    small_file.write_bytes(b"abc")
+    large_file = tmp_path / "large.bin"
+    large_file.write_bytes(b"x" * (5 * 2**20))
+
+    with (
+        mock.patch.object(gcs, "_call", new_callable=mock.AsyncMock) as mock_call,
+        mock.patch(
+            "gcsfs.core.upload_chunk", new_callable=mock.AsyncMock, return_value={}
+        ),
+    ):
+        mock_call.return_value = {"size": "3", "md5Hash": "", "crc32c": ""}
+        gcs.pipe_file(
+            TEST_BUCKET + "/kms-pipe-small",
+            b"abc",
+            consistency="none",
+            kms_key_name="kms-key",
+        )
+        assert mock_call.await_args.kwargs["kmsKeyName"] == "kms-key"
+
+        mock_call.reset_mock()
+        mock_call.return_value = ({"Location": location}, None)
+        gcs.pipe_file(
+            TEST_BUCKET + "/kms-pipe-large",
+            b"x" * 2**20,
+            chunksize=2**19,
+            consistency="none",
+            kms_key_name="kms-key",
+        )
+        assert mock_call.await_args.kwargs["kmsKeyName"] == "kms-key"
+
+        mock_call.reset_mock()
+        mock_call.return_value = {"size": "3", "md5Hash": "", "crc32c": ""}
+        gcs.put_file(
+            str(small_file),
+            TEST_BUCKET + "/kms-put-small",
+            consistency="none",
+            kms_key_name="kms-key",
+        )
+        assert mock_call.await_args.kwargs["kmsKeyName"] == "kms-key"
+
+        mock_call.reset_mock()
+        mock_call.return_value = ({"Location": location}, None)
+        gcs.put_file(
+            str(large_file),
+            TEST_BUCKET + "/kms-put-large",
+            chunksize=2**20,
+            consistency="none",
+            kms_key_name="kms-key",
+        )
+        assert mock_call.await_args.kwargs["kmsKeyName"] == "kms-key"
 
 
 def test_large_upload(gcs):
@@ -321,10 +397,24 @@ def test_large_upload_with_kms(gcs):
     try:
         fn = TEST_BUCKET + "/test"
         d = b"7123" * 262144
-        with gcs.open(
-            fn, "wb", content_type="application/octet-stream", kms_key_name=TEST_KMS_KEY
-        ) as f:
-            f.write(d)
+        try:
+            with gcs.open(
+                fn,
+                "wb",
+                content_type="application/octet-stream",
+                kms_key_name=TEST_KMS_KEY,
+            ) as f:
+                f.write(d)
+        except NotImplementedError:
+            if getattr(gcs, "_uses_grpc_write_path", None):
+                layout = gcs._sync_lookup_bucket_layout(TEST_BUCKET)
+                if gcs._uses_grpc_write_path(layout) and (
+                    layout.is_rcu or zb_hns_utils.Preconditions is None
+                ):
+                    pytest.skip(
+                        "gRPC kms_key_name is unsupported on RCU rapid writes or without Preconditions"
+                    )
+            raise
         assert gcs.cat(fn) == d
         assert TEST_KMS_KEY in gcs.info(fn)["kmsKeyName"]
     finally:
@@ -4071,6 +4161,249 @@ def test_gcsfile_prefetcher_producer_fetcher_integration(fake_fs):
         assert prefetcher.producer.fetcher == f._async_fetch_range
 
 
+def test_gcsfile_failed_read_init_closes_file_and_prefetcher(gcs):
+    """If GCSFile.__init__ fails after the cache is built, the file and its prefetcher are closed."""
+    f = GCSFile.__new__(GCSFile)
+    real_close = BackgroundPrefetcher.close
+
+    with mock.patch.object(
+        BackgroundPrefetcher, "close", autospec=True, side_effect=real_close
+    ) as prefetcher_close:
+        # An invalid fixed_key_metadata fails after AbstractBufferedFile.__init__ built the cache.
+        with pytest.raises(TypeError):
+            f.__init__(
+                gcs,
+                f"{TEST_BUCKET}/nested/file1",
+                "rb",
+                cache_type="adaptive",
+                fixed_key_metadata=123,
+            )
+
+    assert f.closed is True
+    prefetcher_close.assert_called_once()
+    assert f.cache is None
+
+
+def test_gcsfile_failed_read_init_preserves_exception_when_prefetcher_close_fails(
+    gcs, caplog
+):
+    """If prefetcher teardown fails during failed __init__, log a warning and propagate the init error."""
+    f = GCSFile.__new__(GCSFile)
+    real_close = BackgroundPrefetcher.close
+
+    def failing_close(self):
+        real_close(self)
+        raise RuntimeError("prefetcher close boom")
+
+    with (
+        caplog.at_level(logging.WARNING, logger="gcsfs"),
+        mock.patch.object(
+            BackgroundPrefetcher, "close", autospec=True, side_effect=failing_close
+        ) as prefetcher_close,
+        pytest.raises(TypeError),
+    ):
+        f.__init__(
+            gcs,
+            f"{TEST_BUCKET}/nested/file1",
+            "rb",
+            cache_type="adaptive",
+            fixed_key_metadata=123,
+        )
+
+    assert f.closed is True
+    prefetcher_close.assert_called_once()
+    assert f.cache is None
+    assert any(
+        r.levelno == logging.WARNING and "prefetcher close boom" in r.message
+        for r in caplog.records
+    )
+
+
+@pytest.mark.parametrize("cache_type", ["background", "mmap"])
+def test_gcsfile_failed_read_init_drops_non_adaptive_cache(
+    gcs, cache_type, monkeypatch
+):
+    """A failed read open releases non-adaptive caches without waiting for GC or dropping the exception."""
+    import gc
+    import tempfile
+    import weakref
+
+    import fsspec.caching
+
+    refs = []
+    orig_cache_cls = fsspec.caching.caches[cache_type]
+
+    def tracking_cache(*args, **kwargs):
+        inst = orig_cache_cls(*args, **kwargs)
+        refs.append(weakref.ref(inst))
+        return inst
+
+    monkeypatch.setitem(fsspec.caching.caches, cache_type, tracking_cache)
+
+    check_tmp_fds = cache_type == "mmap" and os.path.isdir("/proc/self/fd")
+    tmpdir_prefix = os.path.realpath(tempfile.gettempdir()) + os.sep
+
+    def open_tmp_fds():
+        out = set()
+        for entry in os.listdir("/proc/self/fd"):
+            try:
+                target = os.readlink(f"/proc/self/fd/{entry}")
+            except OSError:
+                continue
+            if target.startswith(("/tmp/", tmpdir_prefix)):
+                out.add((entry, target))
+        return out
+
+    gc.collect()
+    fds_before = open_tmp_fds() if check_tmp_fds else set()
+    was_gc_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        f = GCSFile.__new__(GCSFile)
+        with pytest.raises(TypeError) as exc_info:
+            f.__init__(
+                gcs,
+                f"{TEST_BUCKET}/nested/file1",
+                "rb",
+                cache_type=cache_type,
+                fixed_key_metadata=123,
+            )
+
+        assert f.closed is True
+        assert f.cache is None
+        assert len(refs) == 1
+        assert refs[0]() is None
+        if check_tmp_fds:
+            assert open_tmp_fds() - fds_before == set()
+    finally:
+        if was_gc_enabled:
+            gc.enable()
+
+    gc.collect()
+    assert refs[0]() is None
+    assert exc_info.value is not None
+    del exc_info
+
+    # On Zonal/RCU buckets, ExtendedGcsFileSystem._open routes reads to ZonalFile,
+    # which fails at _checkout_pool before AbstractBufferedFile.__init__ builds a cache.
+    uses_grpc_read = (
+        hasattr(gcs, "_sync_lookup_bucket_layout")
+        and gcs._sync_lookup_bucket_layout(TEST_BUCKET).uses_grpc_data_path
+    )
+    expected_open_refs = 0 if uses_grpc_read else 1
+    missing = f"{TEST_BUCKET}/nonexistent"
+
+    refs.clear()
+    gc.collect()
+    fds_before = open_tmp_fds() if check_tmp_fds else set()
+    was_gc_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        try:
+            gcs.open(missing, "rb", size=4096, cache_type=cache_type)
+        except FileNotFoundError:
+            pass
+        else:
+            pytest.fail("Expected FileNotFoundError")
+        assert len(refs) == expected_open_refs
+        assert all(r() is None for r in refs)
+        if check_tmp_fds:
+            assert open_tmp_fds() - fds_before == set()
+    finally:
+        if was_gc_enabled:
+            gc.enable()
+
+    refs.clear()
+    gc.collect()
+    fds_before = open_tmp_fds() if check_tmp_fds else set()
+    with pytest.raises(FileNotFoundError) as open_exc_info:
+        gcs.open(missing, "rb", size=4096, cache_type=cache_type)
+    gc.collect()
+    assert len(refs) == expected_open_refs
+    assert all(r() is None for r in refs)
+    if check_tmp_fds:
+        assert open_tmp_fds() - fds_before == set()
+    assert open_exc_info.value is not None
+
+
+def test_gcsfile_failed_read_init_preserves_exception_when_cache_close_fails(
+    gcs, caplog
+):
+    """If cache.close() fails during failed __init__, log a warning and propagate the init error."""
+    f = GCSFile.__new__(GCSFile)
+    real_close = BackgroundBlockCache.close
+
+    def failing_close(self):
+        real_close(self)
+        raise RuntimeError("cache close boom")
+
+    with (
+        caplog.at_level(logging.WARNING, logger="gcsfs"),
+        mock.patch.object(
+            BackgroundBlockCache, "close", autospec=True, side_effect=failing_close
+        ) as cache_close,
+        pytest.raises(TypeError),
+    ):
+        f.__init__(
+            gcs,
+            f"{TEST_BUCKET}/nested/file1",
+            "rb",
+            cache_type="background",
+            fixed_key_metadata=123,
+        )
+
+    assert f.closed is True
+    cache_close.assert_called_once()
+    assert f.cache is None
+    assert any(
+        r.levelno == logging.WARNING and "cache close boom" in r.message
+        for r in caplog.records
+    )
+
+
+def test_gcsfile_failed_write_init_is_marked_closed(gcs):
+    """A failed write-mode open is marked closed, so close() and __del__ never flush it."""
+    import gc
+    import threading
+    import warnings
+
+    from gcsfs.core import GCS_MIN_BLOCK_SIZE
+
+    small_path = f"{TEST_BUCKET}/small_blocksize_ok"
+    with pytest.warns(UserWarning, match="Setting block size to minimum value"):
+        with gcs.open(small_path, "wb", block_size=1024) as f_ok:
+            assert f_ok.blocksize == GCS_MIN_BLOCK_SIZE
+            f_ok.write(b"ok")
+    assert gcs.cat(small_path) == b"ok"
+
+    existing = f"{TEST_BUCKET}/existing_not_clobbered"
+    phantom = f"{TEST_BUCKET}/failed_open"
+    gcs.pipe(existing, b"keep-me")
+
+    f = GCSFile.__new__(GCSFile)
+    with pytest.raises(TypeError):
+        f.__init__(gcs, phantom, "wb", fixed_key_metadata=123)
+    assert f.closed is True
+    with mock.patch.object(GCSFile, "flush") as flush:
+        f.close()
+    flush.assert_not_called()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        with pytest.raises(UserWarning, match="Setting block size to minimum value"):
+            gcs.open(existing, "wb", block_size=1024)
+        with pytest.raises(UserWarning, match="Setting block size to minimum value"):
+            gcs.open(phantom, "wb", block_size=1024)
+
+    gc.collect()
+    done = threading.Event()
+    gcsfs.core._deferred_close_queue.put(done.set)
+    assert done.wait(timeout=5)
+
+    assert gcs.cat(existing) == b"keep-me"
+    assert not gcs.exists(phantom)
+
+
 def test_gcsfile_prefetch_sequential_integrity(gcs):
     fn = f"{TEST_BUCKET}/integrated_seq.txt"
     file_size = 10 * 1024 * 1024
@@ -5128,3 +5461,372 @@ async def test_merge_rejects_specific_generations_before_request(suffix):
         ):
             await fs._merge(destination, ["bucket/source"])
         request.assert_not_awaited()
+
+
+def test_coalesce_generation_variants():
+    from gcsfs.core import _coalesce_generation
+
+    assert _coalesce_generation(None, None) is None
+    assert _coalesce_generation("123", None) == "123"
+    assert _coalesce_generation(None, "123") == "123"
+    assert _coalesce_generation(0, None) == 0
+    assert isinstance(_coalesce_generation(0, None), int)
+    assert _coalesce_generation("123", "123") == "123"
+    assert _coalesce_generation(123, "123") == 123
+    with pytest.raises(ValueError, match="Cannot coalesce generations"):
+        _coalesce_generation("123", "456")
+    with pytest.raises(ValueError, match="Cannot coalesce generations"):
+        _coalesce_generation(123, "456")
+    for invalid in (True, False, "", "abc", "-1", -1, " 123 ", 1.5):
+        with pytest.raises(
+            ValueError, match="generation must be a non-negative integer"
+        ):
+            _coalesce_generation(invalid, None)
+
+
+def test_url_with_zero_and_invalid_generation():
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    assert fs.url("bucket/obj", generation=0).endswith("&generation=0")
+    assert fs.url("bucket/obj", generation="111").endswith("&generation=111")
+    assert "?alt=media" in fs.url("bucket/obj")
+    assert "&generation=" not in fs.url("bucket/obj")
+    with pytest.raises(ValueError, match="generation must be a non-negative integer"):
+        fs.url("bucket/obj", generation="")
+
+
+@pytest.mark.asyncio
+async def test_info_and_get_object_with_generation_handle_cache_and_fallbacks():
+    # Default filesystem (version_aware=False) exercises keyword generation= paths.
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    assert fs.version_aware is False
+    path = "bucket/dir/file.txt"
+
+    # 1. Cache hit when cached generation matches (str or int).
+    fs.dircache["bucket/dir"] = [
+        {"name": path, "size": 5, "generation": "111", "type": "file"}
+    ]
+    with mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as mock_call:
+        assert (await fs._info(path, generation="111"))["generation"] == "111"
+        assert (await fs._info(path, generation=111))["generation"] == "111"
+        mock_call.assert_not_awaited()
+
+    # 2. Stale dircache holding newer generation 222 does not hijack generation="111"
+    #    or misclassify the file as a directory.
+    fs.dircache["bucket/dir"] = [
+        {"name": path, "size": 20, "generation": "222", "type": "file"}
+    ]
+    with mock.patch.object(
+        fs,
+        "_call",
+        new=mock.AsyncMock(
+            return_value={"name": "dir/file.txt", "size": "5", "generation": "111"}
+        ),
+    ) as mock_call:
+        info = await fs._info(path, generation="111")
+        assert info["type"] == "file"
+        assert info["size"] == 5
+        assert info["generation"] == "111"
+        mock_call.assert_awaited_once_with(
+            "GET",
+            "b/{}/o/{}",
+            "bucket",
+            "dir/file.txt",
+            json_out=True,
+            generation="111",
+        )
+
+    # 3. Cached ancestor listing without intermediate directory raises FileNotFoundError
+    #    when generation is None, but falls through to _get_object when generation is set.
+    fs.dircache.clear()
+    fs.dircache["bucket"] = [
+        {"name": "bucket/other.txt", "size": 3, "generation": "999", "type": "file"}
+    ]
+    with pytest.raises(FileNotFoundError):
+        await fs._info(path)
+    with mock.patch.object(
+        fs,
+        "_call",
+        new=mock.AsyncMock(
+            return_value={"name": "dir/file.txt", "size": "5", "generation": "111"}
+        ),
+    ) as mock_call:
+        info = await fs._info(path, generation="111")
+        assert info["generation"] == "111"
+        mock_call.assert_awaited_once()
+
+    # 4. _get_object Forbidden fallback lists versions when generation is set, and
+    #    handles generation=None cache hit/miss (both parent cache miss and cached directory).
+    fs.dircache.clear()
+    fs.dircache["bucket/dir"] = [
+        {"name": "bucket/dir/other.txt", "size": 3, "generation": "999", "type": "file"}
+    ]
+    with pytest.raises(FileNotFoundError):
+        await fs._get_object(path)
+    with pytest.raises(FileNotFoundError):
+        await fs._get_object("bucket/dir")
+    fs.dircache["bucket/dir"].append(
+        {"name": path, "size": 5, "generation": "111", "type": "file"}
+    )
+    assert (await fs._get_object(path))["generation"] == "111"
+
+    fs.dircache.clear()
+
+    async def forbidden_then_list(method, url_tmpl, *args, **kwargs):
+        if url_tmpl == "b/{}/o/{}":
+            raise OSError("Forbidden: storage.objects.get denied")
+        assert url_tmpl == "b/{}/o"
+        assert kwargs["versions"] == "true"
+        assert kwargs["maxResults"] is None
+        return {
+            "items": [
+                {"name": "dir/file.txt", "size": "20", "generation": 222},
+                {"name": "dir/file.txt", "size": "5", "generation": 111},
+            ]
+        }
+
+    with mock.patch.object(fs, "_call", side_effect=forbidden_then_list):
+        obj = await fs._get_object(path, generation="111")
+        assert obj["generation"] == 111
+        assert obj["size"] == 5
+        with pytest.raises(FileNotFoundError):
+            await fs._get_object(path, generation="333")
+
+    # 5. Missing pinned generation raises FileNotFoundError without falling back
+    #    to _get_directory_info (which on flat buckets would return the live object).
+    fs.dircache.clear()
+    with (
+        mock.patch.object(
+            fs, "_call", new=mock.AsyncMock(side_effect=FileNotFoundError(path))
+        ),
+        mock.patch.object(
+            fs, "_get_directory_info", new_callable=mock.AsyncMock
+        ) as mock_dir_info,
+    ):
+        with pytest.raises(FileNotFoundError):
+            await fs._info(path, generation="111")
+        mock_dir_info.assert_not_awaited()
+
+    # 6. version_aware=True coalesces #gen fragment and rejects conflicting generation=.
+    va_fs = GCSFileSystem(token="anon", version_aware=True, skip_instance_cache=True)
+    with mock.patch.object(
+        va_fs,
+        "_call",
+        new=mock.AsyncMock(
+            return_value={"name": "dir/file.txt", "size": "5", "generation": "111"}
+        ),
+    ):
+        assert (await va_fs._info(f"{path}#111"))["generation"] == "111"
+        with pytest.raises(ValueError, match="Cannot coalesce generations"):
+            await va_fs._info(f"{path}#111", generation="222")
+
+
+@pytest.mark.asyncio
+async def test_cat_file_concurrent_forwards_generation_to_info():
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    fs.MIN_CHUNK_SIZE_FOR_CONCURRENCY = 4
+    path = "bucket/file.bin"
+
+    with (
+        mock.patch.object(
+            fs, "_info", new=mock.AsyncMock(return_value={"size": 10})
+        ) as mock_info,
+        mock.patch.object(
+            fs,
+            "_cat_file_sequential",
+            new=mock.AsyncMock(side_effect=[b"01234", b"56789"]),
+        ) as mock_seq,
+    ):
+        out = await fs._cat_file_concurrent(
+            path, start=0, end=None, concurrency=2, generation="111"
+        )
+        assert out == b"0123456789"
+        mock_info.assert_awaited_once_with(path, generation="111")
+        assert [c.kwargs["generation"] for c in mock_seq.await_args_list] == [
+            "111",
+            "111",
+        ]
+
+
+@pytest.mark.parametrize("cache_type", ["none", "readahead", "adaptive"])
+def test_gcsfile_open_with_generation_pins_size_and_reads(cache_type):
+    """GCSFile opened with generation= pins both f.size and f.read() across cache modes."""
+    from urllib.parse import parse_qs, urlsplit
+
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    path = "bucket/file.bin"
+    versions = {"111": b"v1-10bytes", "222": b"v2-longer-live-payload"}
+    overwritten_after_open = False
+
+    async def fake_call(method, url_or_tmpl, *args, **kwargs):
+        if url_or_tmpl == "b/{}/o/{}":
+            gen = str(kwargs.get("generation") or "222")
+            if gen not in versions or (overwritten_after_open and gen == "111"):
+                raise FileNotFoundError(path)
+            return {
+                "name": "file.bin",
+                "size": str(len(versions[gen])),
+                "generation": gen,
+            }
+        # Media download URL
+        parsed = urlsplit(url_or_tmpl)
+        qs = parse_qs(parsed.query)
+        gen = qs.get("generation", ["222"])[0]
+        if gen not in versions or (overwritten_after_open and gen == "111"):
+            raise FileNotFoundError(path)
+        data = versions[gen]
+        headers = kwargs.get("headers") or {}
+        if "Range" in headers:
+            rng = headers["Range"].removeprefix("bytes=")
+            start_s, end_s = rng.split("-")
+            start_i = int(start_s)
+            end_i = int(end_s) + 1 if end_s else len(data)
+            data = data[start_i:end_i]
+        return {}, data
+
+    with mock.patch.object(fs, "_call", side_effect=fake_call):
+        with fs.open(path, "rb", generation="111", cache_type=cache_type) as f:
+            assert f.size == len(versions["111"])
+            assert f.read() == b"v1-10bytes"
+
+        # If gen 111 is deleted/overwritten on an unversioned bucket between open and read,
+        # reading raises FileNotFoundError instead of returning truncated live bytes.
+        with fs.open(path, "rb", generation="111", cache_type=cache_type) as f:
+            assert f.size == len(versions["111"])
+            overwritten_after_open = True
+            with pytest.raises(FileNotFoundError):
+                f.read()
+
+
+@pytest.mark.parametrize("concurrency", [1, 2])
+def test_cat_file_negative_offsets_with_pinned_generation_differing_live_size(
+    concurrency,
+):
+    """Negative start/end with generation= resolves against pinned size, even when live differs or is deleted."""
+    from urllib.parse import parse_qs, urlsplit
+
+    from gcsfs.retry import HttpError
+
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    fs.MIN_CHUNK_SIZE_FOR_CONCURRENCY = 4
+    path = "bucket/file.bin"
+    v1 = b"0123456789ab"  # 12 bytes
+    v2 = b"ABCDEFGHIJKLMNOPQRST"  # 20 bytes (live)
+    versions = {"111": v1, "222": v2}
+    live_gen = "222"
+    info_generations = []
+
+    async def fake_call(method, url_or_tmpl, *args, **kwargs):
+        if url_or_tmpl == "b/{}/o/{}":
+            gen_arg = kwargs.get("generation")
+            info_generations.append(gen_arg)
+            gen = str(gen_arg) if gen_arg is not None else live_gen
+            if gen is None or gen not in versions:
+                raise FileNotFoundError(path)
+            return {
+                "name": "file.bin",
+                "size": str(len(versions[gen])),
+                "generation": gen,
+            }
+        parsed = urlsplit(url_or_tmpl)
+        qs = parse_qs(parsed.query)
+        gen = qs.get("generation", [live_gen])[0]
+        if gen is None or gen not in versions:
+            raise FileNotFoundError(path)
+        data = versions[gen]
+        headers = kwargs.get("headers") or {}
+        if "Range" in headers:
+            rng = headers["Range"].removeprefix("bytes=")
+            start_s, end_s = rng.split("-", 1)
+            if start_s == "":
+                suffix_len = int(end_s)
+                if suffix_len <= 0 or not data:
+                    raise HttpError({"code": 416, "message": "Range Not Satisfiable"})
+                data = data[-suffix_len:]
+            else:
+                start_i = int(start_s)
+                end_i = int(end_s) + 1 if end_s else len(data)
+                if start_i < 0 or start_i >= len(data) or start_i >= end_i:
+                    raise HttpError({"code": 416, "message": "Range Not Satisfiable"})
+                data = data[start_i:end_i]
+        return {}, data
+
+    with mock.patch.object(fs, "_call", side_effect=fake_call):
+        # Negative start with end=None (both small tail and multi-chunk tail).
+        assert (
+            fs.cat_file(path, start=-4, concurrency=concurrency, generation="111")
+            == v1[-4:]
+        )
+        info_generations.clear()
+        assert (
+            fs.cat_file(path, start=-10, concurrency=concurrency, generation="111")
+            == v1[-10:]
+        )
+        if concurrency == 1:
+            assert info_generations == []
+        else:
+            assert info_generations == ["111"]
+
+        # Negative start and negative end when pinned size (12) != live size (20),
+        # plus positive/omitted start with negative or omitted end.
+        info_generations.clear()
+        assert (
+            fs.cat_file(
+                path, start=-10, end=-2, concurrency=concurrency, generation="111"
+            )
+            == v1[-10:-2]
+        )
+        assert info_generations == ["111"]
+        assert (
+            fs.cat_file(path, end=-2, concurrency=concurrency, generation="111")
+            == v1[:-2]
+        )
+        assert (
+            fs.cat_file(
+                path, start=2, end=-2, concurrency=concurrency, generation="111"
+            )
+            == v1[2:-2]
+        )
+        assert (
+            fs.cat_file(path, start=2, concurrency=concurrency, generation="111")
+            == v1[2:]
+        )
+
+        # Clamped negative start beyond file size and empty negative ranges.
+        assert (
+            fs.cat_file(
+                path, start=-50, end=-8, concurrency=concurrency, generation="111"
+            )
+            == v1[-50:-8]
+        )
+        assert (
+            fs.cat_file(
+                path, start=-2, end=-8, concurrency=concurrency, generation="111"
+            )
+            == b""
+        )
+        assert (
+            fs.cat_file(
+                path, start=-50, end=-40, concurrency=concurrency, generation="111"
+            )
+            == b""
+        )
+        assert (
+            fs.cat_file(
+                path, start=-5, end=0, concurrency=concurrency, generation="111"
+            )
+            == b""
+        )
+
+        # Once the live version is deleted on a versioned bucket, pinned negative-offset
+        # reads still succeed instead of raising FileNotFoundError on unpinned _info.
+        live_gen = None
+        assert (
+            fs.cat_file(
+                path, start=-10, end=-2, concurrency=concurrency, generation="111"
+            )
+            == v1[-10:-2]
+        )
+        assert (
+            fs.cat_file(path, start=-4, concurrency=concurrency, generation="111")
+            == v1[-4:]
+        )

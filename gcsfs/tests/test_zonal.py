@@ -18,6 +18,7 @@ from unittest import mock
 import fsspec
 import pytest
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
+    _DEFAULT_FLUSH_INTERVAL_BYTES,
     AsyncAppendableObjectWriter,
 )
 from google.cloud.storage.asyncio.async_multi_range_downloader import (
@@ -25,7 +26,7 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 )
 from google.cloud.storage.exceptions import DataCorruption
 
-from gcsfs import caching
+from gcsfs import caching, zb_hns_utils
 from gcsfs.extended_gcsfs import (
     ExtendedGcsFileSystem,
     _get_mrd_from_pool_or_mrd,
@@ -42,7 +43,7 @@ from gcsfs.tests.conftest import (
     requires_rapid,
     text_files,
 )
-from gcsfs.tests.settings import TEST_BUCKET, TEST_ZONAL_BUCKET
+from gcsfs.tests.settings import TEST_BUCKET, TEST_KMS_KEY, TEST_ZONAL_BUCKET
 from gcsfs.tests.utils import is_real_gcs, tempdir, tmpfile
 from gcsfs.zb_hns_utils import MRDPool
 from gcsfs.zonal_file import ZonalFile
@@ -64,9 +65,16 @@ c = TEST_ZONAL_BUCKET + "/zonal/test/c"
 pytestmark = [requires_rapid]
 
 
-@pytest.fixture
-def gcs_bucket_mocks():
-    """A factory fixture for mocking bucket functionality for different bucket types."""
+@pytest.fixture(params=[bytes, memoryview], ids=["bytes", "memoryview"])
+def gcs_bucket_mocks(request):
+    """A factory fixture for mocking bucket functionality for different bucket types.
+
+    The mocked downloader hands chunks over as ``bytes`` or, like the SDK's
+    zero-copy parser, as ``memoryview`` objects.
+    """
+    chunk_type = request.param
+    if is_real_gcs() and chunk_type is not bytes:
+        pytest.skip("chunk type is the SDK's choice against a real bucket")
 
     @contextlib.contextmanager
     def _gcs_bucket_mocks_factory(file_data, bucket_type_val):
@@ -90,7 +98,9 @@ def gcs_bucket_mocks():
             for param_offset, param_length, buffer_arg in read_requests:
                 if hasattr(buffer_arg, "write"):
                     buffer_arg.write(
-                        file_data[param_offset : param_offset + param_length]
+                        chunk_type(
+                            file_data[param_offset : param_offset + param_length]
+                        )
                     )
 
         mock_downloader = mock.Mock(spec=AsyncMultiRangeDownloader)
@@ -1058,6 +1068,75 @@ async def test_pipe_file_zonal(
         assert await async_gcs._cat(file_path) == data
 
 
+@pytest.mark.parametrize("zonal_write_mocks", RAPID_WRITE_LAYOUTS, indirect=True)
+def test_zonal_kms_key_name(extended_gcsfs, zonal_write_mocks, file_path):
+    """Zonal writes support kms_key_name when Preconditions is available and fail
+    closed otherwise; RCU rapid writes always reject kms_key_name."""
+    bucket, key, _ = extended_gcsfs.split_path(file_path)
+    layout = extended_gcsfs._sync_lookup_bucket_layout(bucket)
+    data = b"cmek-zonal-payload"
+
+    if layout.is_rcu or zb_hns_utils.Preconditions is None:
+        with pytest.raises(NotImplementedError, match="kms_key_name"):
+            extended_gcsfs.open(
+                file_path, "wb", finalize_on_close=True, kms_key_name=TEST_KMS_KEY
+            )
+        if zonal_write_mocks:
+            zonal_write_mocks["init_aaow"].assert_not_called()
+        else:
+            assert not extended_gcsfs.exists(file_path)
+        return
+
+    if zonal_write_mocks:
+        with extended_gcsfs.open(
+            file_path, "wb", finalize_on_close=True, kms_key_name=TEST_KMS_KEY
+        ) as f:
+            f.write(data)
+        zonal_write_mocks["init_aaow"].assert_awaited_once_with(
+            extended_gcsfs.grpc_client,
+            bucket,
+            key,
+            None,
+            _DEFAULT_FLUSH_INTERVAL_BYTES,
+            if_generation_match=None,
+            storage_class=None,
+            kms_key_name=TEST_KMS_KEY,
+        )
+    else:
+        append_path = f"{file_path}-append"
+        plain_path = f"{file_path}-plain"
+        try:
+            with extended_gcsfs.open(
+                file_path, "wb", finalize_on_close=True, kms_key_name=TEST_KMS_KEY
+            ) as f:
+                f.write(data)
+            assert extended_gcsfs.cat(file_path) == data
+            assert TEST_KMS_KEY in extended_gcsfs.info(file_path)["kmsKeyName"]
+
+            with extended_gcsfs.open(
+                append_path, "ab", finalize_on_close=False, kms_key_name=TEST_KMS_KEY
+            ) as f:
+                f.write(b"part1-")
+            with extended_gcsfs.open(
+                append_path, "ab", finalize_on_close=True, kms_key_name=TEST_KMS_KEY
+            ) as f:
+                f.write(b"part2")
+            assert extended_gcsfs.cat(append_path) == b"part1-part2"
+            assert TEST_KMS_KEY in extended_gcsfs.info(append_path)["kmsKeyName"]
+
+            with extended_gcsfs.open(plain_path, "wb", finalize_on_close=False) as f:
+                f.write(b"plain")
+            with pytest.raises(ValueError, match="Cannot append with kms_key_name"):
+                with extended_gcsfs.open(
+                    plain_path, "ab", kms_key_name=TEST_KMS_KEY
+                ) as f:
+                    f.write(b"-more")
+        finally:
+            for p in (file_path, append_path, plain_path):
+                with contextlib.suppress(FileNotFoundError):
+                    extended_gcsfs.rm_file(p)
+
+
 def test_get_file_from_zonal_bucket(extended_gcsfs, gcs_bucket_mocks):
     """Test getting a file from a Zonal bucket with mocks."""
     with gcs_bucket_mocks(
@@ -1308,7 +1387,7 @@ def test_mrd_stream_cleanup(extended_gcsfs, gcs_bucket_mocks):
             mocks["downloader"].close.assert_awaited()
 
 
-def _mrd_pool_with_downloads():
+def _mrd_pool_with_downloads(chunk_type=bytes):
     mock_pool = mock.AsyncMock(spec=MRDPool)
     mock_mrd = mock.AsyncMock(spec=AsyncMultiRangeDownloader)
     mock_mrd.object_name = "test_object"
@@ -1316,17 +1395,21 @@ def _mrd_pool_with_downloads():
 
     async def fake_download(ranges, metadata=None):
         for offset, length, buf in ranges:
-            buf.write(b"A" * length)
+            buf.write(chunk_type(b"A" * length))
 
     mock_mrd.download_ranges.side_effect = fake_download
     return mock_pool, mock_mrd
 
 
 @pytest.mark.asyncio
-async def test_concurrent_mrd_fetch_success(extended_gcsfs, monkeypatch):
-    """Tests that _concurrent_mrd_fetch successfully downloads and stitches chunks."""
+@pytest.mark.parametrize("chunk_type", [bytes, memoryview], ids=["bytes", "memoryview"])
+async def test_concurrent_mrd_fetch_success(extended_gcsfs, monkeypatch, chunk_type):
+    """Tests that _concurrent_mrd_fetch successfully downloads and stitches chunks.
+
+    The SDK's zero-copy read path hands chunks over as memoryview objects.
+    """
     monkeypatch.setattr(extended_gcsfs, "MIN_CHUNK_SIZE_FOR_CONCURRENCY", 1)
-    mock_pool, mock_mrd = _mrd_pool_with_downloads()
+    mock_pool, mock_mrd = _mrd_pool_with_downloads(chunk_type)
 
     result = await extended_gcsfs._concurrent_mrd_fetch(
         offset=0, length=4, concurrency=4, mrd_or_pool=mock_pool
@@ -1708,3 +1791,43 @@ def test_extended_gcsfs_garbage_collection():
     gc.collect()
 
     assert ref() is None
+
+
+def test_generation_pinned_reads_after_overwrite_zb(extended_gcsfs, tmp_path):
+    """Pinned generation= reads return live version and raise FileNotFoundError on overwritten version."""
+    if not extended_gcsfs.on_google:
+        pytest.skip("Generation overwrite test requires a live GCS backend.")
+
+    target = f"{TEST_ZONAL_BUCKET}/zonal/test/gen_overwrite_{uuid.uuid4().hex}"
+    v1 = b"v1-initial-payload"
+    v2 = b"v2-overwritten-longer-payload"
+    try:
+        extended_gcsfs.pipe_file(target, v1, finalize_on_close=True)
+        gen1 = extended_gcsfs.info(target)["generation"]
+        assert extended_gcsfs.cat_file(target, generation=gen1) == v1
+
+        extended_gcsfs.pipe_file(target, v2, finalize_on_close=True)
+        gen2 = extended_gcsfs.info(target)["generation"]
+        assert gen2 != gen1
+
+        assert extended_gcsfs.cat_file(target, generation=gen2) == v2
+        assert extended_gcsfs.cat_ranges([target], [0], [10], generation=gen2) == [
+            v2[:10]
+        ]
+        lpath = tmp_path / "gen2.bin"
+        extended_gcsfs.get_file(target, str(lpath), generation=gen2)
+        assert lpath.read_bytes() == v2
+
+        with pytest.raises(FileNotFoundError):
+            extended_gcsfs.cat_file(target, generation=gen1)
+        err_res = extended_gcsfs.cat_ranges([target], [0], [5], generation=gen1)
+        assert len(err_res) == 1 and isinstance(err_res[0], FileNotFoundError)
+        with pytest.raises(FileNotFoundError):
+            extended_gcsfs.cat_ranges(
+                [target], [0], [5], on_error="raise", generation=gen1
+            )
+        with pytest.raises(FileNotFoundError):
+            extended_gcsfs.get_file(target, str(tmp_path / "gen1.bin"), generation=gen1)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            extended_gcsfs.rm_file(target)

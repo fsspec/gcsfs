@@ -36,6 +36,15 @@ Unreleased
 * Framework telemetry now recognizes the Agent Development Kit (``google.adk``) and
   sends ``fw/adk`` in the ``User-Agent`` header. Other ``google`` packages, such as
   ``google-auth`` and ``google-cloud-storage``, are not reported as a framework.
+* **Zero-copy gRPC reads for Rapid and Rapid Cache Ultra buckets.** When opening
+  a gRPC read stream (``init_mrd``), ``gcsfs`` sets
+  ``GCS_PYTHON_CLIENT_ZERO_COPY_BIDI_READ=1`` if unset (set ``=0`` to keep the
+  SDK's generated parser) and passes ``accepts_memoryview=True`` to
+  ``AsyncMultiRangeDownloader.download_ranges`` when the installed
+  ``google-cloud-storage`` supports that keyword, while the read sinks
+  (``PartialView`` and ``DirectMemmoveBuffer``) copy directly from any
+  contiguous bytes-like object (raising ``ValueError`` for non-contiguous
+  views) (#1195).
 
 2026.10.0
 ---------
