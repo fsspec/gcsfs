@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import mimetypes
+import numbers
 import os
 import queue
 import re
@@ -281,18 +282,28 @@ def _chunks(lst, n):
 
 def _coalesce_generation(*args):
     """Helper to coalesce a list of object generations down to one."""
-    generations = set(args)
-    if None in generations:
-        generations.remove(None)
-    if len(generations) > 1:
+    defined = []
+    parsed_values = set()
+    for g in args:
+        if g is None:
+            continue
+        if isinstance(g, bool) or not isinstance(g, (numbers.Integral, str)):
+            raise ValueError(f"generation must be a non-negative integer, got {g!r}")
+        if isinstance(g, str) and not (g.isascii() and g.isdigit()):
+            raise ValueError(f"generation must be a non-negative integer, got {g!r}")
+        val = int(g)
+        if val < 0:
+            raise ValueError(f"generation must be a non-negative integer, got {g!r}")
+        defined.append(g)
+        parsed_values.add(val)
+    if not defined:
+        return None
+    if len(parsed_values) > 1:
         raise ValueError(
             "Cannot coalesce generations where more than one are defined,"
-            f" {generations}"
+            f" {set(defined)}"
         )
-    elif len(generations) == 0:
-        return None
-    else:
-        return generations.pop()
+    return defined[0]
 
 
 def _is_directory_marker(entry):
@@ -792,23 +803,21 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     make_bucket_requester_pays = asyn.sync_wrapper(_make_bucket_requester_pays)
 
-    async def _get_object(self, path):
+    async def _get_object(self, path, generation=None):
         """Return object information at the given path."""
-        bucket, key, generation = self.split_path(path)
+        bucket, key, path_generation = self.split_path(path)
+        generation = _coalesce_generation(generation, path_generation)
 
         # Check if parent dir is in listing cache
-        listing = self._ls_from_cache(path)
-        if listing:
-            name = "/".join((bucket, key))
-            for file_details in listing:
-                if (
-                    file_details["type"] == "file"
-                    and file_details["name"] == name
-                    and (not generation or file_details.get("generation") == generation)
-                ):
-                    return file_details
-            else:
-                raise FileNotFoundError(path)
+        if generation is None:
+            listing = self._ls_from_cache(path)
+            if listing:
+                name = "/".join((bucket, key))
+                for file_details in listing:
+                    if file_details["type"] == "file" and file_details["name"] == name:
+                        return file_details
+                else:
+                    raise FileNotFoundError(path)
 
         if not key:
             # Attempt to "get" the bucket root, return error instead of
@@ -831,12 +840,16 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 bucket,
                 json_out=True,
                 prefix=key,
-                maxResults=1 if not generation else None,
-                versions="true" if generation else None,
+                maxResults=1 if generation is None else None,
+                versions="true" if generation is not None else None,
             )
             for item in resp.get("items", []):
                 if item["name"] == key and (
-                    not generation or item.get("generation") == generation
+                    generation is None
+                    or (
+                        item.get("generation") is not None
+                        and str(item.get("generation")) == str(generation)
+                    )
                 ):
                     res = item
                     break
@@ -1298,18 +1311,29 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 else:
                     raise FileNotFoundError(path)
             return out
-        # Check directory cache for parent dir
-        parent_path = self._parent(path)
-        parent_cache = self._ls_from_cache(parent_path)
         bucket, key, path_generation = self.split_path(path)
         generation = _coalesce_generation(generation, path_generation)
+        # Check directory cache for parent dir
+        parent_path = self._parent(path)
+        try:
+            parent_cache = self._ls_from_cache(parent_path)
+        except FileNotFoundError:
+            if generation is None:
+                raise
+            parent_cache = None
         if parent_cache:
             name = "/".join((bucket, key))
             for o in parent_cache:
                 if o["name"].rstrip("/") == name and (
-                    not generation or o.get("generation") == generation
+                    generation is None
+                    or (
+                        o.get("generation") is not None
+                        and str(o.get("generation")) == str(generation)
+                    )
                 ):
                     return o
+        if generation is not None:
+            return await self._get_object(path, generation=generation)
         if self._ls_from_cache(path):
             # this is a directory
             return {
@@ -1410,17 +1434,50 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             self._location,
             bucket,
             object,
-            f"&generation={generation}" if generation else "",
+            f"&generation={generation}" if generation is not None else "",
         )
+
+    async def _process_limits(self, url, start, end, generation=None):
+        """Helper for "Range"-based _cat_file"""
+        size = None
+        suff = False
+        info_kwargs = {"generation": generation} if generation is not None else {}
+        if start is not None and start < 0:
+            # if start is negative and end None, end is the "suffix length"
+            if end is None:
+                end = -start
+                start = ""
+                suff = True
+            else:
+                size = (await self._info(url, **info_kwargs))["size"]
+                start = max(0, size + start)
+        elif start is None:
+            start = 0
+        if not suff:
+            if end is not None and end < 0:
+                if size is None:
+                    size = (await self._info(url, **info_kwargs))["size"]
+                end = max(0, size + end)
+            elif end is None:
+                end = ""
+            if isinstance(end, numbers.Integral):
+                end -= 1  # bytes range is inclusive
+        return f"bytes={start}-{end}"
 
     async def _cat_file_sequential(self, path, start=None, end=None, **kwargs):
         """Simple one-shot get of file data"""
         if is_empty_range(start, end):
             return b""
 
-        u2 = self.url(path, generation=kwargs.get("generation"))
+        generation = kwargs.get("generation")
+        u2 = self.url(path, generation=generation)
         if start is not None or end is not None:
-            head = {"Range": await self._process_limits(path, start, end)}
+            rng = await self._process_limits(path, start, end, generation=generation)
+            if not rng.startswith("bytes=-"):
+                first_s, last_s = rng.removeprefix("bytes=").split("-", 1)
+                if first_s and last_s and int(first_s) > int(last_s):
+                    return b""
+            head = {"Range": rng}
         else:
             head = {}
 
@@ -1435,10 +1492,18 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self, path, start=None, end=None, concurrency=DEFAULT_CONCURRENCY, **kwargs
     ):
         """Concurrent fetch of file data"""
+        if is_empty_range(start, end):
+            return b""
         if start is None:
             start = 0
-        if end is None:
-            end = (await self._info(path))["size"]
+        if start < 0 or end is None or end < 0:
+            info_kwargs = (
+                {"generation": kwargs["generation"]}
+                if kwargs.get("generation") is not None
+                else {}
+            )
+            size = (await self._info(path, **info_kwargs))["size"]
+            start, end, _ = slice(start, end).indices(size)
         if start >= end:
             return b""
 
@@ -3140,6 +3205,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """
         if is_empty_range(start, end, self.size):
             return b""
+        gen_kwargs = (
+            {"generation": self.generation} if self.generation is not None else {}
+        )
         try:
             return self.fs.cat_file(
                 self.path,
@@ -3148,6 +3216,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 concurrency=self.concurrency,
                 cache_type=self.cache_type,
                 cache_source=self.cache_source,
+                **gen_kwargs,
             )
         except (RuntimeError, HttpError) as e:
             if "not satisfiable" in str(e) or "InvalidRange" in str(e):
@@ -3156,6 +3225,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     async def _async_fetch_range(self, start_offset, total_size, split_factor=1):
         """Async fetcher mapped to the Prefetcher engine for regional buckets."""
+        gen_kwargs = (
+            {"generation": self.generation} if self.generation is not None else {}
+        )
         return await self.gcsfs._cat_file_concurrent(
             self.path,
             start=start_offset,
@@ -3163,6 +3235,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             concurrency=split_factor,
             cache_type=self.cache_type,
             cache_source=self.cache_source,
+            **gen_kwargs,
         )
 
     def close(self):
