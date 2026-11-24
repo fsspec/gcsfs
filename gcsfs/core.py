@@ -2004,6 +2004,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         mode="overwrite",
         if_generation_match=None,
         kms_key_name=None,
+        **kwargs,
     ):
         # enforce blocksize should be a multiple of 2**18
         if content_type is None:

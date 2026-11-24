@@ -30,7 +30,7 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 )
 
 from gcsfs import __version__ as version
-from gcsfs import zb_hns_utils
+from gcsfs import parallel_upload, zb_hns_utils
 from gcsfs._dircache import HnsDirCacheUpdater
 from gcsfs.concurrency import split_range
 from gcsfs.core import (
@@ -154,25 +154,29 @@ def _rapid_cache_ultra_disabled_error(bucket):
     )
 
 
+_RCU_RAPID_KMS_ERROR = (
+    "kms_key_name is not supported for gRPC RAPID uploads to RCU buckets; "
+    "use rcu_rapid_write=False to write with kms_key_name over HTTP."
+)
+_KMS_KEY_VERSION_ERROR = (
+    "kms_key_name must not include /cryptoKeyVersions/: GCS encrypts "
+    "new objects with the key's primary version."
+)
+
+
 def _validate_grpc_write_kms_key_name(layout, kms_key_name):
     """Validate ``kms_key_name`` before opening a gRPC appendable writer."""
     if not kms_key_name:
         return
     if layout is not None and layout.is_rcu:
-        raise NotImplementedError(
-            "kms_key_name is not supported for gRPC RAPID uploads to RCU buckets; "
-            "use rcu_rapid_write=False to write with kms_key_name over HTTP."
-        )
+        raise NotImplementedError(_RCU_RAPID_KMS_ERROR)
     if zb_hns_utils.Preconditions is None:
         raise NotImplementedError(
             "kms_key_name on Zonal buckets requires a google-cloud-storage "
             "release whose AsyncAppendableObjectWriter.from_blob accepts Preconditions."
         )
     if "/cryptoKeyVersions/" in kms_key_name:
-        raise ValueError(
-            "kms_key_name must not include /cryptoKeyVersions/: GCS encrypts "
-            "new objects with the key's primary version."
-        )
+        raise ValueError(_KMS_KEY_VERSION_ERROR)
 
 
 @contextlib.asynccontextmanager
@@ -309,8 +313,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             Has no effect on Zonal buckets, which always use the appendable
             writer.
         parallel_upload : bool, default False
-            Opt in to parallel uploads of large writes. No write path uses this
-            option so far. Can also be set with
+            Upload large ``pipe_file`` writes with parallel uploads. ``False``
+            keeps every write on its current upload path. Can also be set with
             ``FSSPEC_GCS_PARALLEL_UPLOAD=true`` or
             ``fsspec.config.conf.setdefault("gcs", {})["parallel_upload"] = True``.
         parallel_upload_threshold : int, default 128 MiB
@@ -748,6 +752,128 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             return fs_default
         return bucket_layout.is_rcu
 
+    async def _rcu_disabled_after_error(self, bucket):
+        """Whether a failed write to ``bucket`` found Rapid Cache Ultra disabled.
+
+        Reuses a layout without RCU that another write already cached, and
+        otherwise looks the layout up once. A fresh layout that no longer
+        reports RCU is cached. A lookup that is ``UNKNOWN`` or still reports
+        RCU keeps the cached layout.
+        """
+        cached_layout = self._storage_layout_cache.get(bucket)
+        if cached_layout is None or cached_layout.is_rcu:
+            # No other write has refreshed the layout yet: look it up once.
+            fresh_layout = await self._get_bucket_layout(bucket)
+            if (
+                fresh_layout.storage_class == StorageClass.UNKNOWN
+                or fresh_layout.is_rcu
+            ):
+                return False
+            self._storage_layout_cache[bucket] = fresh_layout
+        return True
+
+    def _may_use_parallel_upload(
+        self,
+        layout,
+        *,
+        if_generation_match=None,
+        finalize_on_close=None,
+        metadata=None,
+    ):
+        """Whether a write to a bucket with this layout may use a parallel upload.
+
+        Only a write that ends finalized and has no precondition may. A write to
+        a bucket whose layout lookup failed keeps its current path.
+        """
+        if if_generation_match is not None:
+            # parallel uploads don't support preconditions
+            return False
+        if layout.storage_class == StorageClass.UNKNOWN:
+            return False
+        if self._uses_grpc_write_path(layout):
+            return bool(self._resolve_finalize_on_close(layout, finalize_on_close))
+        return not any(
+            str(k) == "" or v in (None, "") for k, v in (metadata or {}).items()
+        )
+
+    def _parallel_upload_call_options(self, kwargs):
+        """The segment size and concurrency for one call, from its keyword arguments.
+
+        ``parallel_upload_segment_size`` falls back to the filesystem option.
+        """
+        return (
+            _parse_int_flag(
+                kwargs.get("parallel_upload_segment_size"),
+                "parallel_upload_segment_size",
+                default=self.parallel_upload_segment_size,
+                minimum=1,
+            ),
+            _parse_int_flag(kwargs.get("concurrency"), "concurrency", minimum=1),
+        )
+
+    async def _perform_parallel_upload(
+        self,
+        upload_func,
+        source,
+        bucket,
+        key,
+        path,
+        layout,
+        *,
+        content_type,
+        metadata,
+        fixed_key_metadata,
+        consistency,
+        kms_key_name,
+        segment_size,
+        max_workers,
+    ):
+        """Upload ``source`` to ``bucket/key`` with a parallel upload.
+
+        Retries once without ``RAPID`` if Rapid Cache Ultra was disabled on the
+        bucket, and updates the cache for ``path``.
+        """
+        rcu_rapid = layout.is_rcu and self.rcu_rapid_write
+        if kms_key_name:
+            if rcu_rapid:
+                raise NotImplementedError(_RCU_RAPID_KMS_ERROR)
+            if "/cryptoKeyVersions/" in kms_key_name:
+                raise ValueError(_KMS_KEY_VERSION_ERROR)
+        if (consistency or self.consistency) not in (None, "none"):
+            logger.warning(
+                "Parallel uploads do not apply the consistency setting. "
+                "It will be ignored."
+            )
+        client = await self._get_grpc_client()
+
+        async def upload(storage_class):
+            await upload_func(
+                client,
+                bucket,
+                key,
+                source,
+                content_type=content_type,
+                metadata=metadata,
+                fixed_key_metadata=fixed_key_metadata,
+                storage_class=storage_class,
+                kms_key_name=kms_key_name,
+                segment_size=segment_size,
+                max_workers=max_workers,
+            )
+
+        try:
+            await upload("RAPID" if rcu_rapid else None)
+        except api_exceptions.GoogleAPICallError:
+            if not (rcu_rapid and await self._rcu_disabled_after_error(bucket)):
+                raise
+            logger.warning(
+                "Rapid Cache Ultra is no longer enabled on bucket '%s'. "
+                "Retrying the upload without the RAPID storage class.",
+                bucket,
+            )
+            await upload(None)
+        await self._write_file_cache_update(path)
+
     async def _init_aaow(
         self,
         bucket,
@@ -811,18 +937,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # ("Project ... may not create storageClass RAPID buckets ...") and
         # FailedPrecondition for appends ("Cannot write rapid object to zone ...").
         except api_exceptions.GoogleAPICallError as e:
-            if not is_rcu:
+            if not (is_rcu and await self._rcu_disabled_after_error(bucket)):
                 raise
-            cached_layout = self._storage_layout_cache.get(bucket)
-            if cached_layout is None or cached_layout.is_rcu:
-                # No other write has refreshed the layout yet: look it up once.
-                fresh_layout = await self._get_bucket_layout(bucket)
-                if (
-                    fresh_layout.storage_class == StorageClass.UNKNOWN
-                    or fresh_layout.is_rcu
-                ):
-                    raise
-                self._storage_layout_cache[bucket] = fresh_layout
             raise _rapid_cache_ultra_disabled_error(bucket) from e
 
     @staticmethod
@@ -2691,6 +2807,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         place, unfinalized.
         For other buckets, it delegates to the parent class's implementation.
 
+        On a filesystem created with ``parallel_upload=True``, a write of at
+        least its ``parallel_upload_threshold`` bytes that ends finalized and
+        has no precondition uses a parallel upload.
+
         Parameters
         ----------
         path: str
@@ -2698,13 +2818,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         data: bytes-like
             The content to write to the file.
         metadata: dict, optional
-            Ignored by gRPC uploads.
+            Ignored by appendable uploads.
         consistency: str, optional
-            Ignored by gRPC uploads.
+            Ignored by appendable and parallel uploads.
         content_type: str, optional
-            Ignored by gRPC uploads, except for the default.
+            Ignored by appendable uploads, except for the default.
         fixed_key_metadata: dict, optional
-            Ignored by gRPC uploads.
+            Ignored by appendable uploads.
         chunksize: int, optional
             The size of chunks to upload data in.
         mode: str, optional
@@ -2723,6 +2843,40 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         data = as_byte_buffer(data)
         bucket, key, generation = self.split_path(path)
         layout = await self._lookup_bucket_layout(bucket)
+        if self.parallel_upload:
+            segment_size, max_workers = self._parallel_upload_call_options(kwargs)
+        if (
+            self.parallel_upload
+            and key
+            and len(data) >= self.parallel_upload_threshold
+            and self._may_use_parallel_upload(
+                layout,
+                if_generation_match=_resolve_generation_match(
+                    mode, if_generation_match
+                ),
+                finalize_on_close=kwargs.get("finalize_on_close"),
+                metadata=metadata,
+            )
+        ):
+            if content_type is None:
+                content_type = "application/octet-stream"
+            await self._perform_parallel_upload(
+                parallel_upload.parallel_upload_bytes,
+                data,
+                bucket,
+                key,
+                path,
+                layout,
+                content_type=content_type,
+                metadata=metadata,
+                fixed_key_metadata=fixed_key_metadata,
+                consistency=consistency,
+                kms_key_name=kms_key_name,
+                segment_size=segment_size,
+                max_workers=max_workers,
+            )
+            return
+
         if self._uses_grpc_write_path(layout):
             _validate_grpc_write_kms_key_name(layout, kms_key_name)
             finalize_on_close = self._resolve_finalize_on_close(
