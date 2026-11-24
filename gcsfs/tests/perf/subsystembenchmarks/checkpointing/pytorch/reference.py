@@ -94,7 +94,7 @@ def stage_model(model_id: str) -> str:
 def load_weights(model_id: str) -> dict[str, torch.Tensor]:
     _ensure_open_file_limit()
     model = AutoModelForCausalLM.from_pretrained(
-        model_dir(model_id), dtype=torch.bfloat16
+        model_dir(model_id), dtype=torch.bfloat16, local_files_only=True
     )
     state = model.state_dict()
     del model

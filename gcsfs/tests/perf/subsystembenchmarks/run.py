@@ -35,6 +35,8 @@ def _setup_environment(args):
     os.environ["GCSFS_SUBSYSTEM_DEVICE"] = args.device
     if args.model_id:
         os.environ["GCSFS_SUBSYSTEM_MODEL_ID"] = args.model_id
+    else:
+        os.environ.pop("GCSFS_SUBSYSTEM_MODEL_ID", None)
     os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
     os.environ["STORAGE_EMULATOR_HOST"] = "https://storage.googleapis.com"
     if rcu_state(args.bucket_type) == "z":

@@ -39,6 +39,22 @@ def test_setup_environment_exports_sweep_axes(monkeypatch):
     assert os.environ["GCSFS_SUBSYSTEM_SWEEP_AXES"] == "workers prefetch"
 
 
+def test_setup_environment_clears_stale_model_id_when_flag_empty(monkeypatch):
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_MODEL_ID", "gs://stale/model")
+    explicit = run.parse_args(
+        ["--group=dataloading/huggingface_datasets", "--model-id=gs://custom/model"]
+        + _REQUIRED
+    )
+    run._setup_environment(explicit)
+    assert os.environ["GCSFS_SUBSYSTEM_MODEL_ID"] == "gs://custom/model"
+
+    empty = run.parse_args(
+        ["--group=dataloading/huggingface_datasets", "--model-id="] + _REQUIRED
+    )
+    run._setup_environment(empty)
+    assert "GCSFS_SUBSYSTEM_MODEL_ID" not in os.environ
+
+
 def test_parse_args_rejects_negative_amplification_wait(capsys):
     with pytest.raises(SystemExit):
         run.parse_args(

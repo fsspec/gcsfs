@@ -381,3 +381,71 @@ def test_load_weights_raises_soft_nofile_limit(tmp_path):
         assert new_soft >= expected
     finally:
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def test_model_and_reference_from_pretrained_use_local_files_only(
+    tmp_path, monkeypatch
+):
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import (
+        model as model_mod,
+        reference as ref_mod,
+    )
+
+    local_dir = tiny_model_dir(tmp_path / "local", num_layers=1)
+    config_calls = []
+    orig_cfg_from_pretrained = model_mod.AutoConfig.from_pretrained
+
+    def spy_cfg_from_pretrained(pretrained_path, *args, **kwargs):
+        config_calls.append((pretrained_path, dict(kwargs)))
+        return orig_cfg_from_pretrained(pretrained_path, *args, **kwargs)
+
+    model_calls = []
+    orig_model_from_pretrained = ref_mod.AutoModelForCausalLM.from_pretrained
+
+    def spy_model_from_pretrained(pretrained_path, *args, **kwargs):
+        model_calls.append((pretrained_path, dict(kwargs)))
+        return orig_model_from_pretrained(pretrained_path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        model_mod.AutoConfig, "from_pretrained", spy_cfg_from_pretrained
+    )
+    monkeypatch.setattr(
+        ref_mod.AutoModelForCausalLM, "from_pretrained", spy_model_from_pretrained
+    )
+
+    # 1. Local directory path in build_model
+    build_model(local_dir)
+
+    # 2. Pre-staged /tmp/<name>/config.json branch in build_model
+    staged_name = f"test-local-only-staged-{uuid.uuid4().hex}"
+    staged_tmp = f"/tmp/{staged_name}"
+    os.makedirs(staged_tmp, exist_ok=True)
+    try:
+        shutil.copyfile(
+            os.path.join(local_dir, "config.json"),
+            os.path.join(staged_tmp, "config.json"),
+        )
+        build_model(f"gs://bucket/{staged_name}")
+    finally:
+        shutil.rmtree(staged_tmp, ignore_errors=True)
+
+    # 3. Unstaged GCS config.json fetch branch in build_model
+    unstaged_name = f"test-local-only-unstaged-{uuid.uuid4().hex}"
+
+    class _FakeConfigFS:
+        def get_file(self, rpath, lpath):
+            assert rpath == f"gs://bucket/{unstaged_name}/config.json"
+            shutil.copyfile(os.path.join(local_dir, "config.json"), lpath)
+
+    monkeypatch.setattr(gcsfs, "GCSFileSystem", _FakeConfigFS)
+    build_model(f"gs://bucket/{unstaged_name}")
+
+    # 4. Reference weight load in load_weights
+    weights = load_weights(local_dir)
+    weights.clear()
+
+    assert len(config_calls) >= 3
+    for path, kwargs in config_calls:
+        assert kwargs.get("local_files_only") is True, (path, kwargs)
+    assert len(model_calls) == 1
+    assert model_calls[0][1].get("local_files_only") is True

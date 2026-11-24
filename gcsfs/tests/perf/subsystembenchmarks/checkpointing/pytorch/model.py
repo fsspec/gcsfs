@@ -32,16 +32,16 @@ def _resolve_model_config(model_id: str) -> AutoConfig:
     if model_id.startswith("gs://"):
         staged_dir = model_dir(model_id)
         if os.path.exists(os.path.join(staged_dir, "config.json")):
-            return AutoConfig.from_pretrained(staged_dir)
+            return AutoConfig.from_pretrained(staged_dir, local_files_only=True)
 
         fs = gcsfs.GCSFileSystem()
         config_path = f"{model_id.rstrip('/')}/config.json"
         with tempfile.TemporaryDirectory() as tmp_dir:
             local_config_file = os.path.join(tmp_dir, "config.json")
             fs.get_file(config_path, local_config_file)
-            return AutoConfig.from_pretrained(tmp_dir)
+            return AutoConfig.from_pretrained(tmp_dir, local_files_only=True)
 
-    return AutoConfig.from_pretrained(model_id)
+    return AutoConfig.from_pretrained(model_id, local_files_only=True)
 
 
 def build_model(model_id: str | Any) -> nn.Module:
