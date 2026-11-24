@@ -388,6 +388,8 @@ def test_model_and_reference_from_pretrained_use_local_files_only(
 ):
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import (
         model as model_mod,
+    )
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import (
         reference as ref_mod,
     )
 

@@ -587,7 +587,9 @@ def test_setup_stages_model_for_legacy_checkpoint_groups_only(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     calls = tmp_path / "gcloud_calls"
-    (bin_dir / "curl").write_text("#!/bin/sh\ntouch google-cloud-cli-linux-x86_64.tar.gz\n")
+    (bin_dir / "curl").write_text(
+        "#!/bin/sh\ntouch google-cloud-cli-linux-x86_64.tar.gz\n"
+    )
     (bin_dir / "curl").chmod(0o755)
     (bin_dir / "tar").write_text(
         "#!/bin/sh\n"
