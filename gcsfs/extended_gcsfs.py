@@ -61,9 +61,11 @@ STORAGE_CONTROL_RPC_TIMEOUT = 30.0
 # Detect a storage control connection that dies silently in the middle of a
 # call (no FIN/RST), so the call reconnects instead of failing every later call
 # until the kernel gives up on the socket. GCS frontends answer 10 s pings with
-# GOAWAY too_many_pings, so pings go out every 30 s. Without
-# grpc.http2.ping_timeout_ms, grpc-python waits its 60 s default for the ping
-# ACK. keepalive_permit_without_calls stays unset: GCS frontends close idle
+# GOAWAY too_many_pings, so pings go out every 30 s. On grpc >= 1.60,
+# grpc.http2.ping_timeout_ms (an undocumented grpc-core arg) is required so
+# grpc-python does not wait its 60 s default for the ping ACK;
+# grpc.keepalive_timeout_ms is still needed for TCP_USER_TIMEOUT and older
+# grpc. keepalive_permit_without_calls stays unset: GCS frontends close idle
 # connections after about 4 min (GOAWAY session_timed_out), pinged or not.
 _CONTROL_PLANE_KEEPALIVE_OPTIONS = (
     ("grpc.keepalive_time_ms", 30000),
