@@ -2860,10 +2860,15 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             telemetry_manager.default_usage_tracker.get_dimension(Dimension.FRAMEWORK)
             or ""
         )
+        _allow_zero_generation = kwargs.pop("_allow_zero_generation", False)
         self.generation = _coalesce_generation(generation, path_generation)
-        if self.generation is not None and (
-            mode in {"wb", "xb"}
-            or (mode == "ab" and not kwargs.get("_supports_append", False))
+        if (
+            self.generation is not None
+            and not (_allow_zero_generation and int(self.generation) == 0)
+            and (
+                mode in {"wb", "xb"}
+                or (mode == "ab" and not kwargs.get("_supports_append", False))
+            )
         ):
             raise ValueError("Cannot write to specific object generation")
         self.if_generation_match = _resolve_open_generation_match(
