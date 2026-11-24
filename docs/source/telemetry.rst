@@ -37,7 +37,7 @@ If no recognized framework is present on the call stack (e.g. pure Python script
 Method Names
 ~~~~~~~~~~~~
 
-``gcsfs`` also records the outermost public ``GCSFileSystem`` or ``fsspec`` method name (such as ``ls``, ``cat_file``, ``find``, or ``open``) in the ``X-Goog-Storage-Gcsfs-Features`` HTTP header and ``x-goog-storage-gcsfs-features`` gRPC metadata, never in ``User-Agent``. Nested calls made inside that method (such as ``ls`` inside ``find``) keep the outer method name. After standalone ``open()`` returns, operations on the file handle record ``file_read``, ``file_write``, ``file_flush``, ``file_close``, ``file_info``, ``file_details``, ``file_commit``, or ``file_discard``, while handles opened inside a higher-level method such as ``read_text`` or ``head`` preserve that outer method across worker threads and pickled reopens. Implicit buffer flushes inside ``write()`` keep ``file_write``, whereas explicit ``flush(force=True)`` (or ``ZonalFile.flush()``) records ``file_flush``.
+``gcsfs`` also records the top-level public filesystem or file operation name (such as ``ls``, ``cat_file``, ``find``, ``open``, or subsequent file reads and writes), never file paths, arguments, or payloads.
 
 Compute Environments
 ~~~~~~~~~~~~~~~~~~~~

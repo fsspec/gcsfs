@@ -11,6 +11,7 @@ __protobuf__ = proto.module(
 
 
 class GcsfsMethod(proto.Enum):
+    # Reserved (do not reuse): 2, 42, 43, 45.
     GCSFS_METHOD_UNSPECIFIED = 0
     GCSFS_METHOD_LS = 1
     GCSFS_METHOD_INFO = 3
