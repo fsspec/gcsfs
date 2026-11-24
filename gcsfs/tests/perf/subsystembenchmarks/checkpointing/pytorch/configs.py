@@ -51,7 +51,6 @@ def case_params(
 
 
 class PyTorchCheckpointConfigurator(OneFactorCheckpointConfigurator):
-    FRAMEWORK = "pytorch"
     PARAMS_CLASS = PyTorchCheckpointParameters
     REQUIRES_SOURCE: bool = False
 
