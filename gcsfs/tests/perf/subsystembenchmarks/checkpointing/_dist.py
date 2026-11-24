@@ -1,5 +1,6 @@
 import os
 import socket
+import time
 
 # Cap on spawned ranks to prevent OOM on test-c4-highmem.
 MAX_RANKS = 16
@@ -72,14 +73,22 @@ def _terminate(context, grace_s: float = 10.0) -> None:
         except (OSError, ValueError):
             continue
         procs.append(proc)
+    deadline = time.monotonic() + grace_s
     for proc in procs:
-        proc.join(grace_s)
+        proc.join(max(0.0, deadline - time.monotonic()))
+
+    survivors = []
+    for proc in procs:
         if proc.is_alive():
             try:
                 proc.kill()
             except (OSError, ValueError):
                 continue
-            proc.join(grace_s)
+            survivors.append(proc)
+    if survivors:
+        kill_deadline = time.monotonic() + grace_s
+        for proc in survivors:
+            proc.join(max(0.0, kill_deadline - time.monotonic()))
 
 
 class SpawnedRanks:
@@ -88,21 +97,35 @@ class SpawnedRanks:
     ``durations`` is reduced as soon as every rank has reported, so a caller
     can stop timing or monitoring while the ranks do post-run work (such as
     verifying loaded bytes). ``join`` waits for the ranks to exit and re-raises
-    a rank failure.
+    a rank failure; ``close`` terminates any remaining workers and shuts down
+    the SyncManager idempotently.
     """
 
     def __init__(self, durations, context, manager):
         self.durations = durations
         self._context = context
         self._manager = manager
+        self._closed = False
 
     def join(self) -> None:
+        if self._closed:
+            return
         try:
             while not self._context.join():
                 pass
         except BaseException:
             _terminate(self._context)
             raise
+        finally:
+            self._closed = True
+            self._manager.shutdown()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            _terminate(self._context)
         finally:
             self._manager.shutdown()
 

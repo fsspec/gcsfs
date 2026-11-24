@@ -250,11 +250,84 @@ def test_terminate_escalates_to_kill_and_tolerates_missing_processes():
 
     stubborn.terminate.assert_called_once_with()
     stubborn.kill.assert_called_once_with()
-    assert stubborn.join.call_args_list[0].args == (0.25,)
+    assert len(stubborn.join.call_args_list) == 2
+    for call in stubborn.join.call_args_list:
+        assert 0.0 <= call.args[0] <= 0.25
 
     clean.terminate.assert_called_once_with()
-    clean.join.assert_called_once_with(0.25)
+    clean.join.assert_called_once()
+    assert 0.0 <= clean.join.call_args.args[0] <= 0.25
     clean.kill.assert_not_called()
+
+
+def test_terminate_shares_grace_budget_across_cohort(monkeypatch):
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing import _dist
+
+    now = [100.0]
+    monkeypatch.setattr(_dist.time, "monotonic", lambda: now[0])
+
+    def _make_stubborn():
+        p = MagicMock()
+        p.is_alive.return_value = True
+        p.join.side_effect = lambda timeout=None: now.__setitem__(
+            0, now[0] + (timeout or 0.0)
+        )
+        return p
+
+    ctx = MagicMock()
+    ctx.processes = [_make_stubborn() for _ in range(4)]
+
+    _dist._terminate(ctx, grace_s=10.0)
+
+    # 10s shared across SIGTERM joins + 10s shared across SIGKILL joins (not 4 * 20s = 80s).
+    assert now[0] - 100.0 == pytest.approx(20.0)
+    for proc in ctx.processes:
+        proc.terminate.assert_called_once_with()
+        proc.kill.assert_called_once_with()
+
+
+def test_spawned_ranks_close_is_idempotent_and_safe_after_join():
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import SpawnedRanks
+
+    proc = MagicMock()
+    proc.is_alive.return_value = False
+    ctx = MagicMock()
+    ctx.processes = [proc]
+    manager = MagicMock()
+
+    ranks = SpawnedRanks([1.0], ctx, manager)
+    ranks.close()
+    ranks.close()
+    ranks.join()
+
+    proc.terminate.assert_called_once_with()
+    manager.shutdown.assert_called_once_with()
+    ctx.join.assert_not_called()
+
+    ctx2 = MagicMock()
+    ctx2.join.return_value = True
+    ctx2.processes = [MagicMock()]
+    manager2 = MagicMock()
+    joined = SpawnedRanks([1.0], ctx2, manager2)
+    joined.join()
+    joined.close()
+
+    ctx2.processes[0].terminate.assert_not_called()
+    manager2.shutdown.assert_called_once_with()
+
+    ctx3 = MagicMock()
+    ctx3.join.side_effect = RuntimeError("worker crash")
+    proc3 = MagicMock()
+    proc3.is_alive.return_value = False
+    ctx3.processes = [proc3]
+    manager3 = MagicMock()
+    failed = SpawnedRanks([1.0], ctx3, manager3)
+    with pytest.raises(RuntimeError, match="worker crash"):
+        failed.join()
+    failed.close()
+
+    proc3.terminate.assert_called_once_with()
+    manager3.shutdown.assert_called_once_with()
 
 
 def test_setup_distributed_env_cpu_and_cuda(monkeypatch):
