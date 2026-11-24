@@ -21,7 +21,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
 def model_dir(model_id: str) -> str:
     if model_id.startswith("gs://"):
         name = os.path.basename(model_id.removeprefix("gs://").rstrip("/"))
-        if not name:
+        if not name or name in {".", ".."}:
             raise ValueError(f"Invalid GCS model_id {model_id!r}")
         return os.path.join("/tmp", name)
     return model_id
@@ -66,8 +66,20 @@ def stage_model(model_id: str) -> str:
     tmp_dir = tempfile.mkdtemp(prefix=f".{basename}.", dir=parent)
     try:
         if entries:
-            rpaths = [e["name"] for e in entries]
-            lpaths = [os.path.join(tmp_dir, os.path.basename(p)) for p in rpaths]
+            real_tmp = os.path.realpath(tmp_dir)
+            rpaths = []
+            lpaths = []
+            for e in entries:
+                fname = os.path.basename(e["name"])
+                if not fname or fname in {".", ".."}:
+                    raise ValueError(f"Invalid remote object key {e['name']!r}")
+                lpath = os.path.join(tmp_dir, fname)
+                if os.path.commonpath([real_tmp, os.path.realpath(lpath)]) != real_tmp:
+                    raise ValueError(
+                        f"Refusing to write outside {tmp_dir}: {e['name']!r}"
+                    )
+                rpaths.append(e["name"])
+                lpaths.append(lpath)
             fs.get(rpaths, lpaths)
         if not _has_safetensors(tmp_dir):
             raise FileNotFoundError(f"no safetensors in {target_dir}")

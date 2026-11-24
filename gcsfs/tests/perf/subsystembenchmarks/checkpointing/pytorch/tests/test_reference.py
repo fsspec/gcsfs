@@ -47,6 +47,42 @@ def test_model_dir():
     assert model_dir("meta-llama/Llama-3.1-8B") == "meta-llama/Llama-3.1-8B"
 
 
+def test_stage_model_rejects_dot_and_traversal_segments(monkeypatch):
+    for bad_uri in (
+        "gs://",
+        "gs:///",
+        "gs://.",
+        "gs://..",
+        "gs://bucket/.",
+        "gs://bucket/..",
+    ):
+        with pytest.raises(ValueError, match="Invalid GCS model_id"):
+            model_dir(bad_uri)
+
+    name = f"test-stage-dot-{uuid.uuid4().hex}"
+    gcs_uri = f"gs://bucket/{name}"
+    target_dir = f"/tmp/{name}"
+
+    class _FakeFS:
+        def ls(self, prefix, detail=True):
+            return [
+                {"name": f"bucket/{name}/config.json", "type": "file"},
+                {"name": f"bucket/{name}/..", "type": "file"},
+            ]
+
+        def get(self, rpaths, lpaths):
+            raise AssertionError("fs.get must not run on traversal object keys")
+
+    monkeypatch.setattr(gcsfs, "GCSFileSystem", _FakeFS)
+    try:
+        with pytest.raises(ValueError, match="Invalid remote object key"):
+            stage_model(gcs_uri)
+        assert not os.path.exists(target_dir)
+        assert glob.glob(f"/tmp/.{name}.*") == []
+    finally:
+        shutil.rmtree(target_dir, ignore_errors=True)
+
+
 @pytest.mark.parametrize("kind", ["llama", "olmoe"])
 def test_load_weights_matches_model_fqns(tmp_path, kind):
     model_path = tiny_model_dir(tmp_path, kind=kind)
