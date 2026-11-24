@@ -369,3 +369,64 @@ def test_setup_checks_both_layouts_and_releases_weights(
     with pytest.raises(RuntimeError, match="source save failed"):
         driver.setup((tmp_path / "ckpt_err").as_uri(), params)
     assert weights_err == {}
+
+
+def test_read_driver_close_releases_ranks_and_weights_without_verify(
+    tmp_path, tiny_models, monkeypatch
+):
+    from unittest.mock import MagicMock
+
+    params = make_params(
+        tiny_models["llama"], strategy="fsdp", dp=2, world_size=2, rounds=1
+    )
+    prefix = (tmp_path / "ckpt_close").as_uri()
+    driver = PyTorchCheckpointReadDriver()
+    driver.setup(prefix, params)
+
+    captured_weights = []
+    orig_load_weights = read_driver_mod.load_weights
+
+    def spy_load_weights(mid):
+        w = orig_load_weights(mid)
+        captured_weights.append(w)
+        return w
+
+    spawned_procs = []
+    orig_spawn_split = common.spawn_split
+
+    def spy_spawn_split(*args, **kwargs):
+        ranks = orig_spawn_split(*args, **kwargs)
+        spawned_procs.extend(ranks._context.processes)
+        return ranks
+
+    monkeypatch.setattr(read_driver_mod, "load_weights", spy_load_weights)
+    monkeypatch.setattr(common, "spawn_split", spy_spawn_split)
+
+    result = driver.run(prefix, params)
+    try:
+        assert getattr(result, "close", None) is not None
+        assert len(captured_weights) == 1 and len(captured_weights[0]) > 0
+        assert len(spawned_procs) == 2
+        result.close()
+        result.close()
+        assert captured_weights == [{}]
+        assert all(not p.is_alive() for p in spawned_procs)
+    finally:
+        if getattr(result, "close", None) is not None:
+            result.close()
+        else:
+            result.verify()
+
+    # Error after load_weights before CheckpointResult return also clears weights & closes ranks.
+    weights_err = {"w": 1}
+    fake_ranks = MagicMock()
+    monkeypatch.setattr(read_driver_mod, "load_weights", lambda mid: weights_err)
+    monkeypatch.setattr(
+        read_driver_mod,
+        "spawn_with_stats",
+        lambda *a, **kw: (fake_ranks, [{"corrupt": 1}]),
+    )
+    with pytest.raises(KeyError):
+        driver.run(prefix, params)
+    fake_ranks.close.assert_called_once_with()
+    assert weights_err == {}

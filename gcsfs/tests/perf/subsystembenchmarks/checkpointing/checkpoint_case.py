@@ -91,12 +91,17 @@ def run_checkpoint_case(
             rapid_cache.warm_if_needed(prefix, params.bucket_type)
             rcu.warm_if_needed(prefix, params.bucket_type)
 
-        window_start = time.time()
-        with monitor() as m:
-            result = driver.run(prefix, params)
-        window_end = time.time()
-        if getattr(result, "verify", None) is not None:
-            result.verify()
+        result = None
+        try:
+            window_start = time.time()
+            with monitor() as m:
+                result = driver.run(prefix, params)
+            window_end = time.time()
+            if getattr(result, "verify", None) is not None:
+                result.verify()
+        finally:
+            if result is not None and getattr(result, "close", None) is not None:
+                result.close()
         if "write" in params.scenario:
             # Saves run on *_rcu_z only, where run.py turns on RAPID writes.
             rcu.assert_storage_class(prefix, params.bucket_type)

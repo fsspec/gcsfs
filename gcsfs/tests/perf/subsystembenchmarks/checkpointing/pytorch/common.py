@@ -90,7 +90,7 @@ def spawn_with_stats(prefix, params, target_fn, world_size, weights):
     """Spawns target_fn(..., weights=, stats_dir=) and returns (ranks, stats).
 
     Each rank writes its stats before reporting durations, so they are all on
-    disk once spawn_split returns. On failure the ranks are joined and the
+    disk once spawn_split returns. On failure the ranks are terminated and the
     shared weights released.
     """
     ranks = None
@@ -106,7 +106,7 @@ def spawn_with_stats(prefix, params, target_fn, world_size, weights):
     except BaseException:
         weights.clear()
         if ranks is not None:
-            ranks.join()
+            ranks.close()
         raise
 
 

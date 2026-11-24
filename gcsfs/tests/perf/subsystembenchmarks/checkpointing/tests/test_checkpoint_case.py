@@ -294,7 +294,9 @@ class _VerifyingDriver(_FakeWriteDriver):
 
         _EVENTS.append("run")
         return CheckpointResult(
-            durations=[1.0], verify=lambda: _EVENTS.append("verify")
+            durations=[1.0],
+            verify=lambda: _EVENTS.append("verify"),
+            close=lambda: _EVENTS.append("close"),
         )
 
 
@@ -327,7 +329,32 @@ def test_result_verify_runs_after_monitor_window(tmp_path, monkeypatch):
         _VerifyingDriver(),
         bucket_ctx=_local_bucket_ctx(tmp_path),
     )
-    assert _EVENTS == ["monitor_enter", "run", "monitor_exit", "verify"]
+    assert _EVENTS == ["monitor_enter", "run", "monitor_exit", "verify", "close"]
+
+
+def test_result_close_runs_when_monitor_exit_fails_and_skips_verify(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
+    _EVENTS.clear()
+
+    class _FailingExitMonitor(_Monitor):
+        @contextlib.contextmanager
+        def __call__(self):
+            _EVENTS.append("monitor_enter")
+            yield self
+            _EVENTS.append("monitor_exit_raise")
+            raise RuntimeError("monitor boom")
+
+    with pytest.raises(RuntimeError, match="monitor boom"):
+        checkpoint_case.run_checkpoint_case(
+            _Bench(),
+            _FailingExitMonitor(),
+            _params(),
+            _VerifyingDriver(),
+            bucket_ctx=_local_bucket_ctx(tmp_path),
+        )
+    assert _EVENTS == ["monitor_enter", "run", "monitor_exit_raise", "close"]
 
 
 def test_run_checkpoint_case_warms_rapid_cache_for_read_only(tmp_path, monkeypatch):

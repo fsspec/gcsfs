@@ -44,7 +44,7 @@ def test_spawn_with_stats_returns_ranks_and_stats(monkeypatch):
     fake_ranks.join.assert_not_called()
 
 
-def test_spawn_with_stats_joins_ranks_and_releases_weights_on_error(monkeypatch):
+def test_spawn_with_stats_closes_ranks_and_releases_weights_on_error(monkeypatch):
     fake_ranks = MagicMock()
     monkeypatch.setattr(common, "spawn_split", lambda *a, **kw: fake_ranks)
     monkeypatch.setattr(
@@ -53,7 +53,8 @@ def test_spawn_with_stats_joins_ranks_and_releases_weights_on_error(monkeypatch)
     weights = {"w": 1}
     with pytest.raises(OSError, match="corrupt stats_dir"):
         common.spawn_with_stats("p", None, lambda **kw: None, 2, weights)
-    fake_ranks.join.assert_called_once_with()
+    fake_ranks.close.assert_called_once_with()
+    fake_ranks.join.assert_not_called()
     assert weights == {}
 
 

@@ -89,16 +89,29 @@ class PyTorchCheckpointReadDriver(DCPDriver):
 
     def run(self, prefix, params):
         weights = load_weights(params.model_id)
-        ranks, stats = spawn_with_stats(
-            prefix, params, _rank_load, params.target_layout().world_size, weights
-        )
-        fetched = [s["bytes_fetched"] for s in stats]
+        ranks = None
+        try:
+            ranks, stats = spawn_with_stats(
+                prefix, params, _rank_load, params.target_layout().world_size, weights
+            )
+            fetched = [s["bytes_fetched"] for s in stats]
+        except BaseException:
+            if ranks is not None:
+                ranks.close()
+            weights.clear()
+            raise
+
+        def _close() -> None:
+            try:
+                ranks.close()
+            finally:
+                weights.clear()
 
         def _verify() -> None:
             try:
                 ranks.join()
             finally:
-                weights.clear()
+                _close()
 
         return CheckpointResult(
             durations=ranks.durations,
@@ -108,5 +121,6 @@ class PyTorchCheckpointReadDriver(DCPDriver):
                 "dcp_read_bytes_fetched_per_rank_max": max(fetched),
             },
             verify=_verify,
+            close=_close,
             bytes_transferred=sum(fetched),
         )
