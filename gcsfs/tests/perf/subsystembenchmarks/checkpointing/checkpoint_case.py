@@ -135,12 +135,22 @@ def run_checkpoint_case(
         benchmark.extra_info.update(params.extra_columns())
         if result.extra_columns:
             benchmark.extra_info.update(result.extra_columns)
+            if "dcp_read_bytes_fetched_total" in result.extra_columns:
+                benchmark.extra_info["dcp_read_amplification_planned"] = (
+                    result.extra_columns["dcp_read_bytes_fetched_total"]
+                    / physical_size_bytes
+                    if physical_size_bytes > 0
+                    else 0.0
+                )
 
         durations = result.durations
-        size_for_throughput = physical_size_bytes
-
-        if "read" in params.scenario:
-            size_for_throughput *= driver.read_count(params)
+        bytes_transferred = getattr(result, "bytes_transferred", None)
+        if bytes_transferred is not None:
+            size_for_throughput = bytes_transferred
+        elif "read" in params.scenario:
+            size_for_throughput = physical_size_bytes * driver.read_count(params)
+        else:
+            size_for_throughput = physical_size_bytes
 
         throughput = (
             sum(size_for_throughput / d for d in durations) / len(durations)

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-import google_crc32c
 import torch
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_state_dict
 from torch.distributed.tensor import DTensor
@@ -122,16 +121,3 @@ def assert_loaded_state(
         raise RuntimeError(
             f"rank {rank}: value mismatch in {len(bad)} entries, e.g. {bad[0]}"
         )
-
-
-def state_checksum(state: dict) -> dict[str, str]:
-    # Hardware CRC32C runs at several GB/s per thread, so checking a rank's
-    # tensors takes about a second where SHA-256 took tens of seconds.
-    return {
-        name: f"{google_crc32c.value(_raw_bytes(t)):08x}"
-        for name, t in _local_tensors(state)
-    }
-
-
-def _raw_bytes(t: torch.Tensor):
-    return t.detach().contiguous().reshape(-1).view(torch.uint8).numpy()

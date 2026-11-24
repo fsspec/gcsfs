@@ -100,7 +100,10 @@
       {"name": "setup_data_parallel_replicate_size", "type": "INTEGER", "description": "Populated by checkpointing/pytorch. Degree of data parallelism replication used to save the source checkpoint initially. Defaults to data_parallel_replicate_size."},
       {"name": "setup_pipeline_parallel_size", "type": "INTEGER", "description": "Populated by checkpointing/pytorch. Degree of pipeline parallelism used to save the source checkpoint initially. Defaults to pipeline_parallel_size."},
       {"name": "setup_expert_parallel_size", "type": "INTEGER", "description": "Populated by checkpointing/pytorch. Degree of expert parallelism used to save the source checkpoint initially. Defaults to expert_parallel_size."},
-      {"name": "dcp_read_items_per_rank_max", "type": "INTEGER", "description": "Populated by checkpointing/pytorch. Maximum count of DCP ReadItem objects requested on the busiest rank, counting every ReadItem (tensor items plus BYTE_IO items)."}
+      {"name": "dcp_read_items_per_rank_max", "type": "INTEGER", "description": "Populated by checkpointing/pytorch. Maximum count of DCP ReadItem objects requested on the busiest rank, counting every ReadItem (tensor items plus BYTE_IO items)."},
+      {"name": "dcp_read_bytes_fetched_total", "type": "INTEGER", "description": "Populated by checkpointing/pytorch. Sum across ranks of the DCP storage item byte lengths fetched per measured load round (unique storage_index entries per rank across tensor and BYTE_IO ReadItems; .metadata excluded)."},
+      {"name": "dcp_read_bytes_fetched_per_rank_max", "type": "INTEGER", "description": "Populated by checkpointing/pytorch. Maximum on any single rank of the DCP storage item byte lengths fetched per measured load round (unique storage_index entries on that rank across tensor and BYTE_IO ReadItems; .metadata excluded)."},
+      {"name": "dcp_read_amplification_planned", "type": "FLOAT", "description": "Populated by checkpointing/pytorch. Planned read amplification from the DCP load plan: dcp_read_bytes_fetched_total divided by checkpoint_physical_size_bytes."}
     ]
   }
 }

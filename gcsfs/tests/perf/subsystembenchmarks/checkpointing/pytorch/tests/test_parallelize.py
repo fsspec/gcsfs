@@ -15,82 +15,25 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.layout import ( 
     Layout,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.model import (  # noqa: E402
+    SETUP_SEED,
+    build,
     build_model,
-    build_optimizer,
-    materialize,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parallelize import (  # noqa: E402
     build_mesh,
     parallelize,
     split_stage,
 )
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parameters import (  # noqa: E402
-    PyTorchCheckpointParameters,
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import (  # noqa: E402
+    load_weights,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.state import (  # noqa: E402
     expected_bytes_requested,
     get_fqn_state_dict,
-    state_checksum,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny import (  # noqa: E402
     tiny_model_dir,
 )
-
-
-# Retained temporarily for test_roundtrip.py until Task 5 migrates it.
-def _create_tiny_llama_config_dir(tmp_path, num_layers=2):
-    config = {
-        "model_type": "llama",
-        "hidden_size": 64,
-        "num_hidden_layers": num_layers,
-        "num_attention_heads": 8,
-        "num_key_value_heads": 8,
-        "intermediate_size": 128,
-        "vocab_size": 256,
-        "max_position_embeddings": 512,
-        "rope_scaling": None,
-    }
-    config_file = tmp_path / "config.json"
-    config_file.write_text(json.dumps(config))
-    return str(tmp_path)
-
-
-def _create_tiny_olmoe_config_dir(tmp_path, num_experts=16):
-    config = {
-        "model_type": "olmoe",
-        "hidden_size": 64,
-        "num_hidden_layers": 2,
-        "num_attention_heads": 8,
-        "num_key_value_heads": 8,
-        "intermediate_size": 32,
-        "num_experts": num_experts,
-        "num_experts_per_tok": 2,
-        "vocab_size": 256,
-        "max_position_embeddings": 512,
-    }
-    (tmp_path / "config.json").write_text(json.dumps(config))
-    return str(tmp_path)
-
-
-def _params(
-    config_dir, strategy, dpr=1, dp=1, tp=1, pp=1, ep=1, world_size=8, rounds=1
-):
-    return PyTorchCheckpointParameters(
-        name="test-case",
-        bucket_name="test-bucket",
-        rounds=rounds,
-        framework="pytorch",
-        scenario="checkpoint_read",
-        strategy=strategy,
-        bucket_type="regional",
-        model_id=config_dir,
-        world_size=world_size,
-        data_parallel_replicate_size=dpr,
-        data_parallel_size=dp,
-        tensor_parallel_size=tp,
-        pipeline_parallel_size=pp,
-        expert_parallel_size=ep,
-    )
 
 
 def _layout(
@@ -113,63 +56,12 @@ def _layout(
     )
 
 
-def test_build_materialize_optimizer(tmp_path):
+def test_build_model_meta_fp32(tmp_path):
     model_path = tiny_model_dir(tmp_path, num_layers=2)
     model = build_model(model_path)
-
-    # 1. Before materialize: all parameters must be fp32 on meta device
     model_params = list(model.parameters())
     assert len(model_params) > 0
     assert all(p.is_meta and p.dtype == torch.float32 for p in model_params)
-
-    # 2. Materialize
-    materialize(model, seed=42)
-
-    # 3. After materialize: all parameters on CPU, all require grad
-    assert all(not p.is_meta and p.device.type == "cpu" for p in model.parameters())
-    assert all(p.requires_grad for p in model.parameters())
-
-    # 4. Optimizer: AdamW with seed-dependent exp_avg/exp_avg_sq for every parameter
-    before = [p.detach().clone() for p in model.parameters()]
-    optimizer = build_optimizer(model, seed=42)
-    other = build_optimizer(model, seed=7)
-    assert len(optimizer.state) == len(list(model.parameters()))
-    for p, p_before in zip(model.parameters(), before):
-        assert torch.equal(p, p_before)
-        assert p in optimizer.state
-        state = optimizer.state[p]
-        assert set(state) == {"step", "exp_avg", "exp_avg_sq"}
-        assert state["step"].item() == 42
-        for key in ("exp_avg", "exp_avg_sq"):
-            assert state[key].shape == p.shape
-            assert state[key].dtype == p.dtype
-            assert state[key].device == p.device
-            assert torch.any(state[key] != 0)
-            assert not torch.equal(state[key], other.state[p][key])
-
-
-def test_materialize_seed_determinism(tmp_path):
-    model_path = tiny_model_dir(tmp_path, num_layers=2)
-
-    model1 = build_model(model_path)
-    materialize(model1, seed=123)
-
-    model2 = build_model(model_path)
-    materialize(model2, seed=123)
-
-    model3 = build_model(model_path)
-    materialize(model3, seed=456)
-
-    # Check identical seeds produce identical values
-    for p1, p2 in zip(model1.parameters(), model2.parameters()):
-        assert torch.equal(p1, p2)
-
-    # Check different seeds produce different values
-    has_diff = any(
-        not torch.equal(p1, p3)
-        for p1, p3 in zip(model1.parameters(), model3.parameters())
-    )
-    assert has_diff
 
 
 def test_resolve_model_config_staged(tmp_path, monkeypatch):
@@ -377,10 +269,9 @@ def test_parallelize_rejects_moe_under_tp(tmp_path, fake_pg, layout):
 
 def _parallel_state(tmp_path, **sizes):
     model_path = tiny_model_dir(tmp_path, num_layers=2)
+    weights = load_weights(model_path)
     layout = _layout(**sizes)
-    model = parallelize(build_model(model_path), build_mesh(layout, "cpu"), layout)
-    materialize(model, seed=0)
-    optim = build_optimizer(model, seed=0)
+    model, optim = build(model_path, layout, SETUP_SEED, weights, "cpu")
     return model, get_fqn_state_dict(model, optim)
 
 
@@ -414,8 +305,8 @@ def test_expected_bytes_requested(tmp_path, fake_pg, sizes):
         local = nbytes if tp_only_norm else nbytes // shard_degree
         if sizes["strategy"] == "fsdp_tp" and "norm" in name:
             local = nbytes // sizes["dp"]
-        # param + exp_avg + exp_avg_sq (fp32) + int64 step
-        expected += 3 * local + 8
+        # param + exp_avg + exp_avg_sq (fp32) + fp32 AdamW step
+        expected += 3 * local + 4
     assert expected_bytes_requested(state) == expected
 
 
@@ -426,23 +317,6 @@ def test_expected_bytes_requested_ignores_non_tensors():
         "groups": [{"params": ["a"], "lr": 1e-3}],
     }
     assert expected_bytes_requested(state) == 16 + 12
-
-
-def test_state_checksum(tmp_path, fake_pg):
-    _, state = _parallel_state(tmp_path, strategy="fsdp", dp=8)
-    checksum = state_checksum(state)
-    fqn = "model.layers.0.self_attn.q_proj.weight"
-    assert checksum == state_checksum(state)
-    assert checksum[f"model.{fqn}"] != checksum[f"optim.state.{fqn}.exp_avg"]
-    assert f"optim.state.{fqn}.step" in checksum
-    assert all(isinstance(v, str) and len(v) == 8 for v in checksum.values())
-    assert not any(k.startswith("optim.param_groups") for k in checksum)
-
-
-def test_state_checksum_detects_permutation():
-    a = state_checksum({"x": torch.tensor([1.0, 2.0])})
-    b = state_checksum({"x": torch.tensor([2.0, 1.0])})
-    assert a != b
 
 
 _PP_STRATEGIES = [
@@ -466,6 +340,7 @@ _PP_STRATEGIES = [
 @pytest.mark.parametrize("sizes, world_size, q_placements", _PP_STRATEGIES)
 def test_pp_stages_partition_state(tmp_path, sizes, world_size, q_placements):
     model_path = tiny_model_dir(tmp_path, num_layers=8)
+    weights = load_weights(model_path)
     layout = _layout(world_size=world_size, **sizes)
     num_stages = sizes["pp"]
     layers_per_stage = 8 // num_stages
@@ -480,9 +355,8 @@ def test_pp_stages_partition_state(tmp_path, sizes, world_size, q_placements):
             mesh = build_mesh(layout, "cpu")
             assert mesh.mesh_dim_names[0] == "pp"
             assert mesh["pp"].get_local_rank() == stage
-            model = parallelize(build_model(model_path), mesh, layout)
-            materialize(model, seed=0)
-            state = get_fqn_state_dict(model, build_optimizer(model, seed=0))
+            model, optim = build(model_path, layout, SETUP_SEED, weights, "cpu")
+            state = get_fqn_state_dict(model, optim)
         finally:
             dist.destroy_process_group()
 
@@ -552,6 +426,7 @@ def test_fsdp_olmoe_slices_every_expert(tmp_path, fake_pg):
 
 def test_ep_ranks_own_disjoint_experts(tmp_path):
     model_path = tiny_model_dir(tmp_path, kind="olmoe", num_layers=2)
+    weights = load_weights(model_path)
     layout = _layout("ep", dp=8, ep=8)
     full = build_model(model_path)
     full_names = {n for n, _ in full.named_parameters()}
@@ -565,9 +440,8 @@ def test_ep_ranks_own_disjoint_experts(tmp_path):
             mesh = build_mesh(layout, "cpu")
             # EP reuses the dp_shard ranks; it is not a mesh dim of its own.
             assert mesh.mesh_dim_names == ("dp_shard",)
-            model = parallelize(build_model(model_path), mesh, layout)
-            materialize(model, seed=0)
-            state = get_fqn_state_dict(model, build_optimizer(model, seed=0))
+            model, optim = build(model_path, layout, SETUP_SEED, weights, "cpu")
+            state = get_fqn_state_dict(model, optim)
 
             assert set(state["model"]) == full_names
             for fqn, t in state["model"].items():
@@ -577,8 +451,7 @@ def test_ep_ranks_own_disjoint_experts(tmp_path):
                 t = state["model"][fqn]
                 # Offsets from this rank's mesh: re-initializing the fake process
                 # group in one process leaves FSDP's DTensors on a mesh cached
-                # from rank 0. (Real ranks are separate processes; see
-                # test_driver_local_fs_olmoe_ep_vs_fsdp for their saved chunks.)
+                # from rank 0.
                 shape, offset = compute_local_shape_and_global_offset(
                     t.shape, mesh, t.placements
                 )
@@ -598,7 +471,7 @@ def test_ep_ranks_own_disjoint_experts(tmp_path):
             if key.startswith("state.")
         }
         assert optim_fqns == full_names
-        expected = sum(3 * param_bytes[f] // 8 + 8 for f in full_names)
+        expected = sum(3 * param_bytes[f] // 8 + 4 for f in full_names)
         assert expected_bytes_requested(state) == expected
 
     # Rank r owns experts 2r and 2r+1 of every expert weight: disjoint, and
