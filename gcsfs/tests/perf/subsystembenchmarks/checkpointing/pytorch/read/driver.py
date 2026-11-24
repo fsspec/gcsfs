@@ -22,6 +22,10 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
     CheckpointDriver,
     CheckpointResult,
 )
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.device import (
+    DEVICE_ENV,
+    run_device,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.model import (
     build_model,
     build_optimizer,
@@ -137,11 +141,22 @@ def _rank_load(rank, world_size, port, prefix, params, q, *, stats_dir):
         dist.destroy_process_group()
 
 
+def _require_cpu_driver() -> None:
+    device = run_device()
+    if device != "cpu":
+        raise RuntimeError(
+            "PyTorchCheckpointReadDriver only supports "
+            f"{DEVICE_ENV}=cpu, got {device!r}"
+        )
+
+
 class PyTorchCheckpointReadDriver(CheckpointDriver):
     def setup(self, prefix, params):
+        _require_cpu_driver()
         run_split(prefix, params, _rank_setup_checkpoint)
 
     def run(self, prefix, params):
+        _require_cpu_driver()
         with tempfile.TemporaryDirectory() as stats_dir:
             ranks = spawn_split(
                 prefix, params, functools.partial(_rank_load, stats_dir=stats_dir)

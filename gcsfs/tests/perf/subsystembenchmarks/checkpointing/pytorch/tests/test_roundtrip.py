@@ -309,3 +309,25 @@ def test_driver_local_fs_olmoe_ep_vs_fsdp(tmp_path):
         assert chunk_offsets["fsdp"][fqn] == [
             (0, r * dim1 // 4, *zeros) for r in range(4)
         ], fqn
+
+
+def test_driver_rejects_non_cpu_device(tmp_path, monkeypatch):
+    params = _params(
+        _create_tiny_llama_config_dir(tmp_path), "fsdp", dp=2, world_size=2
+    )
+    ckpt_dir = tmp_path / "ckpt"
+    prefix = ckpt_dir.as_uri()
+    driver = PyTorchCheckpointReadDriver()
+
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_DEVICE", "cuda")
+    for fn in (driver.setup, driver.run):
+        with pytest.raises(
+            RuntimeError,
+            match="PyTorchCheckpointReadDriver only supports GCSFS_SUBSYSTEM_DEVICE=cpu",
+        ):
+            fn(prefix, params)
+    assert not ckpt_dir.exists()
+
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_DEVICE", "tpu")
+    with pytest.raises(ValueError, match="Unsupported device"):
+        driver.setup(prefix, params)

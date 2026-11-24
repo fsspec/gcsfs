@@ -330,6 +330,7 @@ def test_columns_in_schema():
         "setup_data_parallel_replicate_size": "INTEGER",
         "setup_pipeline_parallel_size": "INTEGER",
         "setup_expert_parallel_size": "INTEGER",
+        "dcp_read_items_per_rank_max": "INTEGER",
     }.items():
         assert col in fields_by_name, f"column {col} missing from schema"
         assert fields_by_name[col]["type"] == col_type
