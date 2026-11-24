@@ -64,7 +64,7 @@ class _RecordingLoadPlanner(DefaultLoadPlanner):
 
 
 def _build(params, mesh, seed):
-    model = parallelize(build_model(params), mesh, params)
+    model = parallelize(build_model(params), mesh, params.target_layout())
     materialize(model, seed)
     return model, build_optimizer(model, seed)
 
@@ -78,7 +78,7 @@ def _rank_setup_checkpoint(rank, world_size, port, prefix, params, q):
     setup_distributed_env(rank, world_size, port)
     try:
         torch.set_num_threads(max(1, (os.cpu_count() or 1) // world_size))
-        model, optim = _build(params, build_mesh(params), _SETUP_SEED)
+        model, optim = _build(params, build_mesh(params.target_layout()), _SETUP_SEED)
         state = get_fqn_state_dict(model, optim)
         dcp.save(state, storage_writer=FsspecWriter(prefix))
 
@@ -94,7 +94,7 @@ def _rank_load(rank, world_size, port, prefix, params, q, *, stats_dir):
     setup_distributed_env(rank, world_size, port)
     try:
         torch.set_num_threads(max(1, (os.cpu_count() or 1) // world_size))
-        model, optim = _build(params, build_mesh(params), _RUN_SEED)
+        model, optim = _build(params, build_mesh(params.target_layout()), _RUN_SEED)
         state = get_fqn_state_dict(model, optim)
         bytes_expected = expected_bytes_requested(state)
         # Also builds the gcsfs instance and fetches a token before the timed rounds.

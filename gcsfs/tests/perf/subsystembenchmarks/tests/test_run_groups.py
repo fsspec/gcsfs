@@ -297,10 +297,32 @@ _RUN_ENV_KEYS = (
     "GCSFS_SUBSYSTEM_ZONE",
     "GCSFS_SUBSYSTEM_SWEEP_AXES",
     "GCSFS_SUBSYSTEM_MODEL_ID",
+    "GCSFS_SUBSYSTEM_DEVICE",
     "GCSFS_SUBSYSTEM_GROUP",
     "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT",
     "STORAGE_EMULATOR_HOST",
 )
+
+
+def test_parse_args_device_sets_env(monkeypatch, capsys):
+    for key in (*_RUN_ENV_KEYS, "FSSPEC_GCS_RCU_RAPID_WRITE"):
+        monkeypatch.delenv(key, raising=False)
+
+    default_args = run.parse_args(["--group=checkpointing/pytorch"] + _REQUIRED)
+    assert default_args.device == "cpu"
+    run._setup_environment(default_args)
+    assert os.environ["GCSFS_SUBSYSTEM_DEVICE"] == "cpu"
+
+    cuda_args = run.parse_args(
+        ["--group=checkpointing/pytorch", "--device=cuda"] + _REQUIRED
+    )
+    assert cuda_args.device == "cuda"
+    run._setup_environment(cuda_args)
+    assert os.environ["GCSFS_SUBSYSTEM_DEVICE"] == "cuda"
+
+    with pytest.raises(SystemExit):
+        run.parse_args(["--group=checkpointing/pytorch", "--device=tpu"] + _REQUIRED)
+    assert "--device" in capsys.readouterr().err
 
 
 def _run_main_capturing_results_dir(monkeypatch, extra_args):

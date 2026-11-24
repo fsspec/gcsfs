@@ -45,7 +45,7 @@ _STRATEGIES_4RANK = [
 def _roundtrip_rank(rank, world_size, port, prefix, params, q):
     setup_distributed_env(rank, world_size, port)
     try:
-        mesh = build_mesh(params)
+        mesh = build_mesh(params.target_layout())
         model, optim = _build(params, mesh, _SEED_A)
         state = get_fqn_state_dict(model, optim)
         dcp.save(state, storage_writer=FsspecWriter(prefix))
@@ -122,7 +122,7 @@ def test_roundtrip_ep(tmp_path):
 def _checksum_rank(rank, world_size, port, prefix, params, q):
     setup_distributed_env(rank, world_size, port)
     try:
-        model, optim = _build(params, build_mesh(params), _SEED_A)
+        model, optim = _build(params, build_mesh(params.target_layout()), _SEED_A)
         q.put((rank, state_checksum(get_fqn_state_dict(model, optim))))
     finally:
         dist.destroy_process_group()

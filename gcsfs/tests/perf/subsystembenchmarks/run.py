@@ -32,6 +32,7 @@ def _setup_environment(args):
     os.environ["GCSFS_SUBSYSTEM_LOCATION"] = args.location
     os.environ["GCSFS_SUBSYSTEM_ZONE"] = args.zone or ""
     os.environ["GCSFS_SUBSYSTEM_SWEEP_AXES"] = args.sweep_axes
+    os.environ["GCSFS_SUBSYSTEM_DEVICE"] = args.device
     if args.model_id:
         os.environ["GCSFS_SUBSYSTEM_MODEL_ID"] = args.model_id
     os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
@@ -85,6 +86,12 @@ def _build_parser():
         "--model-id",
         default="",
         help="model id override (e.g. gs://path/to/model or hf-repo-id)",
+    )
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda"),
+        default="cpu",
+        help="execution device for benchmarks that support CPU/CUDA selection",
     )
     parser.add_argument(
         "--amplification-wait",

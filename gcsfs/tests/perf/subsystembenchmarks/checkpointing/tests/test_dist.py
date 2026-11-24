@@ -143,3 +143,191 @@ def test_port_is_free_detects_a_dual_stack_listener():
 def test_find_free_port_without_a_block_asks_the_os(monkeypatch):
     monkeypatch.delenv("GCSFS_SUBSYSTEM_PORT_BASE", raising=False)
     assert 0 < find_free_port() < 65536
+
+
+def _sleeping_rank(rank, world_size, port, prefix, params, q):
+    import os
+    import pathlib
+    import time
+
+    (pathlib.Path(prefix) / f"ready-{rank}").write_text(str(os.getpid()))
+    time.sleep(600)
+
+
+def test_spawn_split_terminates_ranks_on_parent_error(tmp_path, monkeypatch):
+    import pathlib
+    import time
+
+    import psutil
+    import torch.multiprocessing as mp
+
+    orig_spawn = mp.spawn
+    procs = []
+    pids = []
+
+    def tracking_spawn(target_fn, args=(), nprocs=1, join=True):
+        ctx = orig_spawn(target_fn, args=args, nprocs=nprocs, join=join)
+        procs.extend(ctx.processes)
+        q = args[4]
+
+        def interrupt_once_started(timeout=None):
+            deadline = time.monotonic() + 30.0
+            ready_files = [pathlib.Path(args[2]) / f"ready-{r}" for r in range(nprocs)]
+            while not all(p.exists() and p.read_text().strip() for p in ready_files):
+                if time.monotonic() > deadline:
+                    raise TimeoutError("spawned ranks did not start in time")
+                time.sleep(0.02)
+            pids.extend(int(p.read_text().strip()) for p in ready_files)
+            assert all(psutil.pid_exists(pid) for pid in pids)
+            raise KeyboardInterrupt("parent interrupted")
+
+        q.get = interrupt_once_started
+        return ctx
+
+    monkeypatch.setattr(mp, "spawn", tracking_spawn)
+
+    try:
+        import types
+
+        real_params = types.SimpleNamespace(world_size=2, rounds=1)
+        with pytest.raises(KeyboardInterrupt, match="parent interrupted"):
+            spawn_split(str(tmp_path), real_params, _sleeping_rank)
+        assert len(pids) == 2
+        alive = [pid for pid in pids if psutil.pid_exists(pid)]
+    finally:
+        for proc in procs:
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=5)
+
+    assert alive == []
+
+
+def test_spawned_ranks_join_terminates_on_error():
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import SpawnedRanks
+
+    proc = MagicMock()
+    proc.is_alive.return_value = False
+    ctx = MagicMock()
+    ctx.processes = [proc]
+    ctx.join.side_effect = RuntimeError("rank 1 failed")
+    manager = MagicMock()
+
+    ranks = SpawnedRanks([], ctx, manager)
+    with pytest.raises(RuntimeError, match="rank 1 failed"):
+        ranks.join()
+
+    proc.terminate.assert_called_once_with()
+    proc.join.assert_called_once()
+    manager.shutdown.assert_called_once_with()
+
+    # _FakeContext (no .processes attribute) still cleans up cleanly on join error.
+    failing_fake = _FakeContext()
+    failing_fake.join = MagicMock(side_effect=RuntimeError("boom"))
+    fake_mgr = MagicMock()
+    with pytest.raises(RuntimeError, match="boom"):
+        SpawnedRanks([], failing_fake, fake_mgr).join()
+    fake_mgr.shutdown.assert_called_once_with()
+
+
+def test_terminate_escalates_to_kill_and_tolerates_missing_processes():
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import _terminate
+
+    _terminate(None)
+    _terminate(_FakeContext())
+    null_procs = MagicMock()
+    null_procs.processes = None
+    _terminate(null_procs)
+
+    stubborn = MagicMock()
+    stubborn.is_alive.return_value = True
+    clean = MagicMock()
+    clean.is_alive.return_value = False
+    ctx = MagicMock()
+    ctx.processes = [stubborn, clean]
+
+    _terminate(ctx, grace_s=0.25)
+
+    stubborn.terminate.assert_called_once_with()
+    stubborn.kill.assert_called_once_with()
+    assert stubborn.join.call_args_list[0].args == (0.25,)
+
+    clean.terminate.assert_called_once_with()
+    clean.join.assert_called_once_with(0.25)
+    clean.kill.assert_not_called()
+
+
+def test_setup_distributed_env_cpu_and_cuda(monkeypatch):
+    import os
+
+    import torch
+    import torch.distributed as dist
+
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
+        setup_distributed_env,
+    )
+
+    events = []
+    monkeypatch.setattr(
+        torch.cuda, "set_device", lambda idx: events.append(("set_device", idx))
+    )
+    monkeypatch.setattr(
+        dist,
+        "init_process_group",
+        lambda backend, rank, world_size: events.append(
+            ("init_pg", backend, rank, world_size)
+        ),
+    )
+    for key in (
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "GLOO_SOCKET_IFNAME",
+        "WORLD_SIZE",
+        "RANK",
+        "LOCAL_RANK",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    setup_distributed_env(1, 4, 29500)
+    assert events == [("init_pg", "gloo", 1, 4)]
+    assert os.environ["RANK"] == "1"
+    assert os.environ["WORLD_SIZE"] == "4"
+    assert os.environ["MASTER_PORT"] == "29500"
+
+    events.clear()
+    setup_distributed_env(2, 8, 29501, device="cuda")
+    assert events == [
+        ("set_device", 2),
+        ("init_pg", "cpu:gloo,cuda:nccl", 2, 8),
+    ]
+
+
+def _shared_tensor_rank(rank, world_size, port, prefix, params, q, *, tensors):
+    assert len(tensors) == 600
+    q.put([(0.0, 1.0)])
+
+
+def test_spawn_split_raises_soft_nofile_limit_for_shared_tensors(tmp_path):
+    import functools
+    import resource
+    import types
+
+    torch = pytest.importorskip("torch")
+    old_soft, old_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if old_hard != resource.RLIM_INFINITY and old_hard < 4096:
+        pytest.skip("hard RLIMIT_NOFILE too low for shared-tensor test")
+
+    resource.setrlimit(resource.RLIMIT_NOFILE, (1024, old_hard))
+    try:
+        tensors = [torch.zeros(4).share_memory_() for _ in range(600)]
+        real_params = types.SimpleNamespace(world_size=2, rounds=1)
+        durations = run_split(
+            str(tmp_path),
+            real_params,
+            functools.partial(_shared_tensor_rank, tensors=tensors),
+        )
+        assert len(durations) == 1
+        new_soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        assert new_soft > 1024
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (old_soft, old_hard))
