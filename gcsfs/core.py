@@ -94,6 +94,16 @@ DEFAULT_BLOCK_SIZE = 5 * 2**20
 # buckets that have scaled to higher rates.
 DEFAULT_RM_CONCURRENCY = 4
 
+# Default timeout of every HTTP request, used unless ``requests_timeout`` or a
+# ``timeout`` in ``session_kwargs`` is given. ``sock_read`` bounds the silence
+# between bytes of a response, not how long a transfer takes, so a response
+# that never arrives fails (and is retried) while a large upload or download
+# does not. No ``total``: it would cap long transfers, and is not retried.
+# 60 s matches google-cloud-storage's read timeout, 30 s aiohttp's connect one.
+DEFAULT_REQUESTS_TIMEOUT = aiohttp.ClientTimeout(
+    total=None, sock_connect=30, sock_read=60
+)
+
 
 def _validate_rm_concurrency(concurrency):
     """Check the ``concurrency`` argument of ``rm``: None or a positive int."""
@@ -450,6 +460,20 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     session_kwargs: dict
         passed on to ``aiohttp.ClientSession``; can contain, for example,
         proxy settings.
+    requests_timeout: float or aiohttp.ClientTimeout, optional
+        Timeout of each HTTP request. A number is aiohttp's total timeout
+        for the request, in seconds; an ``aiohttp.ClientTimeout`` is used
+        as-is (any field left ``None`` has no limit, so
+        ``aiohttp.ClientTimeout()`` disables all timeouts). If not given,
+        the ``timeout`` in ``session_kwargs`` is used, else a 30 s
+        ``sock_connect`` and 60 s ``sock_read`` timeout with no total limit
+        (``DEFAULT_REQUESTS_TIMEOUT``): a response that stops arriving
+        fails, while a long transfer that keeps receiving data does not.
+        Connect and read timeouts (``aiohttp.ServerTimeoutError``) are
+        retried like other transient errors; a total timeout, including a
+        numeric ``requests_timeout``, raises ``TimeoutError`` and is not
+        retried. Synchronous calls wrap an unrecovered timeout in
+        ``fsspec.FSTimeoutError`` (a ``TimeoutError`` subclass).
     endpoint_url: str
         If given, use this URL (format protocol://host:port , *without* any
         path part) for communication. If not given, defaults to the value
@@ -520,11 +544,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self.requester_pays = requester_pays
         self.consistency = consistency
         self.cache_timeout = cache_timeout or kwargs.pop("listings_expiry_time", None)
-        self.requests_timeout = requests_timeout
         self.timeout = timeout
         self._session = None
         self._endpoint = endpoint_url
         self.session_kwargs = session_kwargs or {}
+        if requests_timeout is None:
+            requests_timeout = self.session_kwargs.get("timeout")
+        if requests_timeout is None:
+            requests_timeout = DEFAULT_REQUESTS_TIMEOUT
+        self.requests_timeout = requests_timeout
         self.default_location = default_location
         self.version_aware = version_aware
         self._use_client_cert = _use_client_cert()
