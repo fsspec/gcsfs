@@ -10,13 +10,16 @@ import pytest
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import Shard, distribute_tensor
+from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
+from torch.distributed.tensor.placement_types import _StridedShard
+from torch.testing._internal.distributed.fake_pg import FakeStore
 
 pytest.importorskip("transformers")
 from transformers import AutoModelForCausalLM  # noqa: E402
 
 import gcsfs  # noqa: E402
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (  # noqa: E402
+    MIN_OPEN_FILES,
     run_split,
     setup_distributed_env,
 )
@@ -28,6 +31,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import
     local_slice,
     model_dir,
     random_full,
+    random_local,
     stage_model,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny import (  # noqa: E402
@@ -271,3 +275,73 @@ def test_weights_shared_with_spawned_ranks(tmp_path):
     weights = load_weights(model_path)
     target = functools.partial(_shared_weights_rank, weights=weights)
     assert run_split(None, make_params(model_path, world_size=2), target, 2) == []
+
+
+def test_random_local_matches_full_slice_with_local_storage():
+    cpu = torch.device("cpu")
+    for shape in ((), (16,), (8, 12), (4, 6, 8)):
+        plain = torch.empty(shape, dtype=torch.float32)
+        got = random_local(7, "k", plain, cpu)
+        ref = random_full(7, "k", shape, cpu)
+        assert torch.equal(got, ref)
+        assert got.untyped_storage().nbytes() == plain.numel() * 4
+
+    replicas = {}
+    for rank in range(4):
+        dist.init_process_group("fake", store=FakeStore(), rank=rank, world_size=4)
+        try:
+            m1 = init_device_mesh("cpu", (4,))
+            m2 = init_device_mesh("cpu", (2, 2), mesh_dim_names=("dp", "tp"))
+            cases = [
+                DTensor.from_local(torch.empty(4), m1, [Shard(0)], run_check=False),
+                DTensor.from_local(torch.empty(2, 12), m1, [Shard(0)], run_check=False),
+                DTensor.from_local(torch.empty(8, 3), m1, [Shard(1)], run_check=False),
+                DTensor.from_local(
+                    torch.empty(2, 6),
+                    m2,
+                    [_StridedShard(0, split_factor=2), Shard(0)],
+                    run_check=False,
+                ),
+                DTensor.from_local(
+                    torch.empty(4, 6, 2), m2, [Replicate(), Shard(0)], run_check=False
+                ),
+            ]
+            for idx, dt in enumerate(cases):
+                got = random_local(11, f"p.{idx}", dt, cpu)
+                ref = local_slice(random_full(11, f"p.{idx}", dt.shape, cpu), dt)
+                assert torch.equal(got, ref), (rank, idx)
+                assert got.untyped_storage().nbytes() == got.numel() * 4
+                if idx == 4:
+                    replicas[rank] = got
+        finally:
+            dist.destroy_process_group()
+    assert torch.equal(replicas[0], replicas[2])
+    assert torch.equal(replicas[1], replicas[3])
+    assert not torch.equal(replicas[0], replicas[1])
+
+    if torch.cuda.is_available():
+        cuda = torch.device("cuda", 0)
+        assert torch.equal(
+            random_local(11, "cuda.k", torch.empty(8, 12), cuda).cpu(),
+            random_full(11, "cuda.k", (8, 12), cpu),
+        )
+
+
+def test_load_weights_raises_soft_nofile_limit(tmp_path):
+    import resource
+
+    model_path = tiny_model_dir(tmp_path, num_layers=1)
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    low = min(1024, hard)
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (low, hard))
+        load_weights(model_path)
+        new_soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        expected = (
+            MIN_OPEN_FILES
+            if hard == resource.RLIM_INFINITY
+            else min(hard, MIN_OPEN_FILES)
+        )
+        assert new_soft >= expected
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))

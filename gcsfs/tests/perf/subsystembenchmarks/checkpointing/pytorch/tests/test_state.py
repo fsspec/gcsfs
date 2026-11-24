@@ -405,6 +405,14 @@ def test_expected_local_matches_full_slice(tmp_path):
                         )
 
         first_fqn, first_p = next(iter(model.named_parameters()))
+        sharded_model, _ = build(llama_dir, layouts[0], SETUP_SEED, weights, cpu)
+        q_fqn = "model.layers.0.self_attn.q_proj.weight"
+        q_param = dict(sharded_model.named_parameters())[q_fqn]
+        fp32_weights = {**weights, q_fqn: weights[q_fqn].float()}
+        q_got = expected_local(q_fqn, q_param, SETUP_SEED, fp32_weights, cpu)
+        assert q_got.numel() < fp32_weights[q_fqn].numel()
+        assert q_got.untyped_storage().nbytes() == q_got.numel() * 4
+
         with pytest.raises(ValueError, match="shape"):
             expected_local(
                 first_fqn,

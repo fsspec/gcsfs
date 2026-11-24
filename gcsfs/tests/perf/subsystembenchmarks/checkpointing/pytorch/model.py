@@ -21,7 +21,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parallelize impo
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import (
     local_slice,
     model_dir,
-    random_full,
+    random_local,
 )
 
 SETUP_SEED = 0
@@ -68,12 +68,9 @@ def expected_local(
     device: torch.device | str,
 ) -> torch.Tensor:
     if key.endswith(".exp_avg"):
-        return local_slice(random_full(seed, key, target.shape, device), target) * 1e-3
+        return random_local(seed, key, target, device).mul_(1e-3)
     if key.endswith(".exp_avg_sq"):
-        return (
-            local_slice(random_full(seed, key, target.shape, device), target).square()
-            * 1e-6
-        )
+        return random_local(seed, key, target, device).square_().mul_(1e-6)
     if seed == SETUP_SEED:
         full = weights[key]
         if tuple(full.shape) != tuple(target.shape):
@@ -81,8 +78,8 @@ def expected_local(
                 f"Weight {key!r} shape {tuple(full.shape)} "
                 f"!= expected {tuple(target.shape)}"
             )
-        return local_slice(full, target).to(device=device, dtype=torch.float32)
-    return local_slice(random_full(seed, key, target.shape, device), target)
+        return local_slice(full, target).to(device=device, dtype=torch.float32).clone()
+    return random_local(seed, key, target, device)
 
 
 def build(
@@ -104,6 +101,7 @@ def build(
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=expected_lr(seed), foreach=False
     )
+    # Step one parameter at a time so transient zero grads do not add a 4th shard copy.
     for p in model.parameters():
         p.grad = torch.zeros_like(p)
         optimizer.step()
