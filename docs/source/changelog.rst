@@ -30,14 +30,18 @@ Unreleased
   buckets a transient failure made ``mv`` of a folder move nothing,
   ``makedirs`` and ``rmdir`` do nothing, and ``rm -r`` leave folders behind.
   Now ``http://`` endpoints skip the lookup; other non-default endpoints try
-  once; on the default endpoint, answers that retrying will not change (such
-  as a missing ``storage.objects.list`` permission) fall back, and every
-  fallback except a missing bucket is remembered per filesystem instance
-  (``invalidate_storage_layout_cache()`` checks again). Credentials that the
-  default endpoint rejects raise instead of falling back. A lookup that still
-  fails after retries on the default endpoint now raises: during a Storage
-  Control outage, the first operation on a bucket fails after about 60 s
-  instead of silently using flat semantics (#1110).
+  once until a lookup succeeds on that instance (after which they follow the
+  default endpoint's rules); on an endpoint known to serve Storage Control,
+  only an explicit list of non-retryable errors (``PermissionDenied``,
+  anonymous ``Unauthenticated``, ``InvalidArgument``, ``FailedPrecondition``,
+  and ``MethodNotImplemented``) falls back. Fallbacks are stored separately
+  from real answers and re-checked after 5 minutes (or immediately on
+  ``invalidate_storage_layout_cache()``); missing buckets are never remembered.
+  Any other error — transient failures after retries, rejected credentials for
+  a non-anonymous caller, or unexpected statuses such as ``Cancelled`` and
+  ``Aborted`` — raises instead of falling back: during a Storage Control
+  outage, the first operation on a bucket fails after about 60 s instead of
+  silently using flat semantics (#1110).
 * With ``token=None`` and no default credentials, the gRPC clients of
   ``ExtendedGcsFileSystem`` now use anonymous credentials, as they already
   did for ``token="anon"``, instead of looking for default credentials
