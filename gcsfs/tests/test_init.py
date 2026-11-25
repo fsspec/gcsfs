@@ -2,6 +2,14 @@ import os
 import sys
 from unittest import mock
 
+# protobuf's default descriptor pool can't register the same .proto file twice,
+# so the generated proto module must survive the forced re-imports below.
+_KEEP_MODULES = frozenset({"gcsfs.telemetry.features_proto"})
+
+
+def _is_reloadable(name):
+    return name.startswith("gcsfs") and name not in _KEEP_MODULES
+
 
 class TestConditionalImport:
     def setup_method(self, method):
@@ -14,7 +22,7 @@ class TestConditionalImport:
 
         # Snapshot original gcsfs modules
         self.original_modules = {
-            name: mod for name, mod in sys.modules.items() if name.startswith("gcsfs")
+            name: mod for name, mod in sys.modules.items() if _is_reloadable(name)
         }
 
         # Unload gcsfs modules to force re-import during the test
@@ -32,7 +40,7 @@ class TestConditionalImport:
             del os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"]
 
         # Clear any gcsfs modules loaded/modified during this test
-        modules_to_remove = [name for name in sys.modules if name.startswith("gcsfs")]
+        modules_to_remove = [name for name in sys.modules if _is_reloadable(name)]
         for name in modules_to_remove:
             if name in sys.modules:
                 del sys.modules[name]
