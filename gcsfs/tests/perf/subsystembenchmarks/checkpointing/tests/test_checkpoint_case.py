@@ -180,6 +180,7 @@ def test_run_checkpoint_read_case(tmp_path, monkeypatch, read_count):
         bench.extra_info["checkpoint_read_throughput_mean_bytes_per_second"]
         == 500 * read_count
     )
+    assert "dcp_read_amplification_planned" not in bench.extra_info
 
 
 def test_checkpoint_case_prefix_generation(monkeypatch):
@@ -293,7 +294,9 @@ class _VerifyingDriver(_FakeWriteDriver):
 
         _EVENTS.append("run")
         return CheckpointResult(
-            durations=[1.0], verify=lambda: _EVENTS.append("verify")
+            durations=[1.0],
+            verify=lambda: _EVENTS.append("verify"),
+            close=lambda: _EVENTS.append("close"),
         )
 
 
@@ -326,7 +329,32 @@ def test_result_verify_runs_after_monitor_window(tmp_path, monkeypatch):
         _VerifyingDriver(),
         bucket_ctx=_local_bucket_ctx(tmp_path),
     )
-    assert _EVENTS == ["monitor_enter", "run", "monitor_exit", "verify"]
+    assert _EVENTS == ["monitor_enter", "run", "monitor_exit", "verify", "close"]
+
+
+def test_result_close_runs_when_monitor_exit_fails_and_skips_verify(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
+    _EVENTS.clear()
+
+    class _FailingExitMonitor(_Monitor):
+        @contextlib.contextmanager
+        def __call__(self):
+            _EVENTS.append("monitor_enter")
+            yield self
+            _EVENTS.append("monitor_exit_raise")
+            raise RuntimeError("monitor boom")
+
+    with pytest.raises(RuntimeError, match="monitor boom"):
+        checkpoint_case.run_checkpoint_case(
+            _Bench(),
+            _FailingExitMonitor(),
+            _params(),
+            _VerifyingDriver(),
+            bucket_ctx=_local_bucket_ctx(tmp_path),
+        )
+    assert _EVENTS == ["monitor_enter", "run", "monitor_exit_raise", "close"]
 
 
 def test_run_checkpoint_case_warms_rapid_cache_for_read_only(tmp_path, monkeypatch):
@@ -488,6 +516,112 @@ def test_rcu_z_checkpoint_saves_are_checked_after_the_window(rcu_case):
         "monitor_exit",
         ("check", _RCU_PREFIX, "standard_rcu_z"),
     ]
+
+
+class _BytesTransferredReadDriver(CheckpointDriver):
+    def __init__(
+        self, durations, bytes_transferred=None, extra_columns=None, read_count=8
+    ):
+        self._durations = durations
+        self._bytes_transferred = bytes_transferred
+        self._extra_columns = extra_columns or {}
+        self._read_count = read_count
+
+    def setup(self, prefix, params):
+        pass
+
+    def run(self, prefix, params):
+        from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
+            CheckpointResult,
+        )
+
+        return CheckpointResult(
+            durations=self._durations,
+            bytes_transferred=self._bytes_transferred,
+            extra_columns=dict(self._extra_columns),
+        )
+
+    def read_count(self, params):
+        return self._read_count
+
+
+def _memory_checkpoint(monkeypatch, size):
+    """Serves gs:// prefixes from memory:// with a size-byte model.ckpt."""
+    monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
+    original_url_to_fs = fsspec.core.url_to_fs
+
+    def mock_url_to_fs(url, **kwargs):
+        if url.startswith("gs://"):
+            fs, path = original_url_to_fs(url.replace("gs://", "memory://"))
+            fs.makedirs(path, exist_ok=True)
+            if size > 0:
+                fs.pipe_file(os.path.join(path, "model.ckpt"), b"0" * size)
+            return fs, path
+        return original_url_to_fs(url, **kwargs)
+
+    monkeypatch.setattr(fsspec.core, "url_to_fs", mock_url_to_fs)
+
+
+def test_throughput_uses_bytes_transferred(tmp_path, monkeypatch):
+    size = 500
+    d = 2.0
+    _memory_checkpoint(monkeypatch, size)
+
+    bench = _Bench()
+    params = _params(scenario="checkpoint_read")
+    driver = _BytesTransferredReadDriver(
+        durations=[d],
+        bytes_transferred=10 * size,
+        read_count=3,
+    )
+
+    checkpoint_case.run_checkpoint_case(
+        bench,
+        _Monitor(),
+        params,
+        driver,
+        bucket_ctx=_local_bucket_ctx(tmp_path),
+    )
+
+    assert driver.read_count(params) == 3
+    assert bench.extra_info["checkpoint_physical_size_bytes"] == size
+    assert bench.extra_info[
+        "checkpoint_read_throughput_mean_bytes_per_second"
+    ] == pytest.approx(10 * size / d)
+
+
+@pytest.mark.parametrize(
+    "physical_size, fetched_total, expected_amp",
+    [
+        pytest.param(500, 1250, 2.5, id="nonzero-size"),
+        pytest.param(0, 1250, 0.0, id="zero-size"),
+    ],
+)
+def test_amplification_planned_published(
+    tmp_path, monkeypatch, physical_size, fetched_total, expected_amp
+):
+    _memory_checkpoint(monkeypatch, physical_size)
+
+    bench = _Bench()
+    params = _params(scenario="checkpoint_read")
+    driver = _BytesTransferredReadDriver(
+        durations=[1.0],
+        bytes_transferred=fetched_total,
+        extra_columns={"dcp_read_bytes_fetched_total": fetched_total},
+    )
+
+    checkpoint_case.run_checkpoint_case(
+        bench,
+        _Monitor(),
+        params,
+        driver,
+        bucket_ctx=_local_bucket_ctx(tmp_path),
+    )
+
+    assert bench.extra_info["checkpoint_physical_size_bytes"] == physical_size
+    assert bench.extra_info["dcp_read_amplification_planned"] == pytest.approx(
+        expected_amp
+    )
 
 
 def _write_pid_atomic(pid_file):
