@@ -146,25 +146,11 @@ def _resolve_super_method(
 @contextlib.contextmanager
 def _telemetry_context(tokens_map: dict[str, str]):
     """Scope `tokens_map` for the current execution."""
-    effective = (
-        _disabled_tokens_map()
-        if not tokens_map and not manager.default_usage_tracker.is_enabled()
-        else tokens_map
-    )
-    token = set_telemetry_context(effective)
+    token = set_telemetry_context(tokens_map)
     try:
         yield
     finally:
         reset_telemetry_context(token)
-
-
-def _disabled_tokens_map() -> dict[str, str]:
-    """Return negative-cache sentinels for all dimensions and registered detectors."""
-    out = {d.value: "" for d in Dimension}
-    for det in manager.default_usage_tracker.detectors:
-        key = det.name.value if isinstance(det.name, Dimension) else str(det.name)
-        out[key] = ""
-    return out
 
 
 def with_telemetry_context(func: Callable) -> Callable:
@@ -176,19 +162,7 @@ def with_telemetry_context(func: Callable) -> Callable:
     when no method context is active, so any requests issued underneath (including via
     `asyn.sync` to the loop thread) carry it.
     """
-    method_name = _tracked_method_name(func)
-
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        if has_telemetry_context(Dimension.METHOD):
-            return func(*args, **kwargs)
-        tokens_map = manager.default_usage_tracker.collect_tokens_map(
-            call_scoped_only=True, method=method_name
-        )
-        with _telemetry_context(tokens_map):
-            return func(*args, **kwargs)
-
-    return wrapper
+    return _gcs_sync_wrapper(func)
 
 
 def _run_sync(
@@ -212,6 +186,15 @@ def _run_sync(
         return fsspec.asyn.sync(loop, func, *args, **kwargs)
 
 
+def _snapshot_generator_tokens(method_name: str) -> dict[str, str]:
+    """Capture call-scoped telemetry tokens once for a generator's steps and close."""
+    if has_telemetry_context(Dimension.METHOD):
+        return get_telemetry_context()
+    return manager.default_usage_tracker.collect_tokens_map(
+        call_scoped_only=True, method=method_name
+    ) or {Dimension.METHOD.value: method_name}
+
+
 def _gcs_async_wrapper(
     func: Callable,
     super_cls: type | None = None,
@@ -233,15 +216,7 @@ def _gcs_async_wrapper(
         @functools.wraps(func)
         async def gen_wrapper(*args, **kwargs):
             target, pass_args = _resolve_super_method(func, super_cls, args)
-            # Snapshot once on first step and reuse across all yields and close
-            if not manager.default_usage_tracker.is_enabled():
-                tokens_map = _disabled_tokens_map()
-            elif has_telemetry_context(Dimension.METHOD):
-                tokens_map = get_telemetry_context()
-            else:
-                tokens_map = manager.default_usage_tracker.collect_tokens_map(
-                    call_scoped_only=True, method=method_name
-                )
+            tokens_map = _snapshot_generator_tokens(method_name)
             gen = target(*pass_args, **kwargs)
             try:
                 while True:
@@ -304,15 +279,7 @@ def _gcs_sync_wrapper(
         @functools.wraps(func)
         def gen_wrapper(*args, **kwargs):
             self, actual_func, pass_args = _resolve_target_method(func, args)
-            # Snapshot once when called and reuse across all yields and close
-            if not manager.default_usage_tracker.is_enabled():
-                tokens_map = _disabled_tokens_map()
-            elif has_telemetry_context(Dimension.METHOD):
-                tokens_map = get_telemetry_context()
-            else:
-                tokens_map = manager.default_usage_tracker.collect_tokens_map(
-                    call_scoped_only=True, method=method_name
-                )
+            tokens_map = _snapshot_generator_tokens(method_name)
 
             def _iter():
                 gen = actual_func(*pass_args, **kwargs)
@@ -510,16 +477,11 @@ def bind_gcs_sync_methods(fs: Any) -> None:
 
 def _setup_file_telemetry(file_obj, file_method: str = "") -> contextvars.Token | None:
     """Apply a file handle's cached telemetry context when needed and return its reset token."""
-    current = get_telemetry_context()
-    if getattr(file_obj, "_telemetry_disabled", False):
-        disabled_map = _disabled_tokens_map()
-        if current == disabled_map:
-            return None
-        return set_telemetry_context(disabled_map)
-
     fw = getattr(file_obj, "caller_framework", None)
     if not isinstance(fw, str):
         return None
+
+    current = get_telemetry_context()
 
     saved_method = getattr(file_obj, "caller_method", "open")
     current_method = current.get(Dimension.METHOD.value)
@@ -574,40 +536,6 @@ def _file_telemetry_wrapper(func: Callable, file_method: str = "") -> Callable:
     return sync_wrapper
 
 
-def _clear_disabled_file_telemetry(file_obj) -> None:
-    """Mark a file handle opted out and clear its cached telemetry attributes."""
-    file_obj._telemetry_disabled = True
-    file_obj.caller_framework = ""
-    file_obj.caller_method = ""
-
-
-def _prepare_file_init_telemetry(file_obj) -> bool:
-    """Initialize file handle telemetry attributes and return whether telemetry is enabled."""
-    enabled = manager.default_usage_tracker.is_enabled() and not getattr(
-        file_obj, "_telemetry_disabled", False
-    )
-    if not enabled:
-        _clear_disabled_file_telemetry(file_obj)
-        return False
-    if not hasattr(file_obj, "caller_method"):
-        ctx = get_telemetry_context() if has_telemetry_context() else None
-        file_obj.caller_method = (
-            ctx[Dimension.METHOD.value]
-            if (ctx is not None and Dimension.METHOD.value in ctx)
-            else "open"
-        )
-    return True
-
-
-def _resolve_file_init_tokens(file_obj, enabled: bool) -> dict[str, str]:
-    """Build telemetry tokens to scope around file initialization."""
-    if not enabled:
-        return _disabled_tokens_map()
-    return manager.default_usage_tracker.collect_tokens_map(
-        call_scoped_only=True, method=file_obj.caller_method
-    )
-
-
 def wrap_file_methods(cls: type) -> None:
     """Wrap `__init__` and non-dunder instance methods and properties defined directly on a File class."""
     from gcsfs.core import GCSFile
@@ -620,15 +548,18 @@ def wrap_file_methods(cls: type) -> None:
         @functools.wraps(orig_init)
         def init_wrapper(*args, **kwargs):
             self = args[0]
-            enabled = _prepare_file_init_telemetry(self)
-            need_scope = is_gcs_file and (
-                not enabled or not has_telemetry_context(Dimension.METHOD)
-            )
+            if not hasattr(self, "caller_method"):
+                self.caller_method = get_telemetry_context().get(
+                    Dimension.METHOD.value, "open"
+                )
+            need_scope = is_gcs_file and not has_telemetry_context(Dimension.METHOD)
             was_init = getattr(self, "_initializing_telemetry", False)
             self._initializing_telemetry = True
             try:
                 if need_scope:
-                    tokens_map = _resolve_file_init_tokens(self, enabled)
+                    tokens_map = manager.default_usage_tracker.collect_tokens_map(
+                        call_scoped_only=True, method=self.caller_method
+                    )
                     with _telemetry_context(tokens_map):
                         orig_init(*args, **kwargs)
                 else:
@@ -636,9 +567,6 @@ def wrap_file_methods(cls: type) -> None:
             finally:
                 if not was_init:
                     self.__dict__.pop("_initializing_telemetry", None)
-
-            if not enabled:
-                _clear_disabled_file_telemetry(self)
 
         init_wrapper._is_telemetry_init_wrapped = True
         setattr(cls, "__init__", init_wrapper)

@@ -1411,8 +1411,13 @@ def test_custom_detector_and_dimension_filtering(detector, monkeypatch):
 def test_opted_out_fs_and_open_file_suppress_telemetry(
     detector, spied_gcs_harness, monkeypatch
 ):
-    """Verify opted-out FS calls and handles opened while opted out suppress active contexts."""
+    """Verify opted-out FS calls and open handles suppress telemetry dynamically and resume when unset."""
     gke_env = _CountingEnvDetector()
+    monkeypatch.setattr(
+        manager_mod,
+        "default_usage_tracker",
+        UsageMetricsTracker(detectors=[detector, gke_env]),
+    )
     fs = _DummyFS(skip_instance_cache=True)
     core_fs = spied_gcs_harness.fs
     detector.calls.clear()
@@ -1424,6 +1429,7 @@ def test_opted_out_fs_and_open_file_suppress_telemetry(
             assert [tokens for _, tokens in fs.seen] == [()]
             assert fs.seen_telemetry == [None]
             assert detector.calls == []
+            assert gke_env.calls == 0
 
             spied_gcs_harness.clear()
             opted_out_file = stack.enter_context(
@@ -1431,43 +1437,37 @@ def test_opted_out_fs_and_open_file_suppress_telemetry(
                     "test-bucket/file.txt", "rb", block_size=2, cache_type="blockcache"
                 )
             )
-            assert opted_out_file._telemetry_disabled is True
             assert opted_out_file.caller_framework == ""
-            assert opted_out_file.caller_method == ""
+            assert opted_out_file.caller_method == "open"
             assert len(opted_out_file.read(2)) == 2
-            assert spied_gcs_harness.seen
+            with _scoped_ctx(
+                {
+                    Dimension.FRAMEWORK.value: "ray",
+                    Dimension.METHOD.value: "find",
+                    "region": "us",
+                }
+            ):
+                assert len(opted_out_file.read(2)) == 2
+                opted_out_file._details = None
+                assert int(opted_out_file.info()["size"]) > 0
+            assert len(spied_gcs_harness.seen) >= 3
             assert all(entry == ((), None) for entry in spied_gcs_harness.seen)
             assert detector.calls == []
+            assert gke_env.calls == 0
 
-        monkeypatch.setattr(
-            manager_mod,
-            "default_usage_tracker",
-            UsageMetricsTracker(detectors=[detector, gke_env]),
-        )
         spied_gcs_harness.clear()
         detector.calls.clear()
         assert get_telemetry_context() == {}
         assert len(opted_out_file.read(2)) == 2
-        assert spied_gcs_harness.seen == [((), None)]
-        assert detector.calls == []
-        assert gke_env.calls == 0
-
-        spied_gcs_harness.clear()
-        detector.calls.clear()
-        with _scoped_ctx(
-            {
-                Dimension.FRAMEWORK.value: "ray",
-                Dimension.METHOD.value: "find",
-                "region": "us",
-            }
-        ):
-            assert len(opted_out_file.read(2)) == 2
-            opted_out_file._details = None
-            assert int(opted_out_file.info()["size"]) > 0
+        opted_out_file._details = None
+        assert int(opted_out_file.info()["size"]) > 0
         assert len(spied_gcs_harness.seen) >= 2
-        assert all(entry == ((), None) for entry in spied_gcs_harness.seen)
+        assert spied_gcs_harness.seen[0] == (("env/gke",), "file_read")
+        assert all(
+            entry == (("env/gke",), "file_info") for entry in spied_gcs_harness.seen[1:]
+        )
         assert detector.calls == []
-        assert gke_env.calls == 0
+        assert gke_env.calls >= 2
     assert get_telemetry_context() == {}
 
 
@@ -1489,8 +1489,6 @@ async def test_opted_out_generators_and_nested_calls_suppress_telemetry(
     )
     fs = _DummyFS(skip_instance_cache=True)
 
-    # Start sync and async walk generators while opted out (first step snapshots disabled
-    # tokens), then remove DO_NOT_TRACK before consuming the remaining yields and closing early.
     scope_cm = (
         _scoped_ctx(outer_ctx) if outer_ctx is not None else contextlib.nullcontext()
     )
@@ -1508,20 +1506,26 @@ async def test_opted_out_generators_and_nested_calls_suppress_telemetry(
             assert (await async_early.__anext__())[0] == "bucket/dir_0"
             assert fs.cat("bucket/a.txt") == b"abc"
             assert await fs._cat("bucket/b.txt") == b"abc"
+            sync_early.close()
+            await async_early.aclose()
 
+            assert fs.seen
+            assert all(tokens == () for _, tokens in fs.seen)
+            assert fs.seen_telemetry == [None] * len(fs.seen)
+            assert detector.calls == []
+            assert gke_env.calls == 0
+
+        fs.clear()
         assert len(list(sync_gen)) == 3
-        sync_early.close()
         assert len([item async for item in async_gen]) == 3
-        await async_early.aclose()
 
         expected_ctx = dict(outer_ctx) if outer_ctx is not None else {}
         assert get_telemetry_context() == expected_ctx
 
-    assert fs.seen
-    assert all(tokens == () for _, tokens in fs.seen)
-    assert fs.seen_telemetry == [None] * len(fs.seen)
-    assert detector.calls == []
-    assert gke_env.calls == 0
+    expected_method = outer_ctx[Dimension.METHOD.value] if outer_ctx else "walk"
+    expected_fw = outer_ctx[Dimension.FRAMEWORK.value] if outer_ctx else "pandas"
+    assert [tokens for _, tokens in fs.seen] == [(f"fw/{expected_fw}", "env/gke")] * 6
+    assert fs.seen_telemetry == [expected_method] * 6
     assert get_telemetry_context() == {}
 
 
@@ -1991,16 +1995,14 @@ def test_zonal_file_pickle_reopen_detects_worker_framework_and_honors_opt_out(
 
     detector.thread_names.clear()
     zonal_fs_harness.clear()
-    with contextlib.ExitStack() as reopen_stack:
-        with monkeypatch.context() as mp:
-            mp.setenv("DO_NOT_TRACK", "1")
-            reopened_opted_out = reopen_stack.enter_context(pickle.loads(payload))
-        gke_env.calls = 0
-        with _scoped_ctx(
-            {Dimension.FRAMEWORK.value: "ray", Dimension.METHOD.value: "find"}
-        ):
-            assert reopened_opted_out._telemetry_disabled is True
-            assert reopened_opted_out.read(4) == data[:4]
+    gke_env.calls = 0
+    with monkeypatch.context() as mp:
+        mp.setenv("DO_NOT_TRACK", "1")
+        with pickle.loads(payload) as reopened_opted_out:
+            with _scoped_ctx(
+                {Dimension.FRAMEWORK.value: "ray", Dimension.METHOD.value: "find"}
+            ):
+                assert reopened_opted_out.read(4) == data[:4]
     assert zonal_fs_harness.captured
     assert all((ua, m) == ((), None) for _, ua, m in zonal_fs_harness.captured)
     assert detector.thread_names == []
@@ -2554,16 +2556,14 @@ def test_gcsfile_pickle_reopen_detects_worker_framework_and_honors_opt_out(
 
     detector.calls.clear()
     spied_gcs_harness.clear()
-    with contextlib.ExitStack() as reopen_stack:
-        with monkeypatch.context() as mp:
-            mp.setenv("DO_NOT_TRACK", "1")
-            reopened_opted_out = reopen_stack.enter_context(pickle.loads(payload))
-        gke_env.calls = 0
-        with _scoped_ctx(
-            {Dimension.FRAMEWORK.value: "ray", Dimension.METHOD.value: "cat"}
-        ):
-            assert reopened_opted_out._telemetry_disabled is True
-            assert reopened_opted_out.read() == b"OCK"
+    gke_env.calls = 0
+    with monkeypatch.context() as mp:
+        mp.setenv("DO_NOT_TRACK", "1")
+        with pickle.loads(payload) as reopened_opted_out:
+            with _scoped_ctx(
+                {Dimension.FRAMEWORK.value: "ray", Dimension.METHOD.value: "cat"}
+            ):
+                assert reopened_opted_out.read() == b"OCK"
     assert spied_gcs_harness.seen
     assert all(entry == ((), None) for entry in spied_gcs_harness.seen)
     assert detector.calls == []
@@ -2574,13 +2574,12 @@ def test_gcsfile_pickle_reopen_detects_worker_framework_and_honors_opt_out(
     with monkeypatch.context() as mp:
         mp.setenv("DO_NOT_TRACK", "1")
         with fs.open("test-bucket/file.txt", "rb", size=4, cache_type="none") as f_opt:
-            assert f_opt._telemetry_disabled is True
+            assert f_opt.caller_framework == ""
             driver_opted_out_payload = pickle.dumps(f_opt)
 
     detector.calls.clear()
     spied_gcs_harness.clear()
     with pickle.loads(driver_opted_out_payload) as reopened_enabled:
-        assert not getattr(reopened_enabled, "_telemetry_disabled", False)
         assert reopened_enabled.caller_framework == "ray"
         spied_gcs_harness.clear()
         assert reopened_enabled.read() == b"MOCK"
