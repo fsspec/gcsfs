@@ -38,18 +38,26 @@ def _build_blob(
 ):
     """Returns the ``Blob`` describing the object to create.
 
-    A value of ``None`` (or an empty ``kms_key_name``) leaves its field unset.
+    A value of ``None`` (or an empty ``metadata`` or ``kms_key_name``) leaves
+    its field unset. ``metadata`` keys and values are sent as strings.
     ``fixed_key_metadata`` keys other than the ones in
     ``SUPPORTED_FIXED_KEY_METADATA`` are ignored.
     """
     blob = Blob(key, Bucket(None, bucket))
     if content_type is not None:
         blob.content_type = content_type
-    if metadata is not None:
-        blob.metadata = metadata
+    if metadata:
+        blob.metadata = {
+            str(k): "" if v is None else str(v) for k, v in metadata.items()
+        }
     if storage_class is not None:
         blob.storage_class = storage_class
     if kms_key_name:
+        if "/cryptoKeyVersions/" in kms_key_name:
+            raise ValueError(
+                "kms_key_name must not include /cryptoKeyVersions/: GCS encrypts "
+                "new objects with the key's primary version."
+            )
         blob.kms_key_name = kms_key_name
     fixed_key_metadata = fixed_key_metadata or {}
     for name in SUPPORTED_FIXED_KEY_METADATA:

@@ -104,6 +104,8 @@ def test_empty_env_vars_fall_back_to_defaults(monkeypatch):
     "flag, value",
     [
         ("parallel_upload", "maybe"),
+        ("parallel_upload", 4),
+        ("parallel_upload", 1.0),
         ("parallel_upload_threshold", "big"),
         ("parallel_upload_threshold", True),
         ("parallel_upload_threshold", 1.5),
@@ -369,3 +371,47 @@ async def test_upload_bytes_custom_time_is_sent_as_utc(sdk, custom_time, expecte
     )
     blob = sdk.upload_chunks_concurrently_from_bytes.await_args.kwargs["blob"]
     assert blob.custom_time == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata, expected",
+    [
+        ({1: "v", "k": None, "n": 2}, {"1": "v", "k": "", "n": "2"}),
+        ({}, None),
+    ],
+    ids=["keys and values", "empty"],
+)
+async def test_upload_bytes_metadata_is_sent_as_strings(sdk, metadata, expected):
+    await parallel_upload.parallel_upload_bytes(
+        object(), "bkt", "key", b"data", metadata=metadata
+    )
+    blob = sdk.upload_chunks_concurrently_from_bytes.await_args.kwargs["blob"]
+    assert blob.metadata == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "upload, sdk_attr, source",
+    [
+        (
+            parallel_upload.parallel_upload_bytes,
+            "upload_chunks_concurrently_from_bytes",
+            b"data",
+        ),
+        (
+            parallel_upload.parallel_upload_file,
+            "upload_chunks_concurrently_from_filename",
+            "/tmp/data",
+        ),
+    ],
+)
+async def test_upload_rejects_kms_key_name_with_crypto_key_version(
+    sdk, upload, sdk_attr, source
+):
+    versioned_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"
+    with pytest.raises(
+        ValueError, match="kms_key_name must not include /cryptoKeyVersions/"
+    ):
+        await upload(object(), "bkt", "key", source, kms_key_name=versioned_key)
+    getattr(sdk, sdk_attr).assert_not_awaited()

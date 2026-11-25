@@ -209,8 +209,9 @@ def _parse_bool_flag(value, name):
             return True
         if normalized in ("false", "0", "no", "off", ""):
             return False
-        raise ValueError(f"{name} must be a boolean, got {value!r}")
-    return bool(value)
+    elif value is None or (isinstance(value, int) and value in (0, 1)):
+        return bool(value)
+    raise ValueError(f"{name} must be a boolean, got {value!r}")
 
 
 def _parse_int_flag(value, name, *, default=None, minimum=0):
