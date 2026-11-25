@@ -168,3 +168,14 @@ def test_single_process_restore_still_loads_state_with_patch(tmp_path, monkeypat
     resumed = [next(it2) for _ in range(3)]
     assert len(resumed) == 3
     assert all(len(b) == 4 for b in resumed)
+
+
+def test_patch_noops_when_private_hook_missing(monkeypatch):
+    """If a future datasets release removes _prepare_ex_iterable_for_iteration,
+    patching must no-op instead of raising AttributeError at import time.
+    """
+    monkeypatch.delattr(
+        datasets.IterableDataset, "_prepare_ex_iterable_for_iteration", raising=False
+    )
+    _load_patch_fn()()
+    assert not hasattr(datasets.IterableDataset, "_prepare_ex_iterable_for_iteration")
