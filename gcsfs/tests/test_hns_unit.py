@@ -4624,9 +4624,7 @@ class TestExtendedGcsFileSystemBucketLayout:
         assert "b" not in fs._storage_layout_cache
 
     @pytest.mark.asyncio
-    async def test_layout_lookup_client_cert_learned_endpoint_raises(
-        self, monkeypatch
-    ):
+    async def test_layout_lookup_client_cert_learned_endpoint_raises(self, monkeypatch):
         # Once a lookup succeeds, the token works over gRPC: a later 401 is a
         # real credential failure and must not switch to flat semantics.
         fs = self._client_cert_fs(monkeypatch)
@@ -4701,9 +4699,7 @@ class TestExtendedGcsFileSystemBucketLayout:
         fs = extended_gcsfs
         fs._storage_layout_cache["good"] = layouts.STANDARD
         with (
-            self._layout_rpc(
-                fs, side_effect=api_exceptions.ServiceUnavailable("down")
-            ),
+            self._layout_rpc(fs, side_effect=api_exceptions.ServiceUnavailable("down")),
             mock.patch.object(
                 fs,
                 "_cat_file",
