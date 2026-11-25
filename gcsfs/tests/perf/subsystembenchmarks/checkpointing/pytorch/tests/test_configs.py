@@ -147,8 +147,7 @@ def test_olmoe_cases():
 
 def test_expert_parallel_size_must_match_dp(tmp_path):
     config = tmp_path / "configs.yaml"
-    config.write_text(
-        """
+    config.write_text("""
 common:
   rounds: 1
   model_id: "gs://gcs-aiml-huggingface-model-weights/OLMoE-1B-7B-0924"
@@ -160,8 +159,7 @@ common:
 scenarios:
   - name: "checkpoint_read"
     scenario: "checkpoint_read"
-"""
-    )
+""")
     with pytest.raises(ValueError, match="expert_parallel_size"):
         PyTorchCheckpointConfigurator(str(tmp_path / "configs.py")).generate_cases()
 

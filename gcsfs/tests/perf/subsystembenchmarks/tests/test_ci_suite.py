@@ -279,8 +279,7 @@ def test_upload_results_works_without_nightly_venv():
 
 # run.py -> pytest (subprocess) -> spawn Manager + 2 ranks, all stuck, like a hung case.
 # Each process appends its pid to argv[1] so the test can check none survives.
-_HUNG_CASE = textwrap.dedent(
-    """
+_HUNG_CASE = textwrap.dedent("""
     import multiprocessing as mp
     import os
     import subprocess
@@ -315,8 +314,7 @@ _HUNG_CASE = textwrap.dedent(
         else:
             cmd = [sys.executable, __file__, pid_file, "pytest"]
             sys.exit(subprocess.run(cmd).returncode)
-    """
-)
+    """)
 
 
 def _run_case_with_timeout(tmp_path, timeout_s, *cmd):
