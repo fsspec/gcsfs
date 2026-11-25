@@ -198,18 +198,29 @@ _FALLBACK_LAYOUT_ERRORS = (
 
 
 def _classify_layout_error(
-    error: BaseException, *, serves_control_api: bool, anonymous: bool
+    error: BaseException,
+    *,
+    serves_control_api: bool,
+    anonymous: bool,
+    unverified_client_cert: bool = False,
 ) -> _LayoutLookupOutcome:
     """Classify a ``get_storage_layout`` failure.
 
     Decides what is safe to remember as a flat-bucket fallback rather than what
     to retry: retrying is governed separately by ``is_transient_exception``.
+
+    ``Unauthenticated`` falls back for an anonymous caller (a missing
+    permission), and for a caller with a client certificate before any lookup
+    has succeeded: the gRPC clients present no certificate, so GCS rejects a
+    certificate-bound token there even though mTLS HTTP accepts it.
     """
     if isinstance(error, api_exceptions.NotFound):
         return _LayoutLookupOutcome.MISSING
     if isinstance(error, _FALLBACK_LAYOUT_ERRORS):
         return _LayoutLookupOutcome.FALLBACK
-    if anonymous and isinstance(error, api_exceptions.Unauthenticated):
+    if (anonymous or unverified_client_cert) and isinstance(
+        error, api_exceptions.Unauthenticated
+    ):
         return _LayoutLookupOutcome.FALLBACK
     if serves_control_api:
         return _LayoutLookupOutcome.RAISE
@@ -722,6 +733,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 e,
                 serves_control_api=bool(serves),
                 anonymous=isinstance(self.credential, AnonymousCredentials),
+                unverified_client_cert=(
+                    self._use_client_cert and not self._control_api_learned
+                ),
             )
             if outcome is _LayoutLookupOutcome.MISSING:
                 raise

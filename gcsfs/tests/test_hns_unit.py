@@ -4290,6 +4290,12 @@ class TestStorageControlRetryExecution:
 class TestExtendedGcsFileSystemBucketLayout:
     """Unit tests for ExtendedGcsFileSystem _get_bucket_layout and grpc_client."""
 
+    @pytest.fixture(autouse=True)
+    def _no_client_cert(self):
+        """Ignore any client certificate configured on the test machine."""
+        with mock.patch("gcsfs.core._use_client_cert", return_value=False):
+            yield
+
     @pytest.fixture
     def extended_gcsfs(self):
         ExtendedGcsFileSystem.clear_instance_cache()
@@ -4591,6 +4597,50 @@ class TestExtendedGcsFileSystemBucketLayout:
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 2
         assert all("Storage Control" in r.getMessage() for r in warnings)
+
+    @staticmethod
+    def _client_cert_fs(monkeypatch):
+        """A filesystem on the default endpoint whose HTTP path uses mTLS."""
+        monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+        monkeypatch.delenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", raising=False)
+        with mock.patch("gcsfs.core._use_client_cert", return_value=True):
+            return ExtendedGcsFileSystem(
+                token=Credentials(token="cert-bound"), skip_instance_cache=True
+            )
+
+    @pytest.mark.asyncio
+    async def test_layout_lookup_client_cert_unverified_401_falls_back(
+        self, monkeypatch
+    ):
+        # The gRPC clients present no client certificate, so GCS rejects a
+        # certificate-bound token there, while mTLS HTTP accepts it.
+        fs = self._client_cert_fs(monkeypatch)
+        error = api_exceptions.Unauthenticated(
+            "Request had invalid authentication credentials."
+        )
+        with self._layout_rpc(fs, side_effect=error):
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+        assert "b" in fs._storage_layout_fallbacks
+        assert "b" not in fs._storage_layout_cache
+
+    @pytest.mark.asyncio
+    async def test_layout_lookup_client_cert_learned_endpoint_raises(
+        self, monkeypatch
+    ):
+        # Once a lookup succeeds, the token works over gRPC: a later 401 is a
+        # real credential failure and must not switch to flat semantics.
+        fs = self._client_cert_fs(monkeypatch)
+        hns = storage_control_v2.StorageLayout(
+            location_type="region", hierarchical_namespace={"enabled": True}
+        )
+        error = api_exceptions.Unauthenticated(
+            "Request had invalid authentication credentials."
+        )
+        with self._layout_rpc(fs, side_effect=[hns, error]):
+            assert await fs._lookup_bucket_layout("a") == layouts.STANDARD_HIERARCHICAL
+            with pytest.raises(api_exceptions.Unauthenticated):
+                await fs._lookup_bucket_layout("c")
+        assert "c" not in fs._storage_layout_fallbacks
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -4977,6 +5027,33 @@ def test_classify_layout_error(error, serves_control_api, anonymous, expected):
     assert (
         _classify_layout_error(
             error, serves_control_api=serves_control_api, anonymous=anonymous
+        )
+        is _LayoutLookupOutcome[expected]
+    )
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (
+            api_exceptions.Unauthenticated(
+                "Request had invalid authentication credentials"
+            ),
+            "FALLBACK",
+        ),
+        (api_exceptions.ServiceUnavailable("x"), "RAISE"),
+        (api_exceptions.NotFound("nf"), "MISSING"),
+    ],
+)
+def test_classify_layout_error_unverified_client_cert(error, expected):
+    # Only a 401 is explained by a certificate-bound token; other errors keep
+    # the default endpoint's rules.
+    assert (
+        _classify_layout_error(
+            error,
+            serves_control_api=True,
+            anonymous=False,
+            unverified_client_cert=True,
         )
         is _LayoutLookupOutcome[expected]
     )
