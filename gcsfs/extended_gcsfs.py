@@ -710,7 +710,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
           API answers it, so the bucket does not exist;
         * ``PermissionDenied``, ``InvalidArgument``, ``FailedPrecondition``,
           ``MethodNotImplemented``, and ``Unauthenticated`` for an anonymous
-          caller fall back to ``BucketLayout.UNKNOWN``;
+          caller (or for a caller with a client certificate, until a lookup
+          succeeds on this instance) fall back to ``BucketLayout.UNKNOWN``;
         * any other API error or timeout falls back only while the endpoint is
           not yet known to serve Storage Control (a non-default ``https://``
           endpoint before any lookup has succeeded on this instance, tried once
