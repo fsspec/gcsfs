@@ -90,20 +90,11 @@ class PyTorchCheckpointReadDriver(DCPDriver):
     def run(self, prefix, params):
         weights = load_weights(params.model_id)
         ranks = None
-        try:
-            ranks, stats = spawn_with_stats(
-                prefix, params, _rank_load, params.target_layout().world_size, weights
-            )
-            fetched = [s["bytes_fetched"] for s in stats]
-        except BaseException:
-            if ranks is not None:
-                ranks.close()
-            weights.clear()
-            raise
 
         def _close() -> None:
             try:
-                ranks.close()
+                if ranks is not None:
+                    ranks.close()
             finally:
                 weights.clear()
 
@@ -113,14 +104,23 @@ class PyTorchCheckpointReadDriver(DCPDriver):
             finally:
                 _close()
 
-        return CheckpointResult(
-            durations=ranks.durations,
-            extra_columns={
-                "dcp_read_items_per_rank_max": max(s["read_items"] for s in stats),
-                "dcp_read_bytes_fetched_total": sum(fetched),
-                "dcp_read_bytes_fetched_per_rank_max": max(fetched),
-            },
-            verify=_verify,
-            close=_close,
-            bytes_transferred=sum(fetched),
-        )
+        try:
+            ranks, stats = spawn_with_stats(
+                prefix, params, _rank_load, params.target_layout().world_size, weights
+            )
+            fetched = [s["bytes_fetched"] for s in stats]
+            total_fetched = sum(fetched)
+            return CheckpointResult(
+                durations=ranks.durations,
+                extra_columns={
+                    "dcp_read_items_per_rank_max": max(s["read_items"] for s in stats),
+                    "dcp_read_bytes_fetched_total": total_fetched,
+                    "dcp_read_bytes_fetched_per_rank_max": max(fetched),
+                },
+                verify=_verify,
+                close=_close,
+                bytes_transferred=total_fetched,
+            )
+        except BaseException:
+            _close()
+            raise

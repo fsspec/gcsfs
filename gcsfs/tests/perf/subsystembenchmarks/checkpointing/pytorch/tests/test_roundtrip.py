@@ -417,16 +417,21 @@ def test_read_driver_close_releases_ranks_and_weights_without_verify(
         else:
             result.verify()
 
-    # Error after load_weights before CheckpointResult return also clears weights & closes ranks.
-    weights_err = {"w": 1}
-    fake_ranks = MagicMock()
-    monkeypatch.setattr(read_driver_mod, "load_weights", lambda mid: weights_err)
-    monkeypatch.setattr(
-        read_driver_mod,
-        "spawn_with_stats",
-        lambda *a, **kw: (fake_ranks, [{"corrupt": 1}]),
-    )
-    with pytest.raises(KeyError):
-        driver.run(prefix, params)
-    fake_ranks.close.assert_called_once_with()
-    assert weights_err == {}
+    # Errors after load_weights before CheckpointResult return also clear weights & close ranks.
+    for bad_stats, exc_type in (
+        ([{"corrupt": 1}], KeyError),
+        ([{"bytes_fetched": 10}], KeyError),
+        ([], ValueError),
+    ):
+        weights_err = {"w": 1}
+        fake_ranks = MagicMock()
+        monkeypatch.setattr(read_driver_mod, "load_weights", lambda mid: weights_err)
+        monkeypatch.setattr(
+            read_driver_mod,
+            "spawn_with_stats",
+            lambda *a, _ranks=fake_ranks, _stats=bad_stats, **kw: (_ranks, _stats),
+        )
+        with pytest.raises(exc_type):
+            driver.run(prefix, params)
+        fake_ranks.close.assert_called_once_with()
+        assert weights_err == {}
