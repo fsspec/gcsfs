@@ -34,7 +34,10 @@ Unreleased
   default endpoint's rules); on an endpoint known to serve Storage Control,
   only an explicit list of non-retryable errors (``PermissionDenied``,
   anonymous ``Unauthenticated``, ``InvalidArgument``, ``FailedPrecondition``,
-  and ``MethodNotImplemented``) falls back. Fallbacks are stored separately
+  and ``MethodNotImplemented``) falls back, plus ``Unauthenticated`` for a
+  caller with a client certificate (mTLS) until a lookup succeeds on the
+  instance, since the gRPC lookup presents no certificate and certificate-bound
+  tokens are accepted only over mTLS. Fallbacks are stored separately
   from real answers and re-checked after 5 minutes (or immediately on
   ``invalidate_storage_layout_cache()``); missing buckets are never remembered.
   Any other error — transient failures after retries, rejected credentials for
