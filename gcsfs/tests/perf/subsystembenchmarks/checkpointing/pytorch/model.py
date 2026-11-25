@@ -78,7 +78,9 @@ def expected_local(
                 f"Weight {key!r} shape {tuple(full.shape)} "
                 f"!= expected {tuple(target.shape)}"
             )
-        return local_slice(full, target).to(device=device, dtype=torch.float32).clone()
+        return local_slice(full, target).to(
+            device=device, dtype=torch.float32, copy=True
+        )
     return random_local(seed, key, target, device)
 
 
