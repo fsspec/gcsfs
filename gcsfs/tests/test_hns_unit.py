@@ -4008,6 +4008,30 @@ async def test_get_control_plane_client_quota_project_id(
 
 
 @pytest.mark.asyncio
+async def test_get_control_plane_client_sends_keepalive_pings():
+    import grpc
+
+    from gcsfs import __version__
+    from gcsfs.extended_gcsfs import USER_AGENT
+
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    try:
+        with mock.patch(
+            "google.api_core.grpc_helpers_async.aio.secure_channel",
+            wraps=grpc.aio.secure_channel,
+        ) as secure_channel:
+            await fs._get_control_plane_client()
+        assert secure_channel.call_args.kwargs["options"] == [
+            ("grpc.primary_user_agent", f"{USER_AGENT}/{__version__}"),
+            ("grpc.keepalive_time_ms", 30000),
+            ("grpc.keepalive_timeout_ms", 20000),
+            ("grpc.http2.ping_timeout_ms", 20000),
+        ]
+    finally:
+        await fs._close_resources()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "endpoint_url, env_updates, expected_host",
     [

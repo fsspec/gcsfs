@@ -7,6 +7,13 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
+* **The storage control gRPC channel (bucket-layout lookup and HNS folder
+  operations) now sends keepalive pings** (every 30 s while a call is open,
+  20 s to answer). A connection that dies silently in the middle of a call is
+  now replaced within that call, instead of every later call on it (the
+  bucket-layout lookup on the first operation on each bucket, and HNS ``mv``,
+  ``makedirs``, ``rm``, ``info``) timing out after its 60 s retry budget until
+  the operating system gives up on the socket, which can take about 15 minutes.
 * **HTTP requests no longer wait forever for a response.** ``requests_timeout``
   now defaults to a 30 s connect and 60 s read timeout with no total limit, so
   a request whose response never arrives fails and is retried instead of
