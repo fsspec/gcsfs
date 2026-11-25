@@ -4545,7 +4545,9 @@ class TestExtendedGcsFileSystemBucketLayout:
         self, endpoint_url, error, caplog
     ):
         fs = ExtendedGcsFileSystem(
-            token="anon", endpoint_url=endpoint_url, skip_instance_cache=True
+            token=Credentials(token="token"),
+            endpoint_url=endpoint_url,
+            skip_instance_cache=True,
         )
         with (
             caplog.at_level(logging.WARNING, logger="gcsfs"),
@@ -4589,6 +4591,73 @@ class TestExtendedGcsFileSystemBucketLayout:
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 2
         assert all("Storage Control" in r.getMessage() for r in warnings)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            api_exceptions.Cancelled("cancelled"),
+            api_exceptions.Aborted("aborted"),
+            api_exceptions.DataLoss("data loss"),
+        ],
+    )
+    async def test_layout_lookup_default_endpoint_raises_unexpected_status(self, error):
+        fs = ExtendedGcsFileSystem(
+            token=Credentials(token="t"),
+            endpoint_url="https://storage.googleapis.com",
+            skip_instance_cache=True,
+        )
+        with self._layout_rpc(fs, side_effect=error):
+            with pytest.raises(type(error)):
+                await fs._lookup_bucket_layout("b")
+        assert "b" not in fs._storage_layout_cache
+
+    @pytest.mark.asyncio
+    async def test_layout_lookup_learns_endpoint_serves_control_api(self):
+        fs = ExtendedGcsFileSystem(
+            token=Credentials(token="t"),
+            endpoint_url="https://storage-myendpoint.p.googleapis.com",
+            skip_instance_cache=True,
+        )
+        response = storage_control_v2.StorageLayout(location_type="region")
+        with self._layout_rpc(
+            fs, side_effect=[response, api_exceptions.ServiceUnavailable("blip")]
+        ) as (_, rpc):
+            assert await fs._lookup_bucket_layout("a") == layouts.STANDARD
+            assert rpc.await_args.kwargs["retry"] is None
+            with pytest.raises(api_exceptions.ServiceUnavailable):
+                await fs._lookup_bucket_layout("c")
+            assert rpc.await_args.kwargs["retry"] is not None
+        assert "c" not in fs._storage_layout_cache
+
+    @pytest.mark.asyncio
+    async def test_layout_lookup_unlearned_endpoint_falls_back(self):
+        fs = ExtendedGcsFileSystem(
+            token=Credentials(token="t"),
+            endpoint_url="https://storage-myendpoint.p.googleapis.com",
+            skip_instance_cache=True,
+        )
+        with self._layout_rpc(
+            fs, side_effect=api_exceptions.ServiceUnavailable("blip")
+        ) as (_, rpc):
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+        assert rpc.await_args.kwargs["retry"] is None
+
+    @pytest.mark.asyncio
+    async def test_endpoint_learning_is_per_instance(self):
+        psc = "https://storage-myendpoint.p.googleapis.com"
+        fs1 = ExtendedGcsFileSystem(
+            token=Credentials(token="t"), endpoint_url=psc, skip_instance_cache=True
+        )
+        with self._layout_rpc(
+            fs1, return_value=storage_control_v2.StorageLayout(location_type="region")
+        ):
+            await fs1._lookup_bucket_layout("a")
+        assert fs1._serves_control_api() is True
+        fs2 = ExtendedGcsFileSystem(
+            token=Credentials(token="t"), endpoint_url=psc, skip_instance_cache=True
+        )
+        assert fs2._serves_control_api() is None
 
     @pytest.mark.asyncio
     async def test_layout_lookup_custom_endpoint_single_attempt(self):

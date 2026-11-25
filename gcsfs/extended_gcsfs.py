@@ -45,11 +45,7 @@ from gcsfs.core import (
     _validate_rm_concurrency,
 )
 from gcsfs.poller import poll_lro, unwrap_operation_result
-from gcsfs.retry import (
-    DEFAULT_RETRY_CONFIG,
-    get_storage_control_retry_config,
-    is_transient_exception,
-)
+from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
 from gcsfs.telemetry.grpc import ControlPlaneTelemetryInterceptor
 from gcsfs.telemetry.wrapper import (
     _gcs_sync_wrapper,
@@ -449,6 +445,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if self.credential is None:
             self.credential = AnonymousCredentials()
         self._storage_layout_cache = {}
+        self._control_api_learned = False
         self._memmove_executor = ThreadPoolExecutor(
             max_workers=kwargs.get("memmove_max_workers", 8)
         )
@@ -644,37 +641,46 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         bucket_name, _, _ = self.split_path(bucket)
         self._storage_layout_cache.pop(bucket_name, None)
 
-    async def _get_bucket_layout(self, bucket):
-        """Look up the layout of ``bucket`` with the Storage Control API.
+    def _serves_control_api(self) -> bool | None:
+        """Whether this instance's endpoint serves the Storage Control API.
 
-        Falls back to ``BucketLayout.UNKNOWN`` (standard bucket behavior), which
-        the caller caches, when the lookup cannot work or retrying would not
-        change the answer:
-
-        * a plain ``http://`` endpoint (e.g. an emulator): the control channel
-          always uses TLS, so the lookup cannot work and is not attempted;
-        * an endpoint other than the default GCS one, which may not serve the
-          Storage Control API: one attempt, and any API error other than
-          ``NotFound``, or a timeout, falls back;
-        * on the default endpoint, any non-transient API error other than
-          ``NotFound``, e.g. missing permission (``PermissionDenied``, or
-          ``Unauthenticated`` for an anonymous caller).
-
-        ``NotFound`` is raised on every endpoint: only the Storage Control API
-        answers it (an endpoint that does not serve the API fails with another
-        status), so the bucket does not exist. On the default endpoint,
-        transient errors (after the retry budget) are raised too: falling back
-        there would silently change the semantics of HNS and zonal operations.
-        So is ``Unauthenticated`` for a caller with credentials, which means
-        the server rejected them, not that the layout may not be read.
+        Returns ``False`` for plain ``http://`` endpoints (the control channel
+        always uses TLS), ``True`` for the default GCS endpoint or after a
+        lookup succeeded on this instance, and ``None`` when unknown.
         """
         location = self._grpc_location
         if location.startswith("http://"):
+            return False
+        if _is_default_storage_endpoint(location) or self._control_api_learned:
+            return True
+        return None
+
+    async def _get_bucket_layout(self, bucket):
+        """Look up the layout of ``bucket`` with the Storage Control API.
+
+        Errors are classified by :func:`_classify_layout_error`, separately
+        from the retry predicate:
+
+        * a plain ``http://`` endpoint (e.g. an emulator): the control channel
+          always uses TLS, so the lookup cannot work and is not attempted;
+        * ``NotFound`` is raised on every endpoint: only the Storage Control
+          API answers it, so the bucket does not exist;
+        * ``PermissionDenied``, ``InvalidArgument``, ``FailedPrecondition``,
+          ``MethodNotImplemented``, and ``Unauthenticated`` for an anonymous
+          caller fall back to ``BucketLayout.UNKNOWN``;
+        * any other API error or timeout falls back only while the endpoint is
+          not yet known to serve Storage Control (a non-default ``https://``
+          endpoint before any lookup has succeeded on this instance, tried once
+          without retries). On the default endpoint, or once a non-default
+          endpoint has answered a lookup, it raises: falling back there would
+          silently change the semantics of HNS and zonal operations.
+        """
+        serves = self._serves_control_api()
+        if serves is False:
             logger.debug(
-                f"Endpoint {location} is plain http; skipping the bucket layout lookup."
+                f"Endpoint {self._grpc_location} is plain http; skipping the bucket layout lookup."
             )
             return BucketLayout.UNKNOWN
-        default_endpoint = _is_default_storage_endpoint(location)
 
         client = await self._get_control_plane_client()
         bucket_name_value = f"projects/_/buckets/{bucket}/storageLayout"
@@ -682,26 +688,18 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         try:
             response = await client.get_storage_layout(
                 name=bucket_name_value,
-                retry=self._get_retry_config() if default_endpoint else None,
+                retry=self._get_retry_config() if serves else None,
                 timeout=STORAGE_CONTROL_RPC_TIMEOUT,
             )
-        except api_exceptions.NotFound:
-            raise
         except (api_exceptions.GoogleAPIError, asyncio.TimeoutError) as e:
-            if default_endpoint and (
-                isinstance(e, (api_exceptions.RetryError, asyncio.TimeoutError))
-                or is_transient_exception(e)
-                # gRPC rejects bad or expired credentials with "Request had
-                # invalid authentication credentials", which
-                # is_transient_exception does not match. Caching UNKNOWN for
-                # that would keep flat semantics for this instance even after
-                # its credentials work again. Anonymous callers get 401 for a
-                # missing permission, which does fall back.
-                or (
-                    isinstance(e, api_exceptions.Unauthenticated)
-                    and not isinstance(self.credential, AnonymousCredentials)
-                )
-            ):
+            outcome = _classify_layout_error(
+                e,
+                serves_control_api=bool(serves),
+                anonymous=isinstance(self.credential, AnonymousCredentials),
+            )
+            if outcome is _LayoutLookupOutcome.MISSING:
+                raise
+            if outcome is _LayoutLookupOutcome.RAISE:
                 # The raised gapic error does not say why a plain read or
                 # write failed, so name the lookup and the opt-out here.
                 logger.warning(
@@ -722,6 +720,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 "invalidate_storage_layout_cache() checks again."
             )
             return BucketLayout.UNKNOWN
+        self._control_api_learned = True
         return _layout_from_response(response)
 
     # Plain sync method (not covered by mirror_gcs_methods). The bucket-layout lookup and, for Rapid
