@@ -900,19 +900,14 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """Whether a failed write to ``bucket`` found Rapid Cache Ultra disabled.
 
         Reuses a layout without RCU that another write already cached, and
-        otherwise looks the layout up once. A fresh layout that no longer
-        reports RCU is cached. A lookup that is ``UNKNOWN``, still reports
-        RCU, or fails returns ``False`` and keeps the cached layout, unless
-        the re-check found the bucket missing, which drops its cached layout.
+        otherwise looks the layout up once. A real layout returned by the
+        re-check is stored (dropping any fallback). Returns ``True`` only when
+        the bucket is known not to have RCU; otherwise returns ``False``, and
+        if the re-check found the bucket missing its cached layout and fallback
+        are dropped.
         """
         cached_layout = self._storage_layout_cache.get(bucket)
-        if (
-            cached_layout is None
-            # A lookup that fell back while this write was in flight cached
-            # UNKNOWN, which says nothing about RCU.
-            or cached_layout.storage_class == StorageClass.UNKNOWN
-            or cached_layout.is_rcu
-        ):
+        if cached_layout is None or cached_layout.is_rcu:
             # No other write has refreshed the layout yet: look it up once.
             # If the lookup fails, the layout stays unknown and returning
             # False lets the caller re-raise the write error unchanged.
@@ -923,6 +918,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 # The bucket is gone: as in _lookup_bucket_layout, a missing
                 # bucket's layout is not kept.
                 self._storage_layout_cache.pop(bucket, None)
+                self._storage_layout_fallbacks.pop(bucket, None)
             except Exception as lookup_error:
                 # Deliberately broad: whatever made the re-check fail, the
                 # write error is the one to report.
@@ -930,12 +926,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     f"Re-checking the layout of bucket {bucket} failed: "
                     f"{lookup_error!r}"
                 )
-            if (
-                fresh_layout.storage_class == StorageClass.UNKNOWN
-                or fresh_layout.is_rcu
-            ):
+            if fresh_layout.storage_class == StorageClass.UNKNOWN:
                 return False
-            self._storage_layout_cache[bucket] = fresh_layout
+            self._remember_layout(bucket, fresh_layout)
+            if fresh_layout.is_rcu:
+                return False
         return True
 
     def _may_use_parallel_upload(
@@ -1069,11 +1064,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         ``google.api_core`` ``GoogleAPICallError`` re-checks the layout;
         precondition errors such as ``FileExistsError`` are not re-checked.
         The re-check reuses a layout without RCU that another write already
-        cached, and otherwise looks the layout up once. If the layout no
-        longer reports RCU, it is cached and ``RapidCacheUltraDisabledError``
-        is raised from the original error; otherwise the original error is
-        re-raised and the cached layout is kept, unless the re-check found the
-        bucket missing, which drops its cached layout.
+        cached, and otherwise looks the layout up once. A real layout returned
+        by the re-check is stored (dropping any fallback); if it no longer
+        reports RCU, ``RapidCacheUltraDisabledError`` is raised from the
+        original error. Otherwise the original error is re-raised, and if the
+        re-check found the bucket missing its cached layout and fallback are
+        dropped.
         """
         await self._get_grpc_client()
         layout = await self._lookup_bucket_layout(bucket)
