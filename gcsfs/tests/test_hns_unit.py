@@ -5033,50 +5033,83 @@ class TestExtendedGcsFileSystemBucketLayout:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "op", ["rmdir", "mkdir_bucket", "mkdir_folder_creating_bucket"]
+        "op",
+        [
+            "rmdir_bucket",
+            "mkdir_bucket",
+            "mkdir_folder_creating_hns_bucket",
+            "mkdir_folder_creating_bucket",
+        ],
     )
     async def test_bucket_create_and_delete_drop_cached_layout(
         self, extended_gcsfs, op
     ):
         # A bucket created again under the same name may have another layout;
-        # keeping the old one would run HNS operations with flat semantics
-        # (e.g. makedirs creating no folder).
+        # keeping the old one would pick the wrong data path (here RCU on a
+        # bucket created without it) or the wrong HNS semantics.
         fs = extended_gcsfs
-        fs._storage_layout_cache["b"] = layouts.STANDARD
+        fs._storage_layout_cache["b"] = layouts.STANDARD_RCU
         with (
-            mock.patch.object(
-                gcsfs_core.GCSFileSystem, "_mkdir", new_callable=mock.AsyncMock
-            ),
-            mock.patch.object(
-                gcsfs_core.GCSFileSystem, "_rmdir", new_callable=mock.AsyncMock
-            ),
+            mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as call,
             mock.patch.object(
                 fs, "_exists", new_callable=mock.AsyncMock, return_value=False
             ),
             mock.patch.object(fs, "_create_hns_folder", new_callable=mock.AsyncMock),
         ):
-            if op == "rmdir":
+            if op == "rmdir_bucket":
                 await fs._rmdir("b")
             elif op == "mkdir_bucket":
-                await fs._mkdir("b", enable_hierarchical_namespace=True)
-            else:
+                await fs._mkdir("b")
+            elif op == "mkdir_folder_creating_hns_bucket":
                 await fs._mkdir(
                     "b/dir", create_parents=True, enable_hierarchical_namespace=True
                 )
+            else:
+                await fs._mkdir("b/dir", create_parents=True)
+        call.assert_awaited_once()
         assert "b" not in fs._storage_layout_cache
 
     @pytest.mark.asyncio
-    async def test_failed_bucket_create_keeps_cached_layout(self, extended_gcsfs):
+    @pytest.mark.parametrize(
+        "path, kwargs", [("b/", {}), ("b/dir", {"create_parents": True})]
+    )
+    async def test_mkdir_in_existing_bucket_keeps_cached_layout(
+        self, extended_gcsfs, path, kwargs
+    ):
+        # No bucket is created, so the cached layout is still right.
+        fs = extended_gcsfs
+        fs._storage_layout_cache["b"] = layouts.STANDARD
+        with (
+            mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as call,
+            mock.patch.object(
+                fs, "_exists", new_callable=mock.AsyncMock, return_value=True
+            ),
+        ):
+            await fs._mkdir(path, **kwargs)
+        call.assert_not_awaited()
+        assert fs._storage_layout_cache["b"] == layouts.STANDARD
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "op, error",
+        [
+            ("mkdir", FileExistsError("b")),
+            ("rmdir", HttpError({"code": 409, "message": "bucket is not empty"})),
+        ],
+    )
+    async def test_failed_bucket_create_or_delete_keeps_cached_layout(
+        self, extended_gcsfs, op, error
+    ):
         fs = extended_gcsfs
         fs._storage_layout_cache["b"] = layouts.STANDARD
         with mock.patch.object(
-            gcsfs_core.GCSFileSystem,
-            "_mkdir",
-            new_callable=mock.AsyncMock,
-            side_effect=FileExistsError("b"),
+            fs, "_call", new_callable=mock.AsyncMock, side_effect=error
         ):
-            with pytest.raises(FileExistsError):
-                await fs._mkdir("b")
+            with pytest.raises(type(error)):
+                if op == "mkdir":
+                    await fs._mkdir("b")
+                else:
+                    await fs._rmdir("b")
         assert fs._storage_layout_cache["b"] == layouts.STANDARD
 
     def test_bucket_layout_presets(self):
