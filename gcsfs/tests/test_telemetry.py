@@ -36,8 +36,10 @@ from gcsfs.telemetry import schema as telemetry_schema
 from gcsfs.telemetry.context import (
     GRPC_METADATA_KEY,
     HTTP_HEADER_KEY,
+    TRACKED_METHOD_PARAMS,
     USER_AGENT_DIMENSIONS,
     Dimension,
+    canonicalize_method_params,
     get_telemetry_context,
     has_telemetry_context,
     reset_telemetry_context,
@@ -740,6 +742,12 @@ class _DummyFile(fsspec.spec.AbstractBufferedFile):
 wrap_file_methods(_DummyFile)
 
 
+def _active_method_params(tracker: UsageMetricsTracker) -> frozenset[str]:
+    """Return the active set of canonical tracked method parameter names on `tracker`."""
+    val = tracker.get_dimension(Dimension.METHOD_PARAMS)
+    return frozenset(val.split(".")) if val else frozenset()
+
+
 class _DummyFS(fsspec.asyn.AsyncFileSystem):
     """Fake async filesystem whose leaf calls record (thread, UA tokens, method)."""
 
@@ -1297,7 +1305,77 @@ def test_has_telemetry_context_and_wrapper_exception_cleanup(detector):
     assert get_telemetry_context() == {}
 
 
-def test_user_agent_excludes_method_and_respects_opt_out(monkeypatch):
+def test_canonicalize_collect_tokens_and_context_mp_edge_cases():
+    """Verify canonical `mp` lookup, orphan `mp` cleanup, and `collect_tokens_map` branches."""
+    assert canonicalize_method_params("detail.withdirs") == "detail.withdirs"
+    for bad in ("withdirs.detail", "detail,withdirs", "unknown", "", None, 123):
+        assert canonicalize_method_params(bad) == ""
+
+    with _scoped_ctx(Dimension.METHOD_PARAMS, "detail.withdirs"):
+        assert get_telemetry_context() == {}
+
+    with _scoped_ctx(Dimension.METHOD, "find"):
+        with _scoped_ctx(Dimension.METHOD_PARAMS, "detail.withdirs"):
+            assert _active_method_params(
+                manager_mod.default_usage_tracker
+            ) == frozenset({"detail", "withdirs"})
+            for cleared in ("", "unknown", "withdirs.detail"):
+                with _scoped_ctx(Dimension.METHOD_PARAMS, cleared):
+                    assert Dimension.METHOD_PARAMS.value not in get_telemetry_context()
+
+    with _scoped_ctx(
+        {Dimension.METHOD.value: "", Dimension.METHOD_PARAMS.value: "detail"}
+    ):
+        assert get_telemetry_context() == {Dimension.METHOD.value: ""}
+        with _scoped_ctx(Dimension.METHOD_PARAMS, "prefix"):
+            assert get_telemetry_context() == {Dimension.METHOD.value: ""}
+
+    with _scoped_ctx(
+        {Dimension.METHOD.value: "ls", Dimension.METHOD_PARAMS.value: "detail"}
+    ):
+        with _scoped_ctx(Dimension.METHOD, ""):
+            assert get_telemetry_context() == {Dimension.METHOD.value: ""}
+
+    with _scoped_ctx({Dimension.METHOD: "", Dimension.METHOD_PARAMS: "detail"}):
+        assert get_telemetry_context() == {Dimension.METHOD.value: ""}
+
+    tracker = UsageMetricsTracker()
+    assert tracker.collect_tokens_map(
+        call_scoped_only=True, method="", method_params="detail"
+    ) == {Dimension.METHOD.value: ""}
+    assert tracker.collect_tokens_map(
+        frozenset({Dimension.METHOD}),
+        call_scoped_only=True,
+        method="ls",
+        method_params="detail",
+    ) == {Dimension.METHOD.value: "ls"}
+    assert tracker.collect_tokens_map(
+        frozenset({Dimension.METHOD_PARAMS}),
+        call_scoped_only=True,
+        method="ls",
+        method_params="detail",
+    ) == {Dimension.METHOD_PARAMS.value: "detail"}
+    with _scoped_ctx(
+        {Dimension.FRAMEWORK.value: "jax", Dimension.METHOD_PARAMS.value: "detail"}
+    ):
+        assert tracker.collect_tokens_map(
+            call_scoped_only=True, method="find", method_params=""
+        ) == {
+            Dimension.FRAMEWORK.value: "jax",
+            Dimension.METHOD.value: "find",
+        }
+    with _scoped_ctx(
+        {Dimension.METHOD.value: "walk", Dimension.METHOD_PARAMS.value: "detail"}
+    ):
+        assert tracker.collect_tokens_map(
+            call_scoped_only=True, method="ls", method_params="prefix"
+        ) == {
+            Dimension.METHOD.value: "walk",
+            Dimension.METHOD_PARAMS.value: "detail",
+        }
+
+
+def test_user_agent_excludes_method_and_params_and_respects_opt_out(monkeypatch):
     """Verify User-Agent filters to fw/ and env/, get_tokens() defaults to all, and opt-out holds."""
     tracker = UsageMetricsTracker()
     monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
@@ -1307,11 +1385,17 @@ def test_user_agent_excludes_method_and_respects_opt_out(monkeypatch):
             Dimension.FRAMEWORK.value: "pandas",
             Dimension.ENVIRONMENT.value: "gke",
             Dimension.METHOD.value: "find",
+            Dimension.METHOD_PARAMS.value: "cache_options.detail",
         }
     ):
         assert has_telemetry_context(Dimension.METHOD)
         assert tracker.get_tokens(USER_AGENT_DIMENSIONS) == ["fw/pandas", "env/gke"]
-        assert tracker.get_tokens() == ["fw/pandas", "env/gke", "m/find"]
+        assert tracker.get_tokens() == [
+            "fw/pandas",
+            "env/gke",
+            "m/find",
+            "mp/cache_options.detail",
+        ]
         assert tracker.collect_tokens_map(
             USER_AGENT_DIMENSIONS, call_scoped_only=False
         ) == {
@@ -1319,17 +1403,22 @@ def test_user_agent_excludes_method_and_respects_opt_out(monkeypatch):
             "env": "gke",
         }
         assert tracker.get_dimension(Dimension.METHOD) == "find"
+        assert tracker.get_dimension(Dimension.METHOD_PARAMS) == "cache_options.detail"
+        assert _active_method_params(tracker) == frozenset({"cache_options", "detail"})
         headers = fs._get_headers(None)
         ua = headers["User-Agent"]
         decoded = _decode_features(headers[HTTP_HEADER_KEY])
         assert "fw/pandas" in ua
         assert "env/gke" in ua
         assert "m/find" not in ua
+        assert "mp/" not in ua
         assert (decoded.method, decoded.framework, decoded.environment) == (
             GcsfsMethod.GCSFS_METHOD_FIND,
             GcsfsFramework.GCSFS_FRAMEWORK_PANDAS,
             GcsfsEnvironment.GCSFS_ENVIRONMENT_GKE,
         )
+        assert decoded.method_params.cache_options is True
+        assert decoded.method_params.detail is True
 
         for env_var, env_val in (
             ("DO_NOT_TRACK", "1"),
@@ -1341,6 +1430,7 @@ def test_user_agent_excludes_method_and_respects_opt_out(monkeypatch):
                 assert tracker.get_tokens(USER_AGENT_DIMENSIONS) == []
                 assert tracker.get_tokens() == []
                 assert tracker.get_dimension(Dimension.METHOD) is None
+                assert _active_method_params(tracker) == frozenset()
                 assert tracker.collect_tokens_map(call_scoped_only=False) == {}
                 disabled_headers = fs._get_headers(None)
                 assert "fw/" not in disabled_headers["User-Agent"]
@@ -3841,6 +3931,7 @@ def test_encode_features_wire_parity(monkeypatch):
     full_dec = _decode_features(full_enc)
     single_mp_dec = _decode_features(single_mp)
     mp = full_dec.method_params
+    assert TRACKED_METHOD_PARAMS == telemetry_schema._METHOD_PARAM_FIELDS
     assert f"{Dimension.FRAMEWORK}" == "fw"
     assert str(Dimension.METHOD_PARAMS) == "mp"
     assert GRPC_METADATA_KEY == "x-goog-storage-gcsfs-features"
@@ -4573,7 +4664,7 @@ def test_http_user_agent_excludes_method_and_method_params(monkeypatch):
     monkeypatch.setattr(manager_mod, "default_usage_tracker", tracker)
     fs = GCSFileSystem(token="anon", skip_instance_cache=True)
     token = set_telemetry_context(
-        {"m": "cat", "mp": "recursive,cache_options", "fw": "pandas", "env": "gke"}
+        {"m": "cat", "mp": "cache_options.recursive", "fw": "pandas", "env": "gke"}
     )
 
     try:
@@ -4672,21 +4763,30 @@ def test_wrapped_fs_and_open_file_dynamic_opt_out_toggle(mock_gcs_harness, monke
 def test_http_user_agent_truncates_at_64_without_truncating_feature_header(monkeypatch):
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
     monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
-    monkeypatch.setattr(
-        manager_mod, "default_usage_tracker", UsageMetricsTracker(detectors=[])
-    )
-    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
     long_mp = ("padding," * 10) + "cache_options"
-    token = set_telemetry_context({"fw": "a" * 100, "mp": long_mp})
 
+    class _LongMpDetector(BaseDetector):
+        name = Dimension.METHOD_PARAMS
+
+        def detect(self):
+            return long_mp
+
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    monkeypatch.setattr(
+        manager_mod,
+        "default_usage_tracker",
+        UsageMetricsTracker(detectors=[_LongMpDetector()]),
+    )
+    det_token = set_telemetry_context({"m": "open", "fw": "a" * 100})
     try:
-        headers = fs._get_headers(None)
+        det_headers = fs._get_headers(None)
     finally:
-        reset_telemetry_context(token)
+        reset_telemetry_context(det_token)
 
-    decoded = _decode_features(headers[HTTP_HEADER_KEY])
-    assert f"fw/{'a' * 64}" in headers["User-Agent"]
-    assert f"fw/{'a' * 65}" not in headers["User-Agent"]
-    assert "mp/" not in headers["User-Agent"]
-    assert decoded.framework == GcsfsFramework.GCSFS_FRAMEWORK_UNSPECIFIED
-    assert decoded.method_params.cache_options is True
+    det_decoded = _decode_features(det_headers[HTTP_HEADER_KEY])
+    assert f"fw/{'a' * 64}" in det_headers["User-Agent"]
+    assert f"fw/{'a' * 65}" not in det_headers["User-Agent"]
+    assert "mp/" not in det_headers["User-Agent"]
+    assert det_decoded.method == GcsfsMethod.GCSFS_METHOD_OPEN
+    assert det_decoded.framework == GcsfsFramework.GCSFS_FRAMEWORK_UNSPECIFIED
+    assert det_decoded.method_params.cache_options is True

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import itertools
 import os
 import re
 from collections.abc import Mapping
@@ -10,6 +11,22 @@ from enum import StrEnum
 
 # Allowed characters in RFC 9110 product-version tokens: ASCII alphanumeric, '_', '.', '-'
 _TOKEN_SANITIZE_REGEX = re.compile(r"[^a-zA-Z0-9_.-]")
+
+TRACKED_METHOD_PARAMS = frozenset(
+    {
+        "cache_options",
+        "detail",
+        "prefix",
+        "recursive",
+        "withdirs",
+    }
+)
+_SORTED_TRACKED_METHOD_PARAMS = tuple(sorted(TRACKED_METHOD_PARAMS))
+_CANONICAL_METHOD_PARAMS = frozenset(
+    ".".join(combo)
+    for r in range(1, len(_SORTED_TRACKED_METHOD_PARAMS) + 1)
+    for combo in itertools.combinations(_SORTED_TRACKED_METHOD_PARAMS, r)
+)
 
 
 class Dimension(StrEnum):
@@ -26,6 +43,11 @@ HTTP_HEADER_KEY = "X-Goog-Storage-Gcsfs-Features"
 USER_AGENT_DIMENSIONS: frozenset[Dimension] = frozenset(
     {Dimension.ENVIRONMENT, Dimension.FRAMEWORK}
 )
+
+
+def canonicalize_method_params(raw: str | None) -> str:
+    """Return `raw` if it is a canonical sorted `.`-joined flag string, else `""`."""
+    return raw if isinstance(raw, str) and raw in _CANONICAL_METHOD_PARAMS else ""
 
 
 def sanitize_token(token: str | None, max_len: int = 64) -> str | None:
@@ -72,9 +94,27 @@ def set_telemetry_context(
     """Set telemetry tokens mapping (or update a single dimension) in context."""
     if isinstance(tokens, Dimension):
         current = get_telemetry_context()
-        current[tokens.value] = str(value) if value is not None else ""
+        str_val = str(value) if value is not None else ""
+        if tokens is Dimension.METHOD_PARAMS:
+            str_val = canonicalize_method_params(str_val)
+            if str_val and current.get(Dimension.METHOD.value):
+                current[tokens.value] = str_val
+            else:
+                current.pop(tokens.value, None)
+        else:
+            current[tokens.value] = str_val
+            if tokens is Dimension.METHOD and not str_val:
+                current.pop(Dimension.METHOD_PARAMS.value, None)
         return _current_telemetry.set(current)
-    return _current_telemetry.set(dict(tokens))
+    normalized = dict(tokens)
+    mp = normalized.get(Dimension.METHOD_PARAMS.value)
+    if mp is not None:
+        canon = canonicalize_method_params(mp)
+        if canon and normalized.get(Dimension.METHOD.value):
+            normalized[Dimension.METHOD_PARAMS.value] = canon
+        else:
+            normalized.pop(Dimension.METHOD_PARAMS.value, None)
+    return _current_telemetry.set(normalized)
 
 
 def reset_telemetry_context(token: contextvars.Token) -> None:
