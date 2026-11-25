@@ -185,6 +185,39 @@ def _is_default_storage_endpoint(location):
     )
 
 
+class _LayoutLookupOutcome(Enum):
+    MISSING = "missing"
+    FALLBACK = "fallback"
+    RAISE = "raise"
+
+
+_FALLBACK_LAYOUT_ERRORS = (
+    api_exceptions.PermissionDenied,
+    api_exceptions.InvalidArgument,
+    api_exceptions.FailedPrecondition,
+    api_exceptions.MethodNotImplemented,
+)
+
+
+def _classify_layout_error(
+    error: BaseException, *, serves_control_api: bool, anonymous: bool
+) -> _LayoutLookupOutcome:
+    """Classify a ``get_storage_layout`` failure.
+
+    Decides what is safe to remember as a flat-bucket fallback rather than what
+    to retry: retrying is governed separately by ``is_transient_exception``.
+    """
+    if isinstance(error, api_exceptions.NotFound):
+        return _LayoutLookupOutcome.MISSING
+    if isinstance(error, _FALLBACK_LAYOUT_ERRORS):
+        return _LayoutLookupOutcome.FALLBACK
+    if anonymous and isinstance(error, api_exceptions.Unauthenticated):
+        return _LayoutLookupOutcome.FALLBACK
+    if serves_control_api:
+        return _LayoutLookupOutcome.RAISE
+    return _LayoutLookupOutcome.FALLBACK
+
+
 class RapidCacheUltraDisabledError(OSError):
     """Rapid Cache Ultra was disabled on a bucket cached as using it.
 

@@ -37,6 +37,8 @@ from gcsfs.extended_gcsfs import (
     ExtendedGcsFileSystem,
     NamespaceLayout,
     StorageClass,
+    _classify_layout_error,
+    _LayoutLookupOutcome,
 )
 from gcsfs.poller import _BACKGROUND_TASKS
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, HttpError
@@ -4747,3 +4749,61 @@ class TestExtendedGcsFileSystemBucketLayout:
         assert BucketLayout.UNKNOWN == BucketLayout(
             StorageClass.UNKNOWN, CachingTier.NONE, NamespaceLayout.UNKNOWN
         )
+
+
+@pytest.mark.parametrize(
+    "error, serves_control_api, anonymous, expected",
+    [
+        (api_exceptions.NotFound("nf"), True, False, "MISSING"),
+        (api_exceptions.NotFound("nf"), False, False, "MISSING"),
+        (api_exceptions.PermissionDenied("x"), True, False, "FALLBACK"),
+        (api_exceptions.InvalidArgument("x"), True, False, "FALLBACK"),
+        (api_exceptions.FailedPrecondition("x"), True, False, "FALLBACK"),
+        (api_exceptions.MethodNotImplemented("x"), True, False, "FALLBACK"),
+        (
+            api_exceptions.Unauthenticated(
+                "Anonymous caller does not have storage.objects.list"
+            ),
+            True,
+            True,
+            "FALLBACK",
+        ),
+        (
+            api_exceptions.Unauthenticated(
+                "Request had invalid authentication credentials"
+            ),
+            True,
+            False,
+            "RAISE",
+        ),
+        (api_exceptions.Cancelled("x"), True, False, "RAISE"),
+        (api_exceptions.Aborted("x"), True, False, "RAISE"),
+        (api_exceptions.DataLoss("x"), True, False, "RAISE"),
+        (api_exceptions.ServiceUnavailable("x"), True, False, "RAISE"),
+        (api_exceptions.RetryError("budget", cause=None), True, False, "RAISE"),
+        (asyncio.TimeoutError(), True, False, "RAISE"),
+        (
+            api_exceptions.InternalServerError("http2 header status: 400"),
+            False,
+            False,
+            "FALLBACK",
+        ),
+        (api_exceptions.ServiceUnavailable("x"), False, False, "FALLBACK"),
+        (asyncio.TimeoutError(), False, False, "FALLBACK"),
+        (
+            api_exceptions.Unauthenticated(
+                "Request had invalid authentication credentials"
+            ),
+            False,
+            False,
+            "FALLBACK",
+        ),
+    ],
+)
+def test_classify_layout_error(error, serves_control_api, anonymous, expected):
+    assert (
+        _classify_layout_error(
+            error, serves_control_api=serves_control_api, anonymous=anonymous
+        )
+        is _LayoutLookupOutcome[expected]
+    )
