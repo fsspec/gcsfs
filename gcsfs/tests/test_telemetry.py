@@ -6,6 +6,8 @@ import asyncio
 import base64
 import contextlib
 import copy
+import functools
+import gc
 import inspect
 import io
 import logging
@@ -15,6 +17,7 @@ import sys
 import threading
 import time
 import types
+import weakref
 from unittest import mock
 
 import aiohttp
@@ -61,9 +64,12 @@ from gcsfs.telemetry.grpc import ControlPlaneTelemetryInterceptor
 from gcsfs.telemetry.manager import UsageMetricsTracker
 from gcsfs.telemetry.wrapper import (
     _FILE_METHOD_TOKENS,
+    _METHOD_TRACKED_PARAMS,
     _TRACKED_METHODS,
+    _cached_positional_spec,
     _gcs_async_wrapper,
     _gcs_sync_wrapper,
+    _positional_tracked_params,
     _telemetry_context,
     mirror_gcs_methods,
     with_telemetry_context,
@@ -749,15 +755,16 @@ def _active_method_params(tracker: UsageMetricsTracker) -> frozenset[str]:
 
 
 class _DummyFS(fsspec.asyn.AsyncFileSystem):
-    """Fake async filesystem whose leaf calls record (thread, UA tokens, method)."""
+    """Fake async filesystem whose leaf calls record (thread, UA tokens, method, params)."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.seen, self.seen_telemetry = [], []
+        self.seen, self.seen_telemetry, self.seen_params = [], [], []
 
     def clear(self):
         self.seen.clear()
         self.seen_telemetry.clear()
+        self.seen_params.clear()
 
     def _record(self):
         tracker = manager_mod.default_usage_tracker
@@ -765,6 +772,19 @@ class _DummyFS(fsspec.asyn.AsyncFileSystem):
             (threading.get_ident(), tuple(tracker.get_tokens(USER_AGENT_DIMENSIONS)))
         )
         self.seen_telemetry.append(tracker.get_dimension(Dimension.METHOD))
+        self.seen_params.append(_active_method_params(tracker))
+
+    def _recorded(self):
+        out = [
+            (tokens, method, params)
+            for (_, tokens), method, params in zip(
+                self.seen, self.seen_telemetry, self.seen_params
+            )
+        ]
+        self.seen.clear()
+        self.seen_telemetry.clear()
+        self.seen_params.clear()
+        return out
 
     async def _ls(self, path, detail=False, prefix="", **kwargs):
         self._record()
@@ -775,6 +795,13 @@ class _DummyFS(fsspec.asyn.AsyncFileSystem):
     async def _info(self, path, **kwargs):
         self._record()
         return {"name": path, "size": 3, "type": "file"}
+
+    async def _find(
+        self, path, withdirs=False, detail=False, prefix="", maxdepth=None, **kwargs
+    ):
+        self._record()
+        item = {"name": "bucket/sub_file.txt", "size": 3, "type": "file"}
+        return {item["name"]: item} if detail else [item["name"]]
 
     async def _cat_file(self, path, start=None, end=None, **kwargs):
         self._record()
@@ -901,12 +928,13 @@ async def test_async_gen_detects_framework_only_once(detector):
     # 2. Native async _walk across 4 yielded directories -> detect() must run strictly ONCE
     fs.clear()
     detector.calls.clear()
-    assert len([item async for item in fs._walk("bucket")]) == 4
+    assert len([item async for item in fs._walk("bucket", detail=True)]) == 4
     assert len(detector.calls) == 1
 
-    # Every inner _ls call carried the framework and top-level walk method, and nothing leaked afterwards
+    # Every inner _ls call carried the framework, walk method, and params without leaking
     assert [tokens for _, tokens in fs.seen] == [("fw/pandas",)] * 4
     assert fs.seen_telemetry == ["walk"] * 4
+    assert fs.seen_params == [frozenset({"detail"})] * 4
     assert get_telemetry_context() == {}
 
 
@@ -1186,9 +1214,21 @@ async def test_native_async_entrypoints_and_unwrapped_private_helper(detector):
     fs.clear()
     await fs.open_async("bucket/a.txt")
 
-    assert fs.seen_telemetry == ["open_async"]
+    assert fs._recorded() == [(("fw/pandas",), "open_async", frozenset())]
 
-    fs.clear()
+    await fs.open_async("bucket/a.txt", cache_options={"maxblocks": 4})
+
+    assert fs._recorded() == [
+        (("fw/pandas",), "open_async", frozenset({"cache_options"}))
+    ]
+
+    await fs._cat("bucket/a.txt", True)
+
+    cat_rec = fs._recorded()
+    assert cat_rec and all(
+        rec == (("fw/pandas",), "cat", frozenset({"recursive"})) for rec in cat_rec
+    )
+
     await fs._list_objects("bucket")
 
     assert fs.seen_telemetry == [None]
@@ -1303,6 +1343,107 @@ def test_has_telemetry_context_and_wrapper_exception_cleanup(detector):
     with pytest.raises(NotImplementedError):
         GCSFile(real_fs, "bucket/f.txt", mode="invalid")
     assert get_telemetry_context() == {}
+
+
+def test_method_params_subclass_bound_wrappers_and_unhashable_callable(
+    detector, monkeypatch
+):
+    """Verify subclass parameter order, wrapped bound overrides, and unhashable callables."""
+
+    class _SubOrderFS(_DummyFS):
+        async def _find(self, path, maxdepth=None, withdirs=False, **kwargs):
+            self._record()
+            return ["bucket/sub_file.txt"]
+
+    sub_fs = _SubOrderFS(skip_instance_cache=True)
+    sub_fs.find("bucket", 2)
+    assert sub_fs._recorded() == [(("fw/pandas",), "find", frozenset())]
+
+    sub_fs.find("bucket", 2, True)
+    assert sub_fs._recorded() == [(("fw/pandas",), "find", frozenset({"withdirs"}))]
+
+    fs = _DummyFS(skip_instance_cache=True)
+    orig_bound_ls = fs._ls
+
+    @functools.wraps(orig_bound_ls)
+    async def wrapped_ls(*args, **kwargs):
+        return await orig_bound_ls(*args, **kwargs)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(fs, "_ls", wrapped_ls)
+        fs.ls("bucket", True)
+        assert fs._recorded() == [(("fw/pandas",), "ls", frozenset({"detail"}))]
+        fs.ls("bucket", False, "my_prefix")
+        assert fs._recorded() == [(("fw/pandas",), "ls", frozenset({"prefix"}))]
+
+    class _UnhashableLs:
+        __hash__ = None
+
+        async def __call__(self, path, detail=False, prefix="", **kwargs):
+            fs._record()
+            return [path]
+
+    with monkeypatch.context() as mp:
+        mp.setattr(fs, "_ls", _UnhashableLs())
+        fs.ls("bucket", True)
+        assert fs._recorded() == [(("fw/pandas",), "ls", frozenset({"detail"}))]
+
+    assert _positional_tracked_params(iter, "ls") == ((), frozenset(), "")
+
+    _cached_positional_spec.cache_clear()
+    fs_one = _DummyFS(skip_instance_cache=True)
+    fs_ref = weakref.ref(fs_one)
+    _positional_tracked_params(fs_one._ls, "ls")
+    first_info = _cached_positional_spec.cache_info()
+    fs_two = _DummyFS(skip_instance_cache=True)
+    _positional_tracked_params(fs_two._ls, "ls")
+    second_info = _cached_positional_spec.cache_info()
+    assert (second_info.misses, second_info.hits) == (
+        first_info.misses,
+        first_info.hits + 1,
+    )
+    del fs_one
+    gc.collect()
+    assert fs_ref() is None
+
+
+def test_method_params_ambiguous_bool_and_opt_out_skip(detector, monkeypatch):
+    """Verify falsy/None/untracked/raising flags are ignored and skipped cleanly when opted out."""
+
+    class _AmbiguousBool:
+        def __init__(self):
+            self.calls = 0
+
+        def __bool__(self):
+            self.calls += 1
+            raise ValueError("The truth value of an array is ambiguous")
+
+    fs = _DummyFS(skip_instance_cache=True)
+    fs.ls("bucket", detail=None, prefix=None)
+    assert fs._recorded() == [(("fw/pandas",), "ls", frozenset())]
+
+    fs.info("bucket/a.txt", detail=True, recursive=True)
+    assert fs._recorded() == [(("fw/pandas",), "info", frozenset())]
+
+    fs.glob("bucket/sub_*", withdirs=False)
+    assert fs._recorded() == [(("fw/pandas",), "glob", frozenset())]
+
+    fs.tree("bucket", prefix="  ")
+    tree_rec = fs._recorded()
+    assert tree_rec and all((m, p) == ("tree", frozenset()) for _, m, p in tree_rec)
+
+    amb, amb_opt_out = _AmbiguousBool(), _AmbiguousBool()
+
+    fs.ls("bucket", prefix=amb)
+    assert amb.calls == 1
+    assert fs._recorded() == [(("fw/pandas",), "ls", frozenset())]
+
+    with monkeypatch.context() as mp:
+        mp.setenv("DO_NOT_TRACK", "1")
+        fs.ls("bucket", prefix=amb_opt_out)
+
+    assert amb_opt_out.calls == 0
+    assert fs._recorded() == [((), None, frozenset())]
 
 
 def test_canonicalize_collect_tokens_and_context_mp_edge_cases():
@@ -1516,8 +1657,7 @@ def test_opted_out_fs_and_open_file_suppress_telemetry(
         with monkeypatch.context() as mp:
             mp.setenv("DO_NOT_TRACK", "TRUE")
             assert fs.ls("bucket") == ["bucket"]
-            assert [tokens for _, tokens in fs.seen] == [()]
-            assert fs.seen_telemetry == [None]
+            assert fs._recorded() == [((), None, frozenset())]
             assert detector.calls == []
             assert gke_env.calls == 0
 
@@ -1534,6 +1674,7 @@ def test_opted_out_fs_and_open_file_suppress_telemetry(
                 {
                     Dimension.FRAMEWORK.value: "ray",
                     Dimension.METHOD.value: "find",
+                    Dimension.METHOD_PARAMS.value: "detail",
                     "region": "us",
                 }
             ):
@@ -1541,7 +1682,9 @@ def test_opted_out_fs_and_open_file_suppress_telemetry(
                 opted_out_file._details = None
                 assert int(opted_out_file.info()["size"]) > 0
             assert len(spied_gcs_harness.seen) >= 3
-            assert all(entry == ((), None) for entry in spied_gcs_harness.seen)
+            assert all(
+                entry == ((), None, frozenset()) for entry in spied_gcs_harness.seen
+            )
             assert detector.calls == []
             assert gke_env.calls == 0
 
@@ -1552,9 +1695,10 @@ def test_opted_out_fs_and_open_file_suppress_telemetry(
         opted_out_file._details = None
         assert int(opted_out_file.info()["size"]) > 0
         assert len(spied_gcs_harness.seen) >= 2
-        assert spied_gcs_harness.seen[0] == (("env/gke",), "file_read")
+        assert spied_gcs_harness.seen[0] == (("env/gke",), "file_read", frozenset())
         assert all(
-            entry == (("env/gke",), "file_info") for entry in spied_gcs_harness.seen[1:]
+            entry == (("env/gke",), "file_info", frozenset())
+            for entry in spied_gcs_harness.seen[1:]
         )
         assert detector.calls == []
         assert gke_env.calls >= 2
@@ -1563,7 +1707,14 @@ def test_opted_out_fs_and_open_file_suppress_telemetry(
 
 @pytest.mark.parametrize(
     "outer_ctx",
-    [None, {Dimension.FRAMEWORK.value: "jax", Dimension.METHOD.value: "find"}],
+    [
+        None,
+        {
+            Dimension.FRAMEWORK.value: "jax",
+            Dimension.METHOD.value: "find",
+            Dimension.METHOD_PARAMS.value: "detail",
+        },
+    ],
     ids=["no_outer_ctx", "with_outer_ctx"],
 )
 @pytest.mark.asyncio
@@ -1602,6 +1753,7 @@ async def test_opted_out_generators_and_nested_calls_suppress_telemetry(
             assert fs.seen
             assert all(tokens == () for _, tokens in fs.seen)
             assert fs.seen_telemetry == [None] * len(fs.seen)
+            assert fs.seen_params == [frozenset()] * len(fs.seen)
             assert detector.calls == []
             assert gke_env.calls == 0
 
@@ -1613,9 +1765,15 @@ async def test_opted_out_generators_and_nested_calls_suppress_telemetry(
         assert get_telemetry_context() == expected_ctx
 
     expected_method = outer_ctx[Dimension.METHOD.value] if outer_ctx else "walk"
+    expected_params = (
+        frozenset({outer_ctx[Dimension.METHOD_PARAMS.value]})
+        if outer_ctx
+        else frozenset()
+    )
     expected_fw = outer_ctx[Dimension.FRAMEWORK.value] if outer_ctx else "pandas"
     assert [tokens for _, tokens in fs.seen] == [(f"fw/{expected_fw}", "env/gke")] * 6
     assert fs.seen_telemetry == [expected_method] * 6
+    assert fs.seen_params == [expected_params] * 6
     assert get_telemetry_context() == {}
 
 
@@ -1786,7 +1944,7 @@ def test_all_parent_methods_telemetry_coverage(
         expected_method if isinstance(expected_method, set) else {expected_method}
     )
     assert {
-        m for _, m in spied_gcs_harness.seen
+        m for _, m, _ in spied_gcs_harness.seen
     } == expected_set, (
         f"operation {name} recorded unexpected methods: {spied_gcs_harness.seen}"
     )
@@ -1886,6 +2044,7 @@ def zonal_fs_harness(monkeypatch):
                 op_name,
                 tuple(tracker.get_tokens(USER_AGENT_DIMENSIONS)),
                 tracker.get_dimension(Dimension.METHOD),
+                _active_method_params(tracker),
             )
         )
 
@@ -2006,7 +2165,7 @@ def test_zonal_file_lifecycle_detects_framework_once(monkeypatch, zonal_fs_harne
         ("_cat_file", fw, "file_read"),
         ("mrd_pool.close", fw, "file_close"),
     ]
-    assert [(op, m) for op, _, m in zonal_fs_harness.captured] == [
+    assert [(op, m) for op, _, m, _ in zonal_fs_harness.captured] == [
         ("layout", "open"),
         ("http_info", "open"),
         ("layout", "open"),
@@ -2035,6 +2194,8 @@ def test_zonal_file_lifecycle_detects_framework_once(monkeypatch, zonal_fs_harne
         GcsfsMethod.GCSFS_METHOD_FILE_CLOSE,
         GcsfsFramework.GCSFS_FRAMEWORK_PANDAS,
     )
+    assert zonal_fs_harness.captured
+    assert all(p == frozenset() for _, _, _, p in zonal_fs_harness.captured)
 
 
 def test_zonal_file_pickle_reopen_detects_worker_framework_and_honors_opt_out(
@@ -2043,19 +2204,8 @@ def test_zonal_file_pickle_reopen_detects_worker_framework_and_honors_opt_out(
     """Verify ZonalFile pickle reopen detects worker framework on plain-driver handles and honors worker opt-out."""
     fs, data = zonal_fs_harness.fs, zonal_fs_harness.data
 
-    class _GkeEnvDetector(BaseDetector):
-        name = Dimension.ENVIRONMENT
-        call_scoped = False
-
-        def __init__(self):
-            self.calls = 0
-
-        def detect(self):
-            self.calls += 1
-            return "gke"
-
     detector = _CallerThreadOnlyDetector(None)
-    gke_env = _GkeEnvDetector()
+    gke_env = _CountingEnvDetector()
     monkeypatch.setattr(
         manager_mod,
         "default_usage_tracker",
@@ -2076,11 +2226,11 @@ def test_zonal_file_pickle_reopen_detects_worker_framework_and_honors_opt_out(
         assert reopened.read(4) == data[:4]
     assert detector.thread_names == [threading.current_thread().name]
     assert zonal_fs_harness.captured == [
-        ("layout", ("fw/ray", "env/gke"), "open"),
-        ("http_info", ("fw/ray", "env/gke"), "open"),
-        ("layout", ("fw/ray", "env/gke"), "open"),
-        ("cat_file", ("fw/ray", "env/gke"), "file_read"),
-        ("mrd_close", ("fw/ray", "env/gke"), "file_close"),
+        ("layout", ("fw/ray", "env/gke"), "open", frozenset()),
+        ("http_info", ("fw/ray", "env/gke"), "open", frozenset()),
+        ("layout", ("fw/ray", "env/gke"), "open", frozenset()),
+        ("cat_file", ("fw/ray", "env/gke"), "file_read", frozenset()),
+        ("mrd_close", ("fw/ray", "env/gke"), "file_close", frozenset()),
     ]
 
     detector.thread_names.clear()
@@ -2094,7 +2244,10 @@ def test_zonal_file_pickle_reopen_detects_worker_framework_and_honors_opt_out(
             ):
                 assert reopened_opted_out.read(4) == data[:4]
     assert zonal_fs_harness.captured
-    assert all((ua, m) == ((), None) for _, ua, m in zonal_fs_harness.captured)
+    assert all(
+        (ua, m, p) == ((), None, frozenset())
+        for _, ua, m, p in zonal_fs_harness.captured
+    )
     assert detector.thread_names == []
     assert gke_env.calls == 0
     assert get_telemetry_context() == {}
@@ -2288,7 +2441,7 @@ def test_defer_close_propagates_caller_framework():
 
 @pytest.fixture
 def spied_gcs_harness(mock_gcs_harness, monkeypatch):
-    """Wrap mock_gcs_harness to capture active UA tokens and method per call."""
+    """Wrap mock_gcs_harness to capture active UA tokens, method, and params per call."""
     from gcsfs.core import GCSFileSystem as CoreGCSFileSystem
 
     orig_call = CoreGCSFileSystem._call
@@ -2300,6 +2453,7 @@ def spied_gcs_harness(mock_gcs_harness, monkeypatch):
             (
                 tuple(tracker.get_tokens(USER_AGENT_DIMENSIONS)),
                 tracker.get_dimension(Dimension.METHOD),
+                _active_method_params(tracker),
             )
         )
         res = await orig_call(self, method, path, *args, **kwargs)
@@ -2314,7 +2468,7 @@ def spied_gcs_harness(mock_gcs_harness, monkeypatch):
             return {"Range": f"bytes=0-{end_byte}"}, b""
         if isinstance(res, dict) and "size" in res:
             res.setdefault("metadata", {"k": "v"})
-        elif method == "GET" and "download" in str(path) and isinstance(res, tuple):
+        if method == "GET" and "download" in str(path) and isinstance(res, tuple):
             rng = (kwargs.get("headers") or {}).get("Range", "")
             if rng.startswith("bytes="):
                 s_str, e_str = rng.removeprefix("bytes=").split("-")
@@ -2330,6 +2484,7 @@ def spied_gcs_harness(mock_gcs_harness, monkeypatch):
     return types.SimpleNamespace(
         fs=mock_gcs_harness.fs,
         user_agents=mock_gcs_harness.user_agents,
+        feature_headers=mock_gcs_harness.feature_headers,
         seen=seen,
         clear=_clear,
     )
@@ -2347,7 +2502,7 @@ async def test_gcsfs_native_async_telemetry_propagation(spied_gcs_harness):
         assert len(spied_gcs_harness.user_agents) >= 2
         assert all("fw/jax" in ua for ua in spied_gcs_harness.user_agents)
         assert len(spied_gcs_harness.seen) >= 2
-        assert all(m == "cat" for _, m in spied_gcs_harness.seen)
+        assert all((m, p) == ("cat", frozenset()) for _, m, p in spied_gcs_harness.seen)
         assert get_telemetry_context() == {Dimension.FRAMEWORK.value: "jax"}
 
 
@@ -2371,6 +2526,90 @@ async def test_gcsfs_async_wrapper_super_resolution():
         out = await sub_fs._cat_ranges(["test-bucket/f1.txt"], [0], [5])
         assert out == [b"patched"]
         mock_super.assert_awaited_once()
+
+
+_REAL_FS_PARAM_CASES = [
+    pytest.param(
+        lambda fs, tmp_path: fs.ls("test-bucket", True, prefix="f"),
+        "ls",
+        frozenset({"detail", "prefix"}),
+        id="ls",
+    ),
+    pytest.param(
+        lambda fs, tmp_path: fs.listdir("test-bucket", False),
+        "listdir",
+        frozenset(),
+        id="listdir-pos-false",
+    ),
+    pytest.param(
+        lambda fs, tmp_path: fs.listdir("test-bucket", detail=False, prefix="f"),
+        "listdir",
+        frozenset({"prefix"}),
+        id="listdir-kw-prefix",
+    ),
+    pytest.param(
+        lambda fs, tmp_path: fs.find("test-bucket", True, True, "f"),
+        "find",
+        frozenset({"withdirs", "detail", "prefix"}),
+        id="find",
+    ),
+    pytest.param(
+        lambda fs, tmp_path: fs.rm("test-bucket/file.txt", recursive=True),
+        "rm",
+        frozenset({"recursive"}),
+        id="rm",
+    ),
+    pytest.param(
+        lambda fs, tmp_path: list(fs.walk("test-bucket", detail=True, prefix="f")),
+        "walk",
+        frozenset({"detail", "prefix"}),
+        id="walk",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "mock_gcs_harness", ["core", "extended"], indirect=True, ids=["core", "extended"]
+)
+@pytest.mark.parametrize(
+    "invoke, expected_method, expected_params",
+    _REAL_FS_PARAM_CASES,
+)
+def test_spied_gcsfs_method_params_propagation(
+    detector,
+    spied_gcs_harness,
+    tmp_path,
+    invoke,
+    expected_method,
+    expected_params,
+):
+    """Verify real GCSFileSystem and ExtendedGcsFileSystem methods track enabled params."""
+    fs = spied_gcs_harness.fs
+    fs.invalidate_cache()
+    spied_gcs_harness.clear()
+
+    invoke(fs, tmp_path)
+
+    assert spied_gcs_harness.seen, f"{expected_method} produced no outgoing calls"
+    assert all(
+        (ua, m, p) == (("fw/pandas",), expected_method, expected_params)
+        for ua, m, p in spied_gcs_harness.seen
+    ), f"{expected_method} recorded unexpected telemetry: {spied_gcs_harness.seen}"
+    expected_proto_method = getattr(
+        GcsfsMethod, f"GCSFS_METHOD_{expected_method.upper()}"
+    )
+    assert spied_gcs_harness.feature_headers
+    for raw_header in spied_gcs_harness.feature_headers:
+        decoded = _decode_features(raw_header)
+        assert decoded.method == expected_proto_method
+        assert decoded.framework == GcsfsFramework.GCSFS_FRAMEWORK_PANDAS
+        active_wire_params = frozenset(
+            name
+            for name in TRACKED_METHOD_PARAMS
+            if getattr(decoded.method_params, name)
+        )
+        assert active_wire_params == expected_params
+    assert get_telemetry_context() == {}
 
 
 @pytest.mark.parametrize(
@@ -2494,13 +2733,16 @@ def test_aliases_and_composite_methods_record_own_method_names(
     monkeypatch.setattr(fs, "_get_threshold_for_disk_reads", _zero_threshold)
     spied_gcs_harness.clear()
     fs.invalidate_cache()
-
     result = invoke(fs, tmp_path)
 
     assert check(result)
+    expected_params = (
+        frozenset({"detail"}) if expected_method == "listdir" else frozenset()
+    )
     assert len(spied_gcs_harness.seen) >= 1
     assert all(
-        (ua, m) == (("fw/pandas",), expected_method) for ua, m in spied_gcs_harness.seen
+        (ua, m, p) == (("fw/pandas",), expected_method, expected_params)
+        for ua, m, p in spied_gcs_harness.seen
     )
 
 
@@ -2514,14 +2756,14 @@ def test_file_handle_methods_record_distinct_file_tokens(detector, spied_gcs_har
     with fs.open("test-bucket/w_auto.bin", "wb", block_size=GCS_MIN_BLOCK_SIZE) as wf:
         assert spied_gcs_harness.seen == []
         wf.write(b"x" * GCS_MIN_BLOCK_SIZE)
-        overflow_methods = [m for _, m in spied_gcs_harness.seen]
+        overflow_methods = [m for _, m, _ in spied_gcs_harness.seen]
         spied_gcs_harness.clear()
 
         wf.write(b"mid")
         wf.flush()
         soft_flush_seen = list(spied_gcs_harness.seen)
         wf.flush(force=True)
-        force_flush_methods = [m for _, m in spied_gcs_harness.seen]
+        force_flush_methods = [m for _, m, _ in spied_gcs_harness.seen]
         spied_gcs_harness.clear()
 
     assert overflow_methods == ["file_write", "file_write"]
@@ -2542,7 +2784,7 @@ def test_file_handle_methods_record_distinct_file_tokens(detector, spied_gcs_har
     cf.commit()
     cf.closed = True
 
-    assert [m for _, m in spied_gcs_harness.seen] == ["file_commit"]
+    assert [m for _, m, _ in spied_gcs_harness.seen] == ["file_commit"]
 
     cf2 = fs.open(
         "test-bucket/w_discard.bin",
@@ -2555,27 +2797,27 @@ def test_file_handle_methods_record_distinct_file_tokens(detector, spied_gcs_har
 
     cf2.discard()
 
-    assert [m for _, m in spied_gcs_harness.seen] == ["file_discard"]
+    assert [m for _, m, _ in spied_gcs_harness.seen] == ["file_discard"]
 
     # AdaptiveReadaheadCache spawns PrefetchProducer._loop during __init__; reads after
     # open() returns must record `file_read`, while `details` and `info()` record `file_details` and `file_info`.
     spied_gcs_harness.clear()
     with fs.open("test-bucket/file.txt", "rb", cache_type="adaptive") as af:
-        open_methods = [m for _, m in spied_gcs_harness.seen]
+        open_methods = [m for _, m, _ in spied_gcs_harness.seen]
         spied_gcs_harness.clear()
 
         data = af.read(4)
-        read_methods = [m for _, m in spied_gcs_harness.seen]
+        read_methods = [m for _, m, _ in spied_gcs_harness.seen]
         spied_gcs_harness.clear()
 
         af._details = None
         direct_details = af.details
-        details_methods = [m for _, m in spied_gcs_harness.seen]
+        details_methods = [m for _, m, _ in spied_gcs_harness.seen]
         spied_gcs_harness.clear()
 
         af._details = None
         info_details = af.info()
-        info_methods = [m for _, m in spied_gcs_harness.seen]
+        info_methods = [m for _, m, _ in spied_gcs_harness.seen]
 
     assert open_methods and all(m == "open" for m in open_methods)
     assert len(data) == 4
@@ -2607,6 +2849,7 @@ def test_walk_generator_retains_outer_context_when_unprimed_or_primed(detector):
     assert len(remaining_steps) == 3
     assert [tokens for _, tokens in dummy_fs.seen] == [("fw/jax",)] * 7
     assert dummy_fs.seen_telemetry == ["find"] * 7
+    assert dummy_fs.seen_params == [frozenset()] * 7
     assert detector.calls == []
 
 
@@ -2639,10 +2882,14 @@ def test_gcsfile_pickle_reopen_detects_worker_framework_and_honors_opt_out(
 
         spied_gcs_harness.clear()
         assert reopened.read() == b"OCK"
-        assert spied_gcs_harness.seen == [(("fw/ray", "env/gke"), "file_read")]
+        assert spied_gcs_harness.seen == [
+            (("fw/ray", "env/gke"), "file_read", frozenset())
+        ]
         assert len(detector.calls) == 1
     assert open_seen
-    assert all(entry == (("fw/ray", "env/gke"), "open") for entry in open_seen)
+    assert all(
+        entry == (("fw/ray", "env/gke"), "open", frozenset()) for entry in open_seen
+    )
 
     detector.calls.clear()
     spied_gcs_harness.clear()
@@ -2655,7 +2902,7 @@ def test_gcsfile_pickle_reopen_detects_worker_framework_and_honors_opt_out(
             ):
                 assert reopened_opted_out.read() == b"OCK"
     assert spied_gcs_harness.seen
-    assert all(entry == ((), None) for entry in spied_gcs_harness.seen)
+    assert all(entry == ((), None, frozenset()) for entry in spied_gcs_harness.seen)
     assert detector.calls == []
     assert gke_env.calls == 0
     assert get_telemetry_context() == {}
@@ -2673,7 +2920,9 @@ def test_gcsfile_pickle_reopen_detects_worker_framework_and_honors_opt_out(
         assert reopened_enabled.caller_framework == "ray"
         spied_gcs_harness.clear()
         assert reopened_enabled.read() == b"MOCK"
-        assert spied_gcs_harness.seen == [(("fw/ray", "env/gke"), "file_read")]
+        assert spied_gcs_harness.seen == [
+            (("fw/ray", "env/gke"), "file_read", frozenset())
+        ]
 
 
 def test_unmapped_file_method_preserves_outer_or_unset_method(
@@ -3932,6 +4181,7 @@ def test_encode_features_wire_parity(monkeypatch):
     single_mp_dec = _decode_features(single_mp)
     mp = full_dec.method_params
     assert TRACKED_METHOD_PARAMS == telemetry_schema._METHOD_PARAM_FIELDS
+    assert set().union(*_METHOD_TRACKED_PARAMS.values()) == TRACKED_METHOD_PARAMS
     assert f"{Dimension.FRAMEWORK}" == "fw"
     assert str(Dimension.METHOD_PARAMS) == "mp"
     assert GRPC_METADATA_KEY == "x-goog-storage-gcsfs-features"
