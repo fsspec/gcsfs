@@ -4720,6 +4720,120 @@ class TestExtendedGcsFileSystemBucketLayout:
         flat_mv.assert_not_awaited()
         flat_rm.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_layout_fallback_is_not_an_answer(self, extended_gcsfs):
+        fs = extended_gcsfs
+        with self._layout_rpc(
+            fs, side_effect=api_exceptions.PermissionDenied("denied")
+        ):
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+        assert "b" not in fs._storage_layout_cache
+        assert "b" in fs._storage_layout_fallbacks
+
+    @pytest.mark.asyncio
+    async def test_layout_fallback_expires(self, extended_gcsfs):
+        fs = extended_gcsfs
+        now = 1000.0
+        with (
+            mock.patch(
+                "gcsfs.extended_gcsfs.time.monotonic", side_effect=lambda: now
+            ),
+            self._layout_rpc(
+                fs, side_effect=api_exceptions.PermissionDenied("denied")
+            ) as (_, rpc),
+        ):
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+            assert rpc.await_count == 1
+
+            now = 1299.0
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+            assert rpc.await_count == 1
+
+            now = 1300.1
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+            assert rpc.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_layout_fallback_renewed_not_stacked(self, extended_gcsfs):
+        fs = extended_gcsfs
+        now = 1000.0
+        with (
+            mock.patch(
+                "gcsfs.extended_gcsfs.time.monotonic", side_effect=lambda: now
+            ),
+            self._layout_rpc(
+                fs, side_effect=api_exceptions.PermissionDenied("denied")
+            ),
+        ):
+            await fs._lookup_bucket_layout("b")
+            now = 1300.1
+            await fs._lookup_bucket_layout("b")
+        assert fs._storage_layout_fallbacks == {"b": 1600.1}
+
+    @pytest.mark.asyncio
+    async def test_expired_fallback_replaced_by_answer(self, extended_gcsfs):
+        fs = extended_gcsfs
+        now = 1000.0
+        hns_response = storage_control_v2.StorageLayout(
+            location_type="region", hierarchical_namespace={"enabled": True}
+        )
+        with (
+            mock.patch(
+                "gcsfs.extended_gcsfs.time.monotonic", side_effect=lambda: now
+            ),
+            self._layout_rpc(
+                fs,
+                side_effect=[api_exceptions.PermissionDenied("denied"), hns_response],
+            ),
+        ):
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+            now = 1300.1
+            assert (
+                await fs._lookup_bucket_layout("b") == layouts.STANDARD_HIERARCHICAL
+            )
+        assert fs._storage_layout_cache["b"] == layouts.STANDARD_HIERARCHICAL
+        assert "b" not in fs._storage_layout_fallbacks
+
+    @pytest.mark.asyncio
+    async def test_answer_wins_over_stale_fallback(self, extended_gcsfs):
+        fs = extended_gcsfs
+        with (
+            mock.patch("gcsfs.extended_gcsfs.time.monotonic", return_value=1000.0),
+            self._layout_rpc(fs) as (_, rpc),
+        ):
+            fs._storage_layout_cache["b"] = layouts.STANDARD
+            fs._remember_fallback("b")
+            assert await fs._lookup_bucket_layout("b") == layouts.STANDARD
+        rpc.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("target", [None, "b", "gs://b/key"])
+    async def test_invalidate_drops_fallback(self, extended_gcsfs, target):
+        fs = extended_gcsfs
+        with self._layout_rpc(
+            fs, side_effect=api_exceptions.PermissionDenied("denied")
+        ):
+            await fs._lookup_bucket_layout("b")
+        assert "b" in fs._storage_layout_fallbacks
+        fs.invalidate_storage_layout_cache(target)
+        assert "b" not in fs._storage_layout_fallbacks
+
+    @pytest.mark.asyncio
+    async def test_layout_fallback_uses_monotonic_clock(self, extended_gcsfs):
+        fs = extended_gcsfs
+        wall = 1_700_000_000.0
+        with (
+            mock.patch("gcsfs.extended_gcsfs.time.monotonic", return_value=1000.0),
+            mock.patch("gcsfs.extended_gcsfs.time.time", side_effect=lambda: wall),
+            self._layout_rpc(
+                fs, side_effect=api_exceptions.PermissionDenied("denied")
+            ) as (_, rpc),
+        ):
+            await fs._lookup_bucket_layout("b")
+            wall += 10**6
+            await fs._lookup_bucket_layout("b")
+        rpc.assert_awaited_once()
+
     def test_invalidate_storage_layout_cache_single_bucket(self, extended_gcsfs):
         fs = extended_gcsfs
         fs._storage_layout_cache = {

@@ -3,6 +3,7 @@ import contextlib
 import heapq
 import logging
 import os
+import time
 import uuid
 import weakref
 from collections.abc import Iterable
@@ -60,6 +61,7 @@ logger = logging.getLogger("gcsfs")
 
 USER_AGENT = "python-gcsfs"
 STORAGE_CONTROL_RPC_TIMEOUT = 30.0
+_LAYOUT_FALLBACK_TTL = 300.0
 # Detect a storage control connection that dies silently in the middle of a
 # call (no FIN/RST), so the call reconnects instead of failing every later call
 # until the kernel gives up on the socket. GCS frontends answer 10 s pings with
@@ -445,6 +447,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if self.credential is None:
             self.credential = AnonymousCredentials()
         self._storage_layout_cache = {}
+        self._storage_layout_fallbacks = {}
         self._control_api_learned = False
         self._memmove_executor = ThreadPoolExecutor(
             max_workers=kwargs.get("memmove_max_workers", 8)
@@ -593,12 +596,32 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 logger.warning(f"Failed to close grpc_client: {e}")
             self._grpc_client = None
 
+    def _remember_layout(self, bucket: str, layout: BucketLayout) -> None:
+        self._storage_layout_cache[bucket] = layout
+        self._storage_layout_fallbacks.pop(bucket, None)
+
+    def _remember_fallback(self, bucket: str) -> None:
+        self._storage_layout_fallbacks[bucket] = (
+            time.monotonic() + _LAYOUT_FALLBACK_TTL
+        )
+
+    def _has_live_fallback(self, bucket: str) -> bool:
+        deadline = self._storage_layout_fallbacks.get(bucket)
+        if deadline is None:
+            return False
+        if time.monotonic() < deadline:
+            return True
+        self._storage_layout_fallbacks.pop(bucket, None)
+        return False
+
     async def _lookup_bucket_layout(self, bucket):
         if not bucket:
             # Root and bucket-level glob paths have no bucket to look up.
             return BucketLayout.UNKNOWN
         if bucket in self._storage_layout_cache:
             return self._storage_layout_cache[bucket]
+        if self._has_live_fallback(bucket):
+            return BucketLayout.UNKNOWN
         try:
             bucket_layout = await self._get_bucket_layout(bucket)
         except api_exceptions.NotFound:
@@ -606,7 +629,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             # caller's own request reports the missing bucket.
             logger.debug(f"Bucket {bucket} not found; using standard bucket behavior.")
             return BucketLayout.UNKNOWN
-        self._storage_layout_cache[bucket] = bucket_layout
+        if bucket_layout.storage_class != StorageClass.UNKNOWN:
+            self._remember_layout(bucket, bucket_layout)
         return bucket_layout
 
     # Not covered by mirror_gcs_methods (name doesn't follow the `_x` -> `x` convention).
@@ -617,12 +641,14 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         The layout of each bucket (zonal, hierarchical namespace, Rapid Cache
         Ultra) is looked up the first time this filesystem instance uses the
-        bucket. It stays cached until it is invalidated here, until this
-        instance creates or deletes the bucket, or until an appendable write
-        to a Rapid Cache Ultra bucket fails to open and the re-checked layout
-        no longer reports Rapid Cache Ultra (or finds the bucket missing).
-        Call this method after enabling or disabling Rapid Cache Ultra on a
-        bucket that this instance already used, so that later reads and
+        bucket. A real answer stays cached until it is invalidated here, until
+        this instance creates or deletes the bucket, or until an appendable
+        write to a Rapid Cache Ultra bucket fails to open and the re-checked
+        layout no longer reports Rapid Cache Ultra (or finds the bucket
+        missing). Fallbacks to standard bucket behavior are stored separately
+        and checked again after 5 minutes, or immediately after calling this
+        method. Call this method after enabling or disabling Rapid Cache Ultra
+        on a bucket that this instance already used, so that later reads and
         writes pick the matching data path. It only clears in-memory state and
         sends no request. Until the next lookup, ``mv_file`` and ``rm_file``
         update the listing cache by invalidating the affected directories
@@ -637,9 +663,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         if bucket is None:
             self._storage_layout_cache.clear()
+            self._storage_layout_fallbacks.clear()
             return
         bucket_name, _, _ = self.split_path(bucket)
         self._storage_layout_cache.pop(bucket_name, None)
+        self._storage_layout_fallbacks.pop(bucket_name, None)
 
     def _serves_control_api(self) -> bool | None:
         """Whether this instance's endpoint serves the Storage Control API.
@@ -716,9 +744,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             # the cause, e.g. "... does not have storage.objects.list access".
             logger.warning(
                 f"Could not determine the layout of bucket {bucket}: {e}. "
-                "Using standard bucket behavior for this filesystem instance; "
-                "invalidate_storage_layout_cache() checks again."
+                "Using standard bucket behavior; checking again in 5 minutes "
+                "or after invalidate_storage_layout_cache()."
             )
+            self._remember_fallback(bucket)
             return BucketLayout.UNKNOWN
         self._control_api_learned = True
         return _layout_from_response(response)
