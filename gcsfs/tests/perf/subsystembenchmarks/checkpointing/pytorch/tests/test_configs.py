@@ -3,7 +3,6 @@ import pathlib
 
 import pytest
 
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import configs
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.configs import (
     HostConfig,
     PyTorchCheckpointConfigurator,
@@ -15,10 +14,34 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.layout import La
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny import (
     make_params,
 )
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_load import (
+    configs as load_configs,
+)
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_load.configs import (
+    PyTorchLoadConfigurator,
+)
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_reshard import (
+    configs as reshard_configs,
+)
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_reshard.configs import (
+    PyTorchReshardConfigurator,
+)
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_save import (
+    configs as save_configs,
+)
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_save.configs import (
+    PyTorchSaveConfigurator,
+)
 
-CONFIG = configs.__file__
+CONFIG = load_configs.__file__
 LLAMA = "gs://gcs-aiml-huggingface-model-weights/Llama-3.1-8B"
 OLMOE = "gs://gcs-aiml-huggingface-model-weights/OLMoE-1B-7B-0924"
+
+GROUP_SPECS = {
+    "save": (PyTorchSaveConfigurator, save_configs.__file__),
+    "load": (PyTorchLoadConfigurator, load_configs.__file__),
+    "reshard": (PyTorchReshardConfigurator, reshard_configs.__file__),
+}
 
 EXPECTED_LOAD_IDS = [
     "load-llama_3_1_8b-fsdp-ws8-reg",
@@ -36,8 +59,9 @@ EXPECTED_LOAD_IDS = [
 ]
 
 
-def _cases():
-    return PyTorchCheckpointConfigurator(CONFIG).generate_cases()
+def _cases(group: str = "load"):
+    cls, path = GROUP_SPECS[group]
+    return cls(path).generate_cases()
 
 
 @pytest.fixture(autouse=True)
@@ -53,34 +77,63 @@ def _clean_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
-def test_row_count_and_framework():
-    cases = _cases()
-    assert len(cases) == 12
-    assert {c.scenario for c in cases} == {"checkpoint_read"}
-    assert {c.framework for c in cases} == {"pytorch"}
-    assert all(c.source is None and "-from-" not in c.name for c in cases)
+def test_group_row_counts_and_frameworks():
+    assert PyTorchCheckpointConfigurator.FRAMEWORK is None
+    for group, scenario in (
+        ("save", "checkpoint_write"),
+        ("load", "checkpoint_read"),
+        ("reshard", "checkpoint_read"),
+    ):
+        cases = _cases(group)
+        assert len(cases) == 12, group
+        assert {c.scenario for c in cases} == {scenario}
+        assert GROUP_SPECS[group][0].FRAMEWORK == f"pytorch_{group}"
+        assert {c.framework for c in cases} == {f"pytorch_{group}"}
+    reshard_axes = [c.sweep_axis for c in _cases("reshard")]
+    assert reshard_axes == ["baseline"] + ["reshard"] * 11
 
 
 def test_load_ids_unchanged(monkeypatch):
     monkeypatch.setenv("GCSFS_SUBSYSTEM_BUCKET_TYPE", "regional")
-    assert [c.name for c in _cases()] == EXPECTED_LOAD_IDS
+    assert [c.name for c in _cases("load")] == EXPECTED_LOAD_IDS
+
+
+def test_save_and_load_layouts_match():
+    assert [(c.model_id, c.target_layout()) for c in _cases("save")] == [
+        (c.model_id, c.target_layout()) for c in _cases("load")
+    ]
+
+
+def test_reshard_rows_all_set_source_and_load_rows_never_do():
+    for c in _cases("reshard"):
+        assert c.source is not None
+        assert c.source_layout() != c.target_layout()
+        assert "-from-" in c.name
+    for c in (*_cases("load"), *_cases("save")):
+        assert c.source is None
+        assert "-from-" not in c.name
 
 
 def test_ws16_rows_skip_on_8_rank_host():
-    params = case_params(PyTorchCheckpointConfigurator, CONFIG, host=HostConfig(1, 8))
-    assert len(params) == 12
-    assert all(p.id == p.values[0].name for p in params)
-    skipped = {}
-    for param in params:
-        if param.marks:
-            (mark,) = param.marks
-            assert mark.mark.name == "skip"
-            skipped[param.id] = mark.mark.kwargs["reason"]
-    assert skipped == {
-        "load-llama_3_1_8b-pp-hsdp-tp-pp2dpr2dp2tp2-ws16-reg": (
-            "needs 16 ranks, run has 1x8"
-        )
+    expected_skipped = {
+        "save": "save-llama_3_1_8b-pp-hsdp-tp-pp2dpr2dp2tp2-ws16-reg",
+        "load": "load-llama_3_1_8b-pp-hsdp-tp-pp2dpr2dp2tp2-ws16-reg",
+        "reshard": (
+            "load-llama_3_1_8b-hsdp-tp-dpr2dp4tp2-ws16"
+            "-from-hsdp-tp-dpr2dp2tp2-ws8-reg"
+        ),
     }
+    for group, expected_id in expected_skipped.items():
+        params = case_params(*GROUP_SPECS[group], host=HostConfig(1, 8))
+        assert len(params) == 12
+        assert all(p.id == p.values[0].name for p in params)
+        skipped = {}
+        for param in params:
+            if param.marks:
+                (mark,) = param.marks
+                assert mark.mark.name == "skip"
+                skipped[param.id] = mark.mark.kwargs["reason"]
+        assert skipped == {expected_id: "needs 16 ranks, run has 1x8"}, group
 
 
 def test_case_params_default_host_follows_cuda_device_count(monkeypatch):
@@ -95,18 +148,19 @@ def test_case_params_default_host_follows_cuda_device_count(monkeypatch):
 
     monkeypatch.setenv("GCSFS_SUBSYSTEM_DEVICE", "cuda")
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 4)
-    default_params = case_params(PyTorchCheckpointConfigurator, CONFIG)
+    default_params = case_params(PyTorchLoadConfigurator, CONFIG)
     assert len(default_params) == 12
     assert all(p.marks for p in default_params)
 
 
+@pytest.mark.parametrize("group", ["save", "load", "reshard"])
 @pytest.mark.parametrize("model_id", [OLMOE, "gs://b/Llama-3.1-70B"])
-def test_model_id_override_skips_rows_that_pin_model_id(monkeypatch, model_id):
+def test_model_id_override_skips_rows_that_pin_model_id(monkeypatch, group, model_id):
     # The OLMoE rows pin their own model_id. With --model-id they are skipped,
     # so the override means "exactly this model" (and OLMoE as the override
     # does not collide with the OLMoE fsdp row on the same benchmark id).
     monkeypatch.setenv("GCSFS_SUBSYSTEM_MODEL_ID", model_id)
-    cases = _cases()
+    cases = _cases(group)
     assert len(cases) == 10
     assert {c.model_id for c in cases} == {model_id}
     assert not any("olmoe" in c.name for c in cases if model_id != OLMOE)
@@ -201,7 +255,7 @@ def test_validate_case_rejects_setup_keys(tmp_path, setup_world_size):
         f"    setup_world_size: {setup_world_size}",
     )
     with pytest.raises(ValueError, match="not setup_"):
-        PyTorchCheckpointConfigurator(config).generate_cases()
+        PyTorchLoadConfigurator(config).generate_cases()
 
 
 def test_expert_parallel_size_must_match_dp(tmp_path):
@@ -212,7 +266,7 @@ def test_expert_parallel_size_must_match_dp(tmp_path):
         model_id=OLMOE,
     )
     with pytest.raises(ValueError, match="expert_parallel_size"):
-        PyTorchCheckpointConfigurator(config).generate_cases()
+        PyTorchLoadConfigurator(config).generate_cases()
 
 
 def test_parameters_layouts_max_world_size_and_extra_columns(monkeypatch):
@@ -320,23 +374,37 @@ def test_columns_in_schema():
 
     for field in fields:
         assert "mode" not in field, f"unexpected explicit mode on {field['name']}"
+        assert "Populated by checkpointing/pytorch." not in field["description"]
+        assert "for checkpointing/pytorch." not in field["description"]
 
-    populated_by = "Populated by checkpointing/pytorch."
-    for col, col_type in {
-        "device": "STRING",
-        "source_strategy": "STRING",
-        "setup_data_parallel_replicate_size": "INTEGER",
-        "setup_pipeline_parallel_size": "INTEGER",
-        "setup_expert_parallel_size": "INTEGER",
-        "dcp_read_items_per_rank_max": "INTEGER",
-    }.items():
+    impl_desc = fields_by_name["workload_implementation"]["description"]
+    for group_impl in ("pytorch_save", "pytorch_load", "pytorch_reshard"):
+        assert group_impl in impl_desc
+
+    all_groups = "Populated by checkpointing/pytorch_{save,load,reshard}."
+    read_groups = "Populated by checkpointing/pytorch_{load,reshard}."
+    write_group = "Populated by checkpointing/pytorch_save."
+    expected_columns = {
+        "device": ("STRING", all_groups),
+        "source_strategy": ("STRING", all_groups),
+        "setup_data_parallel_replicate_size": ("INTEGER", all_groups),
+        "setup_pipeline_parallel_size": ("INTEGER", all_groups),
+        "setup_expert_parallel_size": ("INTEGER", all_groups),
+        "dcp_read_items_per_rank_max": ("INTEGER", read_groups),
+        "dcp_read_bytes_fetched_total": ("INTEGER", read_groups),
+        "dcp_read_bytes_fetched_per_rank_max": ("INTEGER", read_groups),
+        "dcp_read_amplification_planned": ("FLOAT", read_groups),
+        "dcp_write_bytes_per_rank_max": ("INTEGER", write_group),
+    }
+    for col, (col_type, populated_by) in expected_columns.items():
         assert col in fields_by_name, f"column {col} missing from schema"
         assert fields_by_name[col]["type"] == col_type
         assert populated_by in fields_by_name[col]["description"], col
 
-    for c in _cases():
-        for col in c.extra_columns():
-            assert col in fields_by_name, f"param column {col} missing from schema"
+    for group in GROUP_SPECS:
+        for c in _cases(group):
+            for col in c.extra_columns():
+                assert col in fields_by_name, f"param column {col} missing from schema"
 
 
 def test_placement_skip_reason_cuda_capacity():
@@ -356,3 +424,51 @@ def test_placement_skip_reason_cuda_capacity():
         "needs 8 ranks, run has 1x4"
     )
     assert placement_skip_reason(reshard, HostConfig(1, 8)) is None
+
+
+def _collect(suite_dir, flag, env):
+    import subprocess
+    import sys
+
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            suite_dir,
+            "--collect-only",
+            "-q",
+            "--color=no",
+            flag,
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_group_pytest_collection_honors_benchmark_flags():
+    import os
+
+    pytest.importorskip("torch")
+    checkpointing_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    env = os.environ.copy()
+    env["GCSFS_SUBSYSTEM_BUCKET_PREFIX"] = "test-prefix"
+    env["GCSFS_SUBSYSTEM_DEVICE"] = "cpu"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+    for group_name in ("pytorch_save", "pytorch_load", "pytorch_reshard"):
+        suite_dir = os.path.join(checkpointing_dir, group_name)
+        bench = _collect(suite_dir, "--run-benchmarks", env)
+        assert bench.returncode == 0, (
+            f"{group_name} collected 0 items under --run-benchmarks:\n"
+            f"{bench.stdout}\n{bench.stderr}"
+        )
+        assert "12 tests collected" in bench.stdout
+        infra = _collect(suite_dir, "--run-benchmarks-infra", env)
+        assert infra.returncode == 5, (
+            f"{group_name} leaked live benchmark items under --run-benchmarks-infra:\n"
+            f"{infra.stdout}\n{infra.stderr}"
+        )
