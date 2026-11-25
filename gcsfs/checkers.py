@@ -5,6 +5,11 @@ from hashlib import md5
 from .retry import ChecksumError
 
 try:
+    import google_crc32c
+except ImportError:
+    google_crc32c = None
+
+try:
     import crcmod
 except ImportError:
     crcmod = None
@@ -35,7 +40,11 @@ class MD5Checker(ConsistencyChecker):
         self.md.update(data)
 
     def validate_json_response(self, gcs_object):
-        mdback = gcs_object["md5Hash"]
+        mdback = gcs_object.get("md5Hash")
+        if not mdback:
+            raise NotImplementedError(
+                "No md5 checksum available to do consistency check."
+            )
         if b64encode(self.md.digest()) != mdback.encode():
             raise ChecksumError("MD5 checksum failed")
 
@@ -78,16 +87,31 @@ class SizeChecker(ConsistencyChecker):
 
 class Crc32cChecker(ConsistencyChecker):
     def __init__(self):
-        self.crc32c = crcmod.Crc(0x11EDC6F41, initCrc=0, xorOut=0xFFFFFFFF)
+        if google_crc32c is not None:
+            self.crc32c = google_crc32c.Checksum()
+        elif crcmod is not None:
+            self.crc32c = crcmod.Crc(0x11EDC6F41, initCrc=0, xorOut=0xFFFFFFFF)
+        else:
+            raise ImportError(
+                "Either `google-crc32c` or `crcmod` is required for "
+                "`consistency='crc32c'`. This can be installed with "
+                "`pip install gcsfs[crc]`"
+            )
 
     def update(self, data: bytes):
+        if not isinstance(data, bytes):
+            data = bytes(data)
         self.crc32c.update(data)
 
     def validate_json_response(self, gcs_object):
         # docs for gcs_object: https://cloud.google.com/storage/docs/json_api/v1/objects
+        expected = gcs_object.get("crc32c")
+        if not expected:
+            raise NotImplementedError(
+                "No crc32c checksum available to do consistency check."
+            )
         digest = self.crc32c.digest()
         digest_b64 = base64.b64encode(digest).decode()
-        expected = gcs_object["crc32c"]
 
         if digest_b64 != expected:
             raise ChecksumError(f'Expected "{expected}". Got "{digest_b64}"')
@@ -111,12 +135,12 @@ def get_consistency_checker(consistency: str | None) -> ConsistencyChecker:
     elif consistency == "md5":
         return MD5Checker()
     elif consistency == "crc32c":
-        if crcmod is None:
+        if google_crc32c is None and crcmod is None:
             raise ImportError(
-                "The python package `crcmod` is required for `consistency='crc32c'`. "
-                "This can be installed with `pip install gcsfs[crc]`"
+                "Either `google-crc32c` or `crcmod` is required for "
+                "`consistency='crc32c'`. This can be installed with "
+                "`pip install gcsfs[crc]`"
             )
-        else:
-            return Crc32cChecker()
+        return Crc32cChecker()
     else:
         return ConsistencyChecker()
