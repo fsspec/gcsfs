@@ -177,8 +177,7 @@ def test_requires_source_rule():
 
 
 def _write_config(tmp_path, baseline: str, model_id: str = LLAMA) -> str:
-    (tmp_path / "configs.yaml").write_text(
-        f"""
+    (tmp_path / "configs.yaml").write_text(f"""
 common:
   rounds: 1
   model_id: "{model_id}"
@@ -187,8 +186,7 @@ common:
 scenarios:
   - name: "checkpoint_read"
     scenario: "checkpoint_read"
-"""
-    )
+""")
     return str(tmp_path / "configs.py")
 
 
