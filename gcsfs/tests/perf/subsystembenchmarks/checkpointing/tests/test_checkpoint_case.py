@@ -1,7 +1,11 @@
 import contextlib
+import multiprocessing as mp
 import os
+import signal
+import time
 
 import fsspec
+import psutil
 import pytest
 
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing import checkpoint_case
@@ -484,3 +488,82 @@ def test_rcu_z_checkpoint_saves_are_checked_after_the_window(rcu_case):
         "monitor_exit",
         ("check", _RCU_PREFIX, "standard_rcu_z"),
     ]
+
+
+def _write_pid_atomic(pid_file):
+    tmp = f"{pid_file}.tmp"
+    with open(tmp, "w") as f:
+        f.write(str(os.getpid()))
+    os.replace(tmp, pid_file)
+
+
+def _sleep_and_record(pid_file):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    _write_pid_atomic(pid_file)
+    time.sleep(600)
+
+
+class _HangingSetupDriver(_FakeReadDriver):
+    def __init__(self, pid_dir):
+        super().__init__()
+        self._pid_dir = str(pid_dir)
+
+    def setup(self, prefix, params):
+        _write_pid_atomic(os.path.join(self._pid_dir, "setup"))
+        child = mp.get_context("spawn").Process(
+            target=_sleep_and_record,
+            args=(os.path.join(self._pid_dir, "child"),),
+        )
+        child.start()
+        child.join()
+
+
+class _Timeout(BaseException):
+    pass
+
+
+def test_setup_process_tree_is_reaped_when_interrupted(tmp_path, monkeypatch):
+    monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
+    orig_terminate = checkpoint_case._terminate_process_tree
+    monkeypatch.setattr(
+        checkpoint_case,
+        "_terminate_process_tree",
+        lambda pid, grace_s=0.3, **kw: orig_terminate(pid, grace_s=grace_s, **kw),
+    )
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    params = _params(scenario="checkpoint_read")
+
+    def on_alarm(signum, frame):
+        if (pid_dir / "setup").exists() and (pid_dir / "child").exists():
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            raise _Timeout()
+
+    old = signal.signal(signal.SIGALRM, on_alarm)
+    signal.setitimer(signal.ITIMER_REAL, 0.2, 0.2)
+    try:
+        try:
+            with pytest.raises(_Timeout):
+                checkpoint_case.run_checkpoint_case(
+                    _Bench(),
+                    _Monitor(),
+                    params,
+                    _HangingSetupDriver(pid_dir),
+                    bucket_ctx=_local_bucket_ctx(tmp_path / "bucket"),
+                )
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old)
+
+        pids = [int((pid_dir / n).read_text()) for n in ("setup", "child")]
+        assert not any(
+            psutil.pid_exists(p) and psutil.Process(p).status() != psutil.STATUS_ZOMBIE
+            for p in pids
+        )
+        assert mp.active_children() == []
+    finally:
+        for n in ("child", "setup"):
+            pfile = pid_dir / n
+            if pfile.exists():
+                with contextlib.suppress(ProcessLookupError, ValueError):
+                    os.kill(int(pfile.read_text()), signal.SIGKILL)

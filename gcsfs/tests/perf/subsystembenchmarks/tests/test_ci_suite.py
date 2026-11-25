@@ -564,3 +564,79 @@ def test_upload_results_keeps_ci_artifacts_out_of_bigquery_ingestion(
     assert re.fullmatch(
         rf"gs://b-run-results/{root}/branch=feat-x/\d{{8}}/build-1/", dest
     )
+
+
+def test_cloudbuild_default_model_id_is_empty():
+    subs = yaml.safe_load(_cloudbuild_yaml())["substitutions"]
+    assert subs["_MODEL_ID"] == ""
+
+
+def test_setup_stages_model_for_legacy_checkpoint_groups_only(tmp_path):
+    setup_path = os.path.join(
+        _REPO_ROOT, "cloudbuild", "subsystembenchmarks", "scripts", "setup.sh"
+    )
+    subprocess.run(["bash", "-n", setup_path], check=True)
+    with open(setup_path) as f:
+        setup_text = f.read()
+
+    stage_block = setup_text.split(
+        'pip install -r "gcsfs/tests/perf/subsystembenchmarks/$GROUP/requirements.txt" >/dev/null\n',
+        1,
+    )[1].split('\nread -r -a REQUIREMENT_SPECS <<< "$REQUIREMENTS_OVERRIDE"', 1)[0]
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "gcloud_calls"
+    (bin_dir / "curl").write_text(
+        "#!/bin/sh\ntouch google-cloud-cli-linux-x86_64.tar.gz\n"
+    )
+    (bin_dir / "curl").chmod(0o755)
+    (bin_dir / "tar").write_text(
+        "#!/bin/sh\n"
+        "mkdir -p google-cloud-sdk/bin\n"
+        f'printf "#!/bin/sh\\necho \\"\\$@\\" >> {calls}\\n" > google-cloud-sdk/bin/gcloud\n'
+        "chmod 0755 google-cloud-sdk/bin/gcloud\n"
+    )
+    (bin_dir / "tar").chmod(0o755)
+
+    py_bin = os.path.dirname(sys.executable)
+    env_path = f"{bin_dir}:{py_bin}:{os.environ['PATH']}"
+
+    def run_stage(group: str, model_id: str) -> tuple[list[str], str]:
+        calls.write_text("")
+        fake_tmp = tmp_path / f"tmp-{len(list(tmp_path.iterdir()))}"
+        fake_tmp.mkdir()
+        script = (
+            "set -euo pipefail\n"
+            + stage_block.replace("/tmp", str(fake_tmp))
+            + '\nprintf "FINAL_MODEL_ID=%s\\n" "${MODEL_ID:-}"\n'
+        )
+        proc = subprocess.run(
+            ["bash", "-c", script],
+            cwd=_REPO_ROOT,
+            env={"PATH": env_path, "GROUP": group, "MODEL_ID": model_id},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        final_mid = re.findall(r"^FINAL_MODEL_ID=(.*)$", proc.stdout, re.M)[-1]
+        return calls.read_text().splitlines(), final_mid
+
+    # 1. Legacy checkpointing group with empty MODEL_ID stages common.model_id without mutating MODEL_ID.
+    pl_calls, pl_mid = run_stage("checkpointing/pytorch_lightning", "")
+    assert len(pl_calls) == 1
+    assert pl_calls[0].startswith(
+        "storage cp -r gs://huggingface-model-weights/Llama-3.1-8B "
+    )
+    assert pl_mid == ""
+
+    # 2. Legacy checkpointing group with explicit MODEL_ID override stages the override.
+    ray_calls, ray_mid = run_stage("checkpointing/ray_pytorch", "gs://custom/model/")
+    assert len(ray_calls) == 1
+    assert ray_calls[0].startswith("storage cp -r gs://custom/model ")
+    assert ray_mid == "gs://custom/model/"
+
+    # 3. DCP checkpointing groups stage via gcsfs in Python and never install standalone gcloud.
+    for dcp_group in ("checkpointing/pytorch", "checkpointing/pytorch_load"):
+        dcp_calls, _ = run_stage(dcp_group, "gs://custom/model")
+        assert dcp_calls == []

@@ -22,6 +22,10 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
     CheckpointDriver,
     CheckpointResult,
 )
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.device import (
+    DEVICE_ENV,
+    run_device,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.model import (
     build_model,
     build_optimizer,
@@ -64,7 +68,7 @@ class _RecordingLoadPlanner(DefaultLoadPlanner):
 
 
 def _build(params, mesh, seed):
-    model = parallelize(build_model(params), mesh, params)
+    model = parallelize(build_model(params), mesh, params.target_layout())
     materialize(model, seed)
     return model, build_optimizer(model, seed)
 
@@ -78,7 +82,7 @@ def _rank_setup_checkpoint(rank, world_size, port, prefix, params, q):
     setup_distributed_env(rank, world_size, port)
     try:
         torch.set_num_threads(max(1, (os.cpu_count() or 1) // world_size))
-        model, optim = _build(params, build_mesh(params), _SETUP_SEED)
+        model, optim = _build(params, build_mesh(params.target_layout()), _SETUP_SEED)
         state = get_fqn_state_dict(model, optim)
         dcp.save(state, storage_writer=FsspecWriter(prefix))
 
@@ -94,7 +98,7 @@ def _rank_load(rank, world_size, port, prefix, params, q, *, stats_dir):
     setup_distributed_env(rank, world_size, port)
     try:
         torch.set_num_threads(max(1, (os.cpu_count() or 1) // world_size))
-        model, optim = _build(params, build_mesh(params), _RUN_SEED)
+        model, optim = _build(params, build_mesh(params.target_layout()), _RUN_SEED)
         state = get_fqn_state_dict(model, optim)
         bytes_expected = expected_bytes_requested(state)
         # Also builds the gcsfs instance and fetches a token before the timed rounds.
@@ -137,11 +141,22 @@ def _rank_load(rank, world_size, port, prefix, params, q, *, stats_dir):
         dist.destroy_process_group()
 
 
+def _require_cpu_driver() -> None:
+    device = run_device()
+    if device != "cpu":
+        raise RuntimeError(
+            "PyTorchCheckpointReadDriver only supports "
+            f"{DEVICE_ENV}=cpu, got {device!r}"
+        )
+
+
 class PyTorchCheckpointReadDriver(CheckpointDriver):
     def setup(self, prefix, params):
+        _require_cpu_driver()
         run_split(prefix, params, _rank_setup_checkpoint)
 
     def run(self, prefix, params):
+        _require_cpu_driver()
         with tempfile.TemporaryDirectory() as stats_dir:
             ranks = spawn_split(
                 prefix, params, functools.partial(_rank_load, stats_dir=stats_dir)

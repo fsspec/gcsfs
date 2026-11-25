@@ -1,8 +1,24 @@
 import os
 import socket
+import time
 
 # Cap on spawned ranks to prevent OOM on test-c4-highmem.
 MAX_RANKS = 16
+MIN_OPEN_FILES = 65536
+
+
+def _ensure_open_file_limit(min_nofile: int = MIN_OPEN_FILES) -> None:
+    """Raises soft RLIMIT_NOFILE toward hard limit for multi-rank shared-tensor spawns."""
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = min_nofile if hard == resource.RLIM_INFINITY else min(hard, min_nofile)
+    if soft < target:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+        except (OSError, ValueError):
+            pass
+
 
 # Concurrent benchmark processes on one VM (cloudbuild/subsystembenchmarks/scripts/run-ci.sh)
 # each get a disjoint block of ports via GCSFS_SUBSYSTEM_PORT_BASE. Without it, an
@@ -48,24 +64,68 @@ def run_split(prefix, params, target_fn, world_size_override=None) -> list[float
     return ranks.durations
 
 
+def _terminate(context, grace_s: float = 10.0) -> None:
+    """Terminates worker processes on ``context``, escalating to SIGKILL."""
+    procs = []
+    for proc in getattr(context, "processes", None) or ():
+        try:
+            proc.terminate()
+        except (OSError, ValueError):
+            continue
+        procs.append(proc)
+    deadline = time.monotonic() + grace_s
+    for proc in procs:
+        proc.join(max(0.0, deadline - time.monotonic()))
+
+    survivors = []
+    for proc in procs:
+        if proc.is_alive():
+            try:
+                proc.kill()
+            except (OSError, ValueError):
+                continue
+            survivors.append(proc)
+    if survivors:
+        kill_deadline = time.monotonic() + grace_s
+        for proc in survivors:
+            proc.join(max(0.0, kill_deadline - time.monotonic()))
+
+
 class SpawnedRanks:
     """Ranks spawned by spawn_split.
 
     ``durations`` is reduced as soon as every rank has reported, so a caller
     can stop timing or monitoring while the ranks do post-run work (such as
     verifying loaded bytes). ``join`` waits for the ranks to exit and re-raises
-    a rank failure.
+    a rank failure; ``close`` terminates any remaining workers and shuts down
+    the SyncManager idempotently.
     """
 
     def __init__(self, durations, context, manager):
         self.durations = durations
         self._context = context
         self._manager = manager
+        self._closed = False
 
     def join(self) -> None:
+        if self._closed:
+            return
         try:
             while not self._context.join():
                 pass
+        except BaseException:
+            _terminate(self._context)
+            raise
+        finally:
+            self._closed = True
+            self._manager.shutdown()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            _terminate(self._context)
         finally:
             self._manager.shutdown()
 
@@ -76,6 +136,7 @@ def spawn_split(prefix, params, target_fn, world_size_override=None) -> SpawnedR
 
     import torch.multiprocessing as mp
 
+    _ensure_open_file_limit()
     ctx = mp.get_context("spawn")
     world_size = params.world_size
     if world_size_override is not None:
@@ -84,6 +145,7 @@ def spawn_split(prefix, params, target_fn, world_size_override=None) -> SpawnedR
     port = find_free_port()
 
     manager = ctx.Manager()
+    context = None
     try:
         q = manager.Queue()
         context = mp.spawn(
@@ -101,7 +163,10 @@ def spawn_split(prefix, params, target_fn, world_size_override=None) -> SpawnedR
                 if context.join(timeout=0):
                     raise RuntimeError("ranks exited without reporting results")
     except BaseException:
-        manager.shutdown()
+        try:
+            _terminate(context)
+        finally:
+            manager.shutdown()
         raise
 
     return SpawnedRanks(_reduce(results, world_size, params.rounds), context, manager)
@@ -120,10 +185,18 @@ def _reduce(results, world_size, rounds) -> list[float]:
     return durations
 
 
-def setup_distributed_env(rank: int, world_size: int, port: int) -> None:
-    """Initializes the CPU distributed environment (gloo) for a multiprocess worker."""
+def setup_distributed_env(
+    rank: int, world_size: int, port: int, device: str = "cpu"
+) -> None:
+    """Initializes the distributed environment for a multiprocess worker."""
+    import torch
     import torch.distributed as dist
 
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.device import (
+        backend_for,
+    )
+
+    backend = backend_for(device)
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(port)
     os.environ["GLOO_SOCKET_IFNAME"] = "lo"
@@ -131,4 +204,6 @@ def setup_distributed_env(rank: int, world_size: int, port: int) -> None:
     os.environ["RANK"] = str(rank)
     os.environ["LOCAL_RANK"] = str(rank)
 
-    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+    if device == "cuda":
+        torch.cuda.set_device(rank)
+    dist.init_process_group(backend, rank=rank, world_size=world_size)

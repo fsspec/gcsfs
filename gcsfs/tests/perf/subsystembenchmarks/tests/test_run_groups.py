@@ -39,6 +39,22 @@ def test_setup_environment_exports_sweep_axes(monkeypatch):
     assert os.environ["GCSFS_SUBSYSTEM_SWEEP_AXES"] == "workers prefetch"
 
 
+def test_setup_environment_clears_stale_model_id_when_flag_empty(monkeypatch):
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_MODEL_ID", "gs://stale/model")
+    explicit = run.parse_args(
+        ["--group=dataloading/huggingface_datasets", "--model-id=gs://custom/model"]
+        + _REQUIRED
+    )
+    run._setup_environment(explicit)
+    assert os.environ["GCSFS_SUBSYSTEM_MODEL_ID"] == "gs://custom/model"
+
+    empty = run.parse_args(
+        ["--group=dataloading/huggingface_datasets", "--model-id="] + _REQUIRED
+    )
+    run._setup_environment(empty)
+    assert "GCSFS_SUBSYSTEM_MODEL_ID" not in os.environ
+
+
 def test_parse_args_rejects_negative_amplification_wait(capsys):
     with pytest.raises(SystemExit):
         run.parse_args(
@@ -297,10 +313,32 @@ _RUN_ENV_KEYS = (
     "GCSFS_SUBSYSTEM_ZONE",
     "GCSFS_SUBSYSTEM_SWEEP_AXES",
     "GCSFS_SUBSYSTEM_MODEL_ID",
+    "GCSFS_SUBSYSTEM_DEVICE",
     "GCSFS_SUBSYSTEM_GROUP",
     "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT",
     "STORAGE_EMULATOR_HOST",
 )
+
+
+def test_parse_args_device_sets_env(monkeypatch, capsys):
+    for key in (*_RUN_ENV_KEYS, "FSSPEC_GCS_RCU_RAPID_WRITE"):
+        monkeypatch.delenv(key, raising=False)
+
+    default_args = run.parse_args(["--group=checkpointing/pytorch"] + _REQUIRED)
+    assert default_args.device == "cpu"
+    run._setup_environment(default_args)
+    assert os.environ["GCSFS_SUBSYSTEM_DEVICE"] == "cpu"
+
+    cuda_args = run.parse_args(
+        ["--group=checkpointing/pytorch", "--device=cuda"] + _REQUIRED
+    )
+    assert cuda_args.device == "cuda"
+    run._setup_environment(cuda_args)
+    assert os.environ["GCSFS_SUBSYSTEM_DEVICE"] == "cuda"
+
+    with pytest.raises(SystemExit):
+        run.parse_args(["--group=checkpointing/pytorch", "--device=tpu"] + _REQUIRED)
+    assert "--device" in capsys.readouterr().err
 
 
 def _run_main_capturing_results_dir(monkeypatch, extra_args):

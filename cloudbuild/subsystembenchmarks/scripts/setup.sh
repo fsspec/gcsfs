@@ -18,30 +18,39 @@ fi
 pip install -e . >/dev/null
 pip install -r "gcsfs/tests/perf/subsystembenchmarks/$GROUP/requirements.txt" >/dev/null
 
-if [[ "${GROUP}" == checkpointing/* ]] && [[ "${MODEL_ID:-}" == gs://* ]]; then
-  echo "MODEL_ID is a GCS path: $MODEL_ID"
-  DIR_NAME=$(basename "${MODEL_ID%/}")
-  LOCAL_MODEL_PATH="/tmp/$DIR_NAME"
-  if [[ ! -d "$LOCAL_MODEL_PATH" ]]; then
-    echo "Installing standalone gcloud CLI..."
-    # Install in /tmp/gcloud-install
-    mkdir -p /tmp/gcloud-install
-    (
-      cd /tmp/gcloud-install
-      curl -sSO https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-x86_64.tar.gz
-      tar -xf google-cloud-cli-linux-x86_64.tar.gz
-    )
-    GCLOUD="/tmp/gcloud-install/google-cloud-sdk/bin/gcloud"
+if [[ "${GROUP}" == "checkpointing/pytorch_lightning" || "${GROUP}" == "checkpointing/ray_pytorch" ]]; then
+  STAGE_MODEL_ID="${MODEL_ID:-}"
+  if [[ -z "${STAGE_MODEL_ID}" ]]; then
+    STAGE_MODEL_ID=$(python -c 'import sys, yaml
+with open(sys.argv[1]) as f:
+    print((yaml.safe_load(f) or {}).get("common", {}).get("model_id", ""))' \
+      "gcsfs/tests/perf/subsystembenchmarks/${GROUP}/configs.yaml")
+  fi
+  if [[ "${STAGE_MODEL_ID}" == gs://* ]]; then
+    echo "Staging legacy checkpointing model from GCS: $STAGE_MODEL_ID"
+    DIR_NAME=$(basename "${STAGE_MODEL_ID%/}")
+    LOCAL_MODEL_PATH="/tmp/$DIR_NAME"
+    if [[ ! -d "$LOCAL_MODEL_PATH" ]]; then
+      echo "Installing standalone gcloud CLI..."
+      # Install in /tmp/gcloud-install
+      mkdir -p /tmp/gcloud-install
+      (
+        cd /tmp/gcloud-install
+        curl -sSO https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-x86_64.tar.gz
+        tar -xf google-cloud-cli-linux-x86_64.tar.gz
+      )
+      GCLOUD="/tmp/gcloud-install/google-cloud-sdk/bin/gcloud"
 
-    echo "Downloading model from GCS to $LOCAL_MODEL_PATH..."
-    # gcloud storage cp -r gs://bucket/dir /tmp/ will create /tmp/dir/
-    $GCLOUD storage cp -r "${MODEL_ID%/}" /tmp/
-    echo "Download complete."
+      echo "Downloading model from GCS to $LOCAL_MODEL_PATH..."
+      # gcloud storage cp -r gs://bucket/dir /tmp/ will create /tmp/dir/
+      $GCLOUD storage cp -r "${STAGE_MODEL_ID%/}" /tmp/
+      echo "Download complete."
 
-    # Clean up gcloud installation to free space
-    rm -rf /tmp/gcloud-install
-  else
-    echo "Model already exists at $LOCAL_MODEL_PATH, skipping download."
+      # Clean up gcloud installation to free space
+      rm -rf /tmp/gcloud-install
+    else
+      echo "Model already exists at $LOCAL_MODEL_PATH, skipping download."
+    fi
   fi
 fi
 

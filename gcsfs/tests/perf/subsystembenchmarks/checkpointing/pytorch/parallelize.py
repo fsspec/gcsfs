@@ -4,15 +4,16 @@ from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import Shard
 
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._llama_tp import apply_llama_tp
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parameters import (
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.layout import (
     STRATEGY_MESH_DIMS,
+    Layout,
 )
 
 
-def build_mesh(params) -> DeviceMesh:
-    dims = params.mesh_dims()
+def build_mesh(layout: Layout, device_type: str = "cpu") -> DeviceMesh:
+    dims = layout.mesh_dims()
     return init_device_mesh(
-        "cpu",
+        device_type,
         tuple(size for _, size in dims),
         mesh_dim_names=tuple(name for name, _ in dims),
     )
@@ -76,22 +77,29 @@ def _expert_placement_fn(model: nn.Module, strategy: str):
     return lambda p: Shard(1) if p in expert_params else None
 
 
-def parallelize(model: nn.Module, mesh: DeviceMesh, params) -> nn.Module:
-    if params.strategy not in STRATEGY_MESH_DIMS:
-        raise ValueError(f"Unsupported strategy {params.strategy!r}")
-    dims = STRATEGY_MESH_DIMS[params.strategy]
+def parallelize(model: nn.Module, mesh: DeviceMesh, layout: Layout) -> nn.Module:
+    if model.config.tie_word_embeddings:
+        raise ValueError("parallelize does not support tie_word_embeddings")
+    if layout.strategy not in STRATEGY_MESH_DIMS:
+        raise ValueError(f"Unsupported strategy {layout.strategy!r}")
+    dims = STRATEGY_MESH_DIMS[layout.strategy]
+    if "tp" in dims and _experts_modules(model):
+        raise ValueError(
+            f"Strategy {layout.strategy!r} uses tensor parallelism, "
+            "which does not support MoE models"
+        )
     if "pp" in dims:
         split_stage(model, mesh["pp"].get_local_rank(), mesh["pp"].size())
     if "tp" in dims:
         apply_llama_tp(model, mesh["tp"])
-    if params.strategy == "ep":
+    if layout.strategy == "ep":
         # EP reuses the dp_shard ranks.
         check_experts_split(model, mesh["dp_shard"].size())
 
     dp_dims = tuple(d for d in dims if d.startswith("dp_"))
     if dp_dims:
         dp_mesh = mesh[dp_dims]
-        placement_fn = _expert_placement_fn(model, params.strategy)
+        placement_fn = _expert_placement_fn(model, layout.strategy)
         for layer in model.model.layers.children():
             fully_shard(layer, mesh=dp_mesh, shard_placement_fn=placement_fn)
         fully_shard(model, mesh=dp_mesh)
