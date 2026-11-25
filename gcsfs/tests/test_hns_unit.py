@@ -4735,9 +4735,7 @@ class TestExtendedGcsFileSystemBucketLayout:
         fs = extended_gcsfs
         now = 1000.0
         with (
-            mock.patch(
-                "gcsfs.extended_gcsfs.time.monotonic", side_effect=lambda: now
-            ),
+            mock.patch("gcsfs.extended_gcsfs.time.monotonic", side_effect=lambda: now),
             self._layout_rpc(
                 fs, side_effect=api_exceptions.PermissionDenied("denied")
             ) as (_, rpc),
@@ -4758,12 +4756,8 @@ class TestExtendedGcsFileSystemBucketLayout:
         fs = extended_gcsfs
         now = 1000.0
         with (
-            mock.patch(
-                "gcsfs.extended_gcsfs.time.monotonic", side_effect=lambda: now
-            ),
-            self._layout_rpc(
-                fs, side_effect=api_exceptions.PermissionDenied("denied")
-            ),
+            mock.patch("gcsfs.extended_gcsfs.time.monotonic", side_effect=lambda: now),
+            self._layout_rpc(fs, side_effect=api_exceptions.PermissionDenied("denied")),
         ):
             await fs._lookup_bucket_layout("b")
             now = 1300.1
@@ -4778,9 +4772,7 @@ class TestExtendedGcsFileSystemBucketLayout:
             location_type="region", hierarchical_namespace={"enabled": True}
         )
         with (
-            mock.patch(
-                "gcsfs.extended_gcsfs.time.monotonic", side_effect=lambda: now
-            ),
+            mock.patch("gcsfs.extended_gcsfs.time.monotonic", side_effect=lambda: now),
             self._layout_rpc(
                 fs,
                 side_effect=[api_exceptions.PermissionDenied("denied"), hns_response],
@@ -4788,9 +4780,7 @@ class TestExtendedGcsFileSystemBucketLayout:
         ):
             assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
             now = 1300.1
-            assert (
-                await fs._lookup_bucket_layout("b") == layouts.STANDARD_HIERARCHICAL
-            )
+            assert await fs._lookup_bucket_layout("b") == layouts.STANDARD_HIERARCHICAL
         assert fs._storage_layout_cache["b"] == layouts.STANDARD_HIERARCHICAL
         assert "b" not in fs._storage_layout_fallbacks
 

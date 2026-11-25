@@ -601,9 +601,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         self._storage_layout_fallbacks.pop(bucket, None)
 
     def _remember_fallback(self, bucket: str) -> None:
-        self._storage_layout_fallbacks[bucket] = (
-            time.monotonic() + _LAYOUT_FALLBACK_TTL
-        )
+        self._storage_layout_fallbacks[bucket] = time.monotonic() + _LAYOUT_FALLBACK_TTL
 
     def _has_live_fallback(self, bucket: str) -> bool:
         deadline = self._storage_layout_fallbacks.get(bucket)
