@@ -58,7 +58,22 @@ logger = logging.getLogger("gcsfs")
 
 USER_AGENT = "python-gcsfs"
 STORAGE_CONTROL_RPC_TIMEOUT = 30.0
+# Detect a storage control connection that dies silently in the middle of a
+# call (no FIN/RST), so the call reconnects instead of failing every later call
+# until the kernel gives up on the socket. GCS frontends answer 10 s pings with
+# GOAWAY too_many_pings, so pings go out every 30 s. On grpc >= 1.60,
+# grpc.http2.ping_timeout_ms (an undocumented grpc-core arg) is required so
+# grpc-python does not wait its 60 s default for the ping ACK;
+# grpc.keepalive_timeout_ms is still needed for TCP_USER_TIMEOUT and older
+# grpc. keepalive_permit_without_calls stays unset: GCS frontends close idle
+# connections after about 4 min (GOAWAY session_timed_out), pinged or not.
+_CONTROL_PLANE_KEEPALIVE_OPTIONS = (
+    ("grpc.keepalive_time_ms", 30000),
+    ("grpc.keepalive_timeout_ms", 20000),
+    ("grpc.http2.ping_timeout_ms", 20000),
+)
 _HNS_RENAME_FOLDER_LRO_TIMEOUT = 300.0
+DEFAULT_PARALLEL_UPLOAD_THRESHOLD = 128 * 2**20
 
 # Default maximum number of batch delete requests that a recursive ``rm`` keeps
 # in flight on HNS buckets (including zonal buckets, which are hierarchical).
@@ -211,8 +226,27 @@ def _parse_bool_flag(value, name):
             return True
         if normalized in ("false", "0", "no", "off", ""):
             return False
-        raise ValueError(f"{name} must be a boolean, got {value!r}")
-    return bool(value)
+    elif value is None or (isinstance(value, int) and value in (0, 1)):
+        return bool(value)
+    raise ValueError(f"{name} must be a boolean, got {value!r}")
+
+
+def _parse_int_flag(value, name, *, default=None, minimum=0):
+    """Normalize an integer option that may arrive as a string from config or env."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
+    if isinstance(value, str):
+        try:
+            value = int(value.strip())
+        except ValueError:
+            raise ValueError(
+                f"{name} must be an integer >= {minimum}, got {value!r}"
+            ) from None
+    if not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
+    return value
 
 
 class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
@@ -236,6 +270,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         max_mrd_pool_cache_queue_size=16,
         fast_lro_polling=True,
         rcu_rapid_write=False,
+        parallel_upload=False,
+        parallel_upload_threshold=DEFAULT_PARALLEL_UPLOAD_THRESHOLD,
+        parallel_upload_segment_size=None,
         **kwargs,
     ):
         """
@@ -271,6 +308,16 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             ``fsspec.config.conf.setdefault("gcs", {})["rcu_rapid_write"] = True``.
             Has no effect on Zonal buckets, which always use the appendable
             writer.
+        parallel_upload : bool, default False
+            Opt in to parallel uploads of large writes. No write path uses this
+            option so far. Can also be set with
+            ``FSSPEC_GCS_PARALLEL_UPLOAD=true`` or
+            ``fsspec.config.conf.setdefault("gcs", {})["parallel_upload"] = True``.
+        parallel_upload_threshold : int, default 128 MiB
+            Smallest write, in bytes, that uses a parallel upload.
+        parallel_upload_segment_size : int, optional
+            Preferred segment size, in bytes, for parallel uploads. ``None`` (the
+            default) leaves the size to the SDK.
         **kwargs : dict
             Additional arguments passed to GCSFileSystem.
             Supports retry configuration overrides for Storage Control API:
@@ -282,6 +329,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         self.fast_lro_polling = fast_lro_polling
         self.rcu_rapid_write = _parse_bool_flag(rcu_rapid_write, "rcu_rapid_write")
+        self.parallel_upload = _parse_bool_flag(parallel_upload, "parallel_upload")
+        self.parallel_upload_threshold = _parse_int_flag(
+            parallel_upload_threshold,
+            "parallel_upload_threshold",
+            default=DEFAULT_PARALLEL_UPLOAD_THRESHOLD,
+        )
+        self.parallel_upload_segment_size = _parse_int_flag(
+            parallel_upload_segment_size,
+            "parallel_upload_segment_size",
+            minimum=1,
+        )
         valid_keys = DEFAULT_RETRY_CONFIG.keys()
         self.retry_config = {
             k[6:]: v
@@ -405,7 +463,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             )
             channel_kwargs = {
                 "credentials": self.credential,
-                "options": [("grpc.primary_user_agent", f"{USER_AGENT}/{version}")],
+                "options": [
+                    ("grpc.primary_user_agent", f"{USER_AGENT}/{version}"),
+                    *_CONTROL_PLANE_KEEPALIVE_OPTIONS,
+                ],
                 "quota_project_id": self._user_project,
                 # Prepend before transport_cls(channel=...) appends its logging interceptor.
                 "interceptors": [ControlPlaneTelemetryInterceptor()],

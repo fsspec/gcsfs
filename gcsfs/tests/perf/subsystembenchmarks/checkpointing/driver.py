@@ -11,6 +11,11 @@ class CheckpointResult:
     # Called by the runner after the monitored window closes; raises if the
     # run produced wrong results. Keeps post-run checks out of the window.
     verify: Optional[Callable[[], None]] = None
+    # Idempotent teardown hook called unconditionally by the runner in finally:
+    # to release spawned worker processes, SyncManager, and shared-memory tensors
+    # even when the monitor context or verify() raises.
+    close: Optional[Callable[[], None]] = None
+    bytes_transferred: Optional[int] = None
 
 
 @runtime_checkable

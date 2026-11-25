@@ -38,7 +38,7 @@ from gcsfs.telemetry.context import (
     set_telemetry_context,
 )
 from gcsfs.telemetry.detector import EnvironmentDetector, FrameworkDetector
-from gcsfs.telemetry.features_proto import GcsfsFeatures, GcsfsFramework
+from gcsfs.telemetry.features_proto import GcsfsFeatures, GcsfsFramework, GcsfsMethod
 from gcsfs.telemetry.manager import default_usage_tracker
 from gcsfs.tests.settings import TEST_BUCKET
 
@@ -332,12 +332,27 @@ def test_http_telemetry_opt_out_and_reenable_e2e(
             (wire.user_agents[split:], wire.feature_headers[split:]),
         )
 
-    token = set_telemetry_context(Dimension.FRAMEWORK, "pandas")
-    try:
-        for uas, features in _run_round_trip(fs1, "enabled"):
+    def _assert_tagged_features(slices, expected_methods_by_slice):
+        for (uas, features), expected_methods in zip(slices, expected_methods_by_slice):
             assert uas
             assert all("fw/pandas" in ua for ua in uas)
-            assert features == ["EAE="] * len(uas)
+            assert len(features) == len(uas)
+            decoded = [
+                GcsfsFeatures.deserialize(base64.urlsafe_b64decode(h)) for h in features
+            ]
+            assert all(
+                d.framework == GcsfsFramework.GCSFS_FRAMEWORK_PANDAS
+                and d.method in expected_methods
+                for d in decoded
+            )
+
+    expected_slice_methods = (
+        {GcsfsMethod.GCSFS_METHOD_PIPE, GcsfsMethod.GCSFS_METHOD_CAT},
+        {GcsfsMethod.GCSFS_METHOD_GET_FILE},
+    )
+    token = set_telemetry_context(Dimension.FRAMEWORK, "pandas")
+    try:
+        _assert_tagged_features(_run_round_trip(fs1, "enabled"), expected_slice_methods)
         wire.assert_all_tagged("pandas")
 
         for env_key, env_val, header_key, caller_val in (
@@ -363,10 +378,9 @@ def test_http_telemetry_opt_out_and_reenable_e2e(
             assert wire.feature_headers == [caller_val] * len(wire.user_agents)
             monkeypatch.delenv(env_key, raising=False)
 
-        for uas, features in _run_round_trip(fs1, "reenabled"):
-            assert uas
-            assert all("fw/pandas" in ua for ua in uas)
-            assert features == ["EAE="] * len(uas)
+        _assert_tagged_features(
+            _run_round_trip(fs1, "reenabled"), expected_slice_methods
+        )
         wire.assert_all_tagged("pandas")
     finally:
         reset_telemetry_context(token)

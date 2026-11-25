@@ -34,6 +34,11 @@ The detector recognizes major ecosystem libraries, including:
 
 If no recognized framework is present on the call stack (e.g. pure Python scripts or unrecognized utilities), no framework token is added to the header. When multiple recognized libraries appear in the same call (for example, ``dask`` calling ``pandas`` and ``pyarrow``), only a single token for the outermost recognized framework (``fw/dask``) is included.
 
+Method Names
+~~~~~~~~~~~~
+
+``gcsfs`` also records the top-level public filesystem or file operation name (such as ``ls``, ``cat_file``, ``find``, ``open``, or subsequent file reads and writes), never file paths, arguments, or payloads.
+
 Compute Environments
 ~~~~~~~~~~~~~~~~~~~~
 
@@ -93,7 +98,7 @@ Caller-supplied ``x-goog-storage-gcsfs-features`` metadata is preserved verbatim
 Privacy & Security Guarantees
 -----------------------------
 
-Telemetry collection is strictly limited to open-source library names and environment categories (``gce``, ``gke``, ``oth``), and respects user privacy and security:
+Telemetry collection is strictly limited to open-source library names, public method names, and environment categories (``gce``, ``gke``, ``oth``), and respects user privacy and security:
 
 - **No User Data or Payloads:** Object contents read or written are never inspected or recorded.
 - **No File Paths or Bucket Names:** Bucket names, object keys, folder hierarchies, and URIs are never collected.

@@ -198,3 +198,11 @@ def test_config_env_var_missing_file_names_the_path(tmp_path, monkeypatch):
     monkeypatch.setenv("GCSFS_SUBSYSTEM_CONFIG", "configs.missing.yaml")
     with pytest.raises(FileNotFoundError, match="configs.missing.yaml"):
         _configurator(tmp_path).generate_cases()
+
+
+def test_empty_filtered_scenarios_do_not_fail_sweep_axis_validation(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("GCSFS_BENCHMARK_FILTER", "nonexistent")
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_SWEEP_AXES", "color")
+    assert _configurator(tmp_path).generate_cases() == []

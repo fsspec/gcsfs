@@ -138,6 +138,31 @@ def _fill_hit_ratio(row, project, client):
         row[_HIT_RATIO] = str(ratio)
 
 
+def _read_prefix(row):
+    scenario = row.get("workload_scenario") or ""
+    if "write" in scenario:
+        return None
+    if _has_value(row.get("dataset_size_bytes")):
+        return "dataset"
+    if (
+        scenario == "checkpoint_read"
+        or _has_value(row.get("checkpoint_read_throughput_mean_bytes_per_second"))
+    ) and _has_value(row.get("checkpoint_physical_size_bytes")):
+        return "checkpoint"
+    return None
+
+
+def has_eligible_rows(csv_path) -> bool:
+    try:
+        with open(csv_path, newline="") as f:
+            return any(
+                bool(row.get("gcs_bucket_name")) and _read_prefix(row) is not None
+                for row in csv.DictReader(f)
+            )
+    except OSError:
+        return False
+
+
 def enrich_csv(csv_path, project, *, client):
     """Add amplification columns and report complete/missing eligible rows."""
     with open(csv_path, newline="") as f:
@@ -156,15 +181,7 @@ def enrich_csv(csv_path, project, *, client):
             continue
 
         # Check if this row is for dataset or checkpoint read
-        prefix = None
-        if _has_value(row.get("dataset_size_bytes")):
-            prefix = "dataset"
-        elif (
-            row.get("workload_scenario") == "checkpoint_read"
-            or _has_value(row.get("checkpoint_read_throughput_mean_bytes_per_second"))
-        ) and _has_value(row.get("checkpoint_physical_size_bytes")):
-            prefix = "checkpoint"
-
+        prefix = _read_prefix(row)
         if not prefix:
             continue
 
@@ -209,7 +226,8 @@ def enrich_csv(csv_path, project, *, client):
 
     for row in rows:
         if (
-            row.get("gcs_bucket_name")
+            _read_prefix(row)
+            and row.get("gcs_bucket_name")
             and rapid_cache.is_rapid_cache_bucket_type(row.get("bucket_type"))
             and not _has_value(row.get(_HIT_RATIO))
         ):
