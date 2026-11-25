@@ -4347,6 +4347,47 @@ class TestExtendedGcsFileSystemBucketLayout:
         fs = ExtendedGcsFileSystem(token=creds, skip_instance_cache=True)
         assert fs.credential is creds
 
+    # An empty GOOGLE_CLOUD_UNIVERSE_DOMAIN means unset, as in google-cloud-storage.
+    # The gapic clients reject an empty universe unless it is passed explicitly.
+
+    def test_empty_universe_domain_keeps_default_endpoint(self, monkeypatch):
+        monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+        monkeypatch.setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "")
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        assert fs._grpc_location == "https://storage.googleapis.com"
+        assert fs._serves_control_api() is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "endpoint_url", [None, "https://storage.us-central1.rep.googleapis.com"]
+    )
+    async def test_control_plane_client_with_empty_universe_domain(
+        self, monkeypatch, endpoint_url
+    ):
+        monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+        monkeypatch.setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "")
+        fs = ExtendedGcsFileSystem(
+            token="anon", endpoint_url=endpoint_url, skip_instance_cache=True
+        )
+        try:
+            client = await fs._get_control_plane_client()
+            assert client.universe_domain == "googleapis.com"
+        finally:
+            await fs._close_resources()
+
+    @pytest.mark.asyncio
+    async def test_grpc_client_with_empty_universe_domain(self, monkeypatch):
+        monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+        monkeypatch.setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "")
+        fs = ExtendedGcsFileSystem(
+            token=Credentials(token="token"), skip_instance_cache=True
+        )
+        try:
+            client = await fs._get_grpc_client()
+            assert client.grpc_client.universe_domain == "googleapis.com"
+        finally:
+            await fs._close_resources()
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "layout_fields, expected_bucket_layout",

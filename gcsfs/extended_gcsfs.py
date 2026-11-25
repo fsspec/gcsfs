@@ -536,7 +536,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
     async def _get_grpc_client(self):
         if self._grpc_client is None:
-            client_options = ClientOptions(quota_project_id=self._user_project)
+            client_options = ClientOptions(
+                quota_project_id=self._user_project,
+                universe_domain=_gcp_universe_domain(),
+            )
             if self._grpc_location:
                 # client_options expects only the host:port, without any protocol or path components.
                 endpoint = self._grpc_location.split("://")[-1].split("/")[0]
@@ -576,8 +579,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             channel = transport_cls.create_channel(**channel_kwargs)
 
             transport = transport_cls(channel=channel)
+            # Pass the universe explicitly: the client would otherwise read
+            # GOOGLE_CLOUD_UNIVERSE_DOMAIN itself and reject an empty value.
             self._storage_control_client = storage_control_v2.StorageControlAsyncClient(
-                transport=transport
+                transport=transport,
+                client_options=ClientOptions(universe_domain=_gcp_universe_domain()),
             )
         return self._storage_control_client
 

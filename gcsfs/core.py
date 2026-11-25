@@ -182,7 +182,8 @@ class UnclosableBytesIO(io.BytesIO):
 
 
 def _gcp_universe_domain():
-    return os.getenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "googleapis.com")
+    # An empty value means unset, as in google-cloud-storage.
+    return os.getenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN") or "googleapis.com"
 
 
 _MTLS_HOST = "storage.mtls.googleapis.com"

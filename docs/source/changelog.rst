@@ -49,6 +49,10 @@ Unreleased
   ``ExtendedGcsFileSystem`` now use anonymous credentials, as they already
   did for ``token="anon"``, instead of looking for default credentials
   themselves on every bucket-layout lookup (#1109).
+* An empty ``GOOGLE_CLOUD_UNIVERSE_DOMAIN`` is treated as unset
+  (``googleapis.com``), as in google-cloud-storage. Before, requests went to
+  ``https://storage.``, and the gRPC clients of ``ExtendedGcsFileSystem``
+  failed to start.
 * Creating or deleting a bucket through ``ExtendedGcsFileSystem`` now forgets
   its cached layout. Before, a bucket deleted and created again with another
   layout kept the old one on the same filesystem instance; for example, a
