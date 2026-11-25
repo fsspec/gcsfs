@@ -437,22 +437,7 @@ def mirror_gcs_methods(obj: type) -> None:
                     async_fn, super_cls=super_cls, method_name=tracked_name
                 )
                 setattr(obj, method, async_fn)
-            if is_public_sync and (
-                not was_already_async_wrapped
-                or not getattr(
-                    getattr(obj, smethod, None), "_is_gcs_sync_wrapped", False
-                )
-            ):
-                local_sync = obj.__dict__.get(smethod)
-                if (
-                    local_sync is not None
-                    and method not in obj.__dict__
-                    and callable(local_sync)
-                    and not inspect.iscoroutinefunction(local_sync)
-                    and not inspect.isasyncgenfunction(local_sync)
-                    and not getattr(local_sync, "_is_gcs_sync_wrapped", False)
-                ):
-                    continue
+            if is_public_sync and not was_already_async_wrapped:
                 mth = _gcs_sync_wrapper(async_fn, method_name=tracked_name)
                 mth.__dict__.pop("_is_gcs_async_wrapped", None)
                 if not getattr(mth, "__doc__", None):

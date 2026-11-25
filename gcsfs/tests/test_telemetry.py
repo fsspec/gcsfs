@@ -1063,6 +1063,20 @@ async def test_mirror_gcs_methods_and_subclass_polymorphism(monkeypatch, detecto
     assert sub_fs.seen_telemetry[-1] == "info"
     assert list(sub_fs.walk("bucket")) == [("sub_walk:bucket", [], ["b.txt"])]
 
+    # A plain sync override on an intermediate class survives mirroring a subclass.
+    class ParentFS(_DummyFS):
+        def info(self, path, **kwargs):
+            self._record()
+            return {"name": f"parent_sync:{path}", "size": 3, "type": "file"}
+
+    class ChildFS(ParentFS):
+        pass
+
+    mirror_gcs_methods(ChildFS)
+    child_fs = ChildFS(skip_instance_cache=True)
+    assert child_fs.info("bucket/a")["name"] == "parent_sync:bucket/a"
+    assert child_fs.seen_telemetry[-1] == "info"
+
     base_fs = _DummyFS(skip_instance_cache=True)
 
     # Inherited batch coroutine (_cat from AsyncFileSystem) detects framework ONCE across multiple files
