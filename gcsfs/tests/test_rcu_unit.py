@@ -682,6 +682,39 @@ async def test_init_aaow_rcu_failure_reuses_layout_refreshed_by_another_writer(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fresh, raises_disabled",
+    [(layouts.STANDARD, True), (layouts.STANDARD_RCU, False)],
+)
+async def test_init_aaow_rcu_failure_rechecks_layout_cached_as_unknown(
+    rcu_fs, open_error, fresh, raises_disabled
+):
+    """A cached UNKNOWN says nothing about RCU, so the failed open re-checks."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+    fs._get_bucket_layout.return_value = fresh
+
+    def fall_back_then_fail(*args, **kwargs):
+        # A lookup that fell back (e.g. after invalidate_storage_layout_cache())
+        # caches UNKNOWN while this open is in flight.
+        fs._storage_layout_cache[BUCKET] = BucketLayout.UNKNOWN
+        raise open_error
+
+    init_aaow.side_effect = fall_back_then_fail
+
+    if raises_disabled:
+        with pytest.raises(RapidCacheUltraDisabledError) as excinfo:
+            await fs._init_aaow(BUCKET, "key")
+        assert excinfo.value.__cause__ is open_error
+        assert fs._storage_layout_cache[BUCKET] == fresh
+    else:
+        with pytest.raises(type(open_error)) as excinfo:
+            await fs._init_aaow(BUCKET, "key")
+        assert excinfo.value is open_error
+    fs._get_bucket_layout.assert_awaited_once_with(BUCKET)
+
+
+@pytest.mark.asyncio
 async def test_pipe_file_retries_over_http_when_rcu_disabled(
     rcu_fs, open_error, caplog
 ):

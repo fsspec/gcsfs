@@ -832,7 +832,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         the re-check found the bucket missing, which drops its cached layout.
         """
         cached_layout = self._storage_layout_cache.get(bucket)
-        if cached_layout is None or cached_layout.is_rcu:
+        if (
+            cached_layout is None
+            # A lookup that fell back while this write was in flight cached
+            # UNKNOWN, which says nothing about RCU.
+            or cached_layout.storage_class == StorageClass.UNKNOWN
+            or cached_layout.is_rcu
+        ):
             # No other write has refreshed the layout yet: look it up once.
             # If the lookup fails, the layout stays unknown and returning
             # False lets the caller re-raise the write error unchanged.
