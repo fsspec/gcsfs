@@ -1647,8 +1647,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 the fsspec path for files in other buckets.
 
         With ``on_error="return"``, a failure while downloading a group of
-        ranges is returned for every range in that group, and a failure to
-        open an object is returned for all of that object's ranges.
+        ranges is returned for every range in that group, a failure to
+        open an object is returned for all of that object's ranges, and a
+        failure to look up a bucket's layout is returned for all of that
+        bucket's ranges.
         """
         if max_gap is not None:
             return await super()._cat_ranges(
@@ -1676,15 +1678,25 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         for i, p in enumerate(paths):
             by_path.setdefault(p, []).append(i)
 
+        # Look each bucket's layout up once. A failed lookup is returned for
+        # each of that bucket's ranges, like any other per-range error.
+        uses_grpc, lookup_errors = {}, {}
         zonal, other = {}, []
         for p, idxs in by_path.items():
             bucket, _, _ = self.split_path(p)
-            if await self._uses_grpc_data_path(bucket):
+            if bucket not in uses_grpc:
+                try:
+                    uses_grpc[bucket] = await self._uses_grpc_data_path(bucket)
+                except Exception as e:
+                    uses_grpc[bucket] = e
+            if isinstance(uses_grpc[bucket], Exception):
+                lookup_errors.update(dict.fromkeys(idxs, uses_grpc[bucket]))
+            elif uses_grpc[bucket]:
                 zonal[p] = idxs
             else:
                 other.extend(idxs)
 
-        if not zonal:
+        if not zonal and not lookup_errors:
             return await super()._cat_ranges(
                 paths,
                 starts,
@@ -1713,6 +1725,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         total_streams = max(1, stream_budget)
 
         results = [None] * len(paths)
+        for i, e in lookup_errors.items():
+            results[i] = e
         zonal_items = list(zonal.items())
         allocs = self._allocate_streams(
             [len(idxs) for _, idxs in zonal_items],
@@ -1762,7 +1776,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # call is cancelled again while waiting) no task outlives this call.
         tasks = [asyncio.create_task(c) for c in coros]
         try:
-            await asyncio.wait(tasks)
+            # No tasks when every bucket's layout lookup failed.
+            if tasks:
+                await asyncio.wait(tasks)
         except BaseException:
             for t in tasks:
                 t.cancel()

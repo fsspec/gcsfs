@@ -4643,6 +4643,80 @@ class TestExtendedGcsFileSystemBucketLayout:
         assert "c" not in fs._storage_layout_fallbacks
 
     @pytest.mark.asyncio
+    async def test_cat_ranges_returns_layout_errors_per_range(self, extended_gcsfs):
+        # A bucket whose layout lookup fails gets the error for each of its
+        # ranges (on_error="return" is the default); other buckets are read.
+        fs = extended_gcsfs
+        fs._storage_layout_cache["good"] = layouts.STANDARD
+        outage = api_exceptions.ServiceUnavailable("down")
+        with (
+            self._layout_rpc(fs, side_effect=outage) as (_, rpc),
+            mock.patch.object(
+                fs, "_cat_file", new_callable=mock.AsyncMock, return_value=b"G"
+            ),
+        ):
+            res = await fs._cat_ranges(
+                ["good/a", "bad/x", "bad/y"], [0, 0, 0], [1, 1, 1]
+            )
+        assert res == [b"G", outage, outage]
+        # One lookup for the failing bucket, not one per file.
+        assert rpc.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_cat_ranges_layout_error_with_zonal_bucket(self, extended_gcsfs):
+        fs = extended_gcsfs
+        fs._storage_layout_cache["good"] = layouts.ZONAL_HIERARCHICAL
+        outage = api_exceptions.ServiceUnavailable("down")
+
+        def zonal_streams(p, idxs, starts, ends, num_streams, results, limiter, **kw):
+            async def stream():
+                for i in idxs:
+                    results[i] = b"Z"
+
+            return [stream()]
+
+        with (
+            self._layout_rpc(fs, side_effect=outage),
+            mock.patch.object(
+                fs, "_zonal_file_stream_coros", side_effect=zonal_streams
+            ),
+        ):
+            res = await fs._cat_ranges(["good/a", "bad/x"], [0, 0], [1, 1])
+        assert res == [b"Z", outage]
+
+    @pytest.mark.asyncio
+    async def test_cat_ranges_every_layout_lookup_fails(self, extended_gcsfs):
+        fs = extended_gcsfs
+        outage = api_exceptions.ServiceUnavailable("down")
+        with self._layout_rpc(fs, side_effect=outage):
+            assert await fs._cat_ranges(["bad/x", "bad/y"], [0, 0], [1, 1]) == [
+                outage,
+                outage,
+            ]
+
+    @pytest.mark.asyncio
+    async def test_cat_ranges_layout_error_on_error_raise_first_in_order(
+        self, extended_gcsfs
+    ):
+        fs = extended_gcsfs
+        fs._storage_layout_cache["good"] = layouts.STANDARD
+        with (
+            self._layout_rpc(
+                fs, side_effect=api_exceptions.ServiceUnavailable("down")
+            ),
+            mock.patch.object(
+                fs,
+                "_cat_file",
+                new_callable=mock.AsyncMock,
+                side_effect=FileNotFoundError("good/a"),
+            ),
+        ):
+            with pytest.raises(FileNotFoundError):
+                await fs._cat_ranges(
+                    ["good/a", "bad/x"], [0, 0], [1, 1], on_error="raise"
+                )
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "error",
         [
