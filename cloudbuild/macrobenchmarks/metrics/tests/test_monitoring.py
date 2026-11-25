@@ -265,6 +265,30 @@ def test_align_interval_widens_sub_period_window_to_a_full_period():
     assert monitoring._align_interval(130, 140, 60) == (120, 180)
 
 
+def test_monitoring_windows_scopes_artifact_pod_and_pads_bucket_delta():
+    # Step ran 00:00:10..00:05:00 (pip install took the first minute). The
+    # driver's measured scenario ran 00:01:15..00:04:10, and final validation
+    # read from the bucket until 00:05:00.
+    pod_win, bucket_win = monitoring._monitoring_windows(
+        "1970-01-01T00:00:10Z",
+        "1970-01-01T00:05:00Z",
+        60,
+        [
+            {
+                "window_start": "1970-01-01T00:01:15Z",
+                "window_end": "1970-01-01T00:04:10Z",
+            }
+        ],
+    )
+
+    assert pod_win == (60, 300)
+    assert bucket_win == (0, 420)
+    # Non-artifact runs keep identical pod and bucket windows.
+    assert monitoring._monitoring_windows(
+        "1970-01-01T00:00:10Z", "1970-01-01T00:05:00Z", 60
+    ) == ((0, 300), (0, 300))
+
+
 def test_collect_emits_one_row_per_pod_and_series():
     client = _FakeClient(
         {

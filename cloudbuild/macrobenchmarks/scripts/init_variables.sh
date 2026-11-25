@@ -10,15 +10,37 @@ SAFE_BRANCH=$(echo -n "${BRANCH_NAME:-unknown}" | tr -c 'a-zA-Z0-9_.-' '-')
 if [ "${SAFE_BRANCH}" = "unknown" ]; then
   echo "ERROR: BRANCH_NAME unset."; exit 1
 fi
-if [ -z "${_INFRA_PREFIX}" ] || [ -z "${_ZONE}" ] || [ -z "${_GKE_SERVICE_ACCOUNT}" ] || [ -z "${_DATASET_PATH}" ] || [ -z "${_REQUIREMENTS}" ]; then
-  echo "ERROR: required substitution missing (_INFRA_PREFIX,_ZONE,_GKE_SERVICE_ACCOUNT,_DATASET_PATH,_REQUIREMENTS)."; exit 1
+if [ -z "${_INFRA_PREFIX}" ] || [ -z "${_ZONE}" ] || [ -z "${_GKE_SERVICE_ACCOUNT}" ] || [ -z "${_REQUIREMENTS}" ]; then
+  echo "ERROR: required substitution missing (_INFRA_PREFIX,_ZONE,_GKE_SERVICE_ACCOUNT,_REQUIREMENTS)."; exit 1
 fi
 # Reject an unknown workload before provisioning anything (lib.sh defaults
 # _WORKLOAD and normalizes legacy hf-pytorch-lightning-cpu to
 # hf-datasets-pytorch-lightning).
 case "${_WORKLOAD}" in
-  hf-datasets-pytorch-lightning|ray-data-ray-train-pytorch) ;;
-  *) echo "ERROR: _WORKLOAD must be hf-datasets-pytorch-lightning or ray-data-ray-train-pytorch (got '${_WORKLOAD}')."; exit 1 ;;
+  hf-datasets-pytorch-lightning|ray-data-ray-train-pytorch)
+    if [ -z "${_DATASET_PATH}" ]; then
+      echo "ERROR: _DATASET_PATH is required for ${_WORKLOAD}."; exit 1
+    fi
+    ;;
+  adk-agent)
+    # The ADK workload reads no dataset and restores no checkpoint: it writes
+    # artifacts to the per-run checkpoint bucket and reads them back.
+    case "${_SCENARIO}" in
+      iterative-workspace|genmedia-pipeline|hitl-handoff) ;;
+      *) echo "ERROR: _SCENARIO must be iterative-workspace, genmedia-pipeline or hitl-handoff (got '${_SCENARIO}')."; exit 1 ;;
+    esac
+    if [ "${_SEED_CHECKPOINT}" != "false" ] || [ -n "${_CHECKPOINT_LOAD_PATH}" ]; then
+      echo "ERROR: _WORKLOAD=adk-agent needs _SEED_CHECKPOINT=false and an empty _CHECKPOINT_LOAD_PATH."; exit 1
+    fi
+    # One pod: every pod would run the same scenario on the same paths.
+    if [ "${_NODES}" != "1" ]; then
+      echo "ERROR: _WORKLOAD=adk-agent needs _NODES=1 (got '${_NODES}')."; exit 1
+    fi
+    if ! [[ "${_BUCKET_TYPE}" =~ ^(regional|zonal|hns)$ ]]; then
+      echo "ERROR: _WORKLOAD=adk-agent supports _BUCKET_TYPE regional, zonal or hns (got '${_BUCKET_TYPE}')."; exit 1
+    fi
+    ;;
+  *) echo "ERROR: _WORKLOAD must be hf-datasets-pytorch-lightning, ray-data-ray-train-pytorch or adk-agent (got '${_WORKLOAD}')."; exit 1 ;;
 esac
 # Validate config before provisioning anything: an unsupported _BUCKET_TYPE
 # silently skips checkpoint-bucket creation, and a non-positive _CHECKPOINT_INTERVAL
@@ -132,7 +154,9 @@ validate_bucket() {
   esac
   echo "OK: $KIND bucket gs://$BUCKET matches ${_BUCKET_TYPE} in $LOC."
 }
-validate_bucket "${_DATASET_PATH}" dataset
+if [ "${_WORKLOAD}" != "adk-agent" ]; then
+  validate_bucket "${_DATASET_PATH}" dataset
+fi
 if [ -n "${_CHECKPOINT_LOAD_PATH}" ]; then validate_bucket "${_CHECKPOINT_LOAD_PATH}" checkpoint-load; fi
 
 

@@ -31,6 +31,9 @@ class RawMetricTables:
     data_wait_rows: List[dict] = field(default_factory=list)
     dataset_build_rows: List[dict] = field(default_factory=list)
     ray_data_iteration_rows: List[dict] = field(default_factory=list)
+    artifact_op_rows: List[dict] = field(default_factory=list)
+    artifact_probe_rows: List[dict] = field(default_factory=list)
+    artifact_workload_rows: List[dict] = field(default_factory=list)
 
 
 def write_raw_metrics(
@@ -150,6 +153,37 @@ def write_system_metrics(system_rows, out_dir: str) -> None:
         )
 
 
+_ARTIFACT_TABLES = (
+    (
+        "artifact_op_metrics",
+        schema.ARTIFACT_OP_METRICS_FILE,
+        schema.ArtifactOpMetrics,
+    ),
+    (
+        "artifact_probe_metrics",
+        schema.ARTIFACT_PROBE_METRICS_FILE,
+        schema.ArtifactProbeMetrics,
+    ),
+    (
+        "artifact_workload_metrics",
+        schema.ARTIFACT_WORKLOAD_METRICS_FILE,
+        schema.ArtifactWorkloadMetrics,
+    ),
+)
+
+
+def write_artifact_metrics(parsed, out_dir: str) -> None:
+    """Write parsed artifact metrics (``parsers/adk.py``) under ``artifact/``."""
+    for attribute, file_name, dataclass_type in _ARTIFACT_TABLES:
+        rows = getattr(parsed, attribute, None)
+        if rows:
+            _write_csv(
+                os.path.join(out_dir, schema.ARTIFACT_DIRECTORY, file_name),
+                dataclass_type,
+                rows,
+            )
+
+
 def read_raw_metrics(
     in_dir: str, *, run_type: str = "perf_optimization"
 ) -> RawMetricTables:
@@ -213,6 +247,23 @@ def read_raw_metrics(
                 in_dir,
                 schema.RAY_DATA_ITERATION_DIRECTORY,
                 schema.RAY_DATA_ITERATION_METRICS_FILE,
+            )
+        ),
+        artifact_op_rows=_read_csv(
+            os.path.join(
+                in_dir, schema.ARTIFACT_DIRECTORY, schema.ARTIFACT_OP_METRICS_FILE
+            )
+        ),
+        artifact_probe_rows=_read_csv(
+            os.path.join(
+                in_dir, schema.ARTIFACT_DIRECTORY, schema.ARTIFACT_PROBE_METRICS_FILE
+            )
+        ),
+        artifact_workload_rows=_read_csv(
+            os.path.join(
+                in_dir,
+                schema.ARTIFACT_DIRECTORY,
+                schema.ARTIFACT_WORKLOAD_METRICS_FILE,
             )
         ),
     )

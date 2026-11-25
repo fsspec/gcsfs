@@ -135,7 +135,7 @@ Before creating the triggers, set up the following in your GCP project.
 | `_INFRA_PREFIX` | Prefix for all created resources (cluster, network, buckets, BigQuery dataset). Also selects the shared results bucket `gs://<_INFRA_PREFIX>-macrobench-results`. |
 | `_ZONE` | GCP zone for the workload node pool and zonal buckets (e.g. `us-central1-a`), and the preferred zone for the cluster's control plane (which may fall back to another zone in the region). The region is derived from it. |
 | `_GKE_SERVICE_ACCOUNT` | Email of the node service account (see prerequisites). |
-| `_DATASET_PATH` | `gs://` directory of `*.parquet` shards (with a `text` column) to train on. Must match the run's region and bucket type. |
+| `_DATASET_PATH` | `gs://` directory of `*.parquet` shards (with a `text` column) to train on. Must match the run's region and bucket type. Not used by `adk-agent`. |
 | `_REQUIREMENTS` | Whitespace-separated immutable pip specs/URLs installed last. Every workload requires the gcsfs build under test; the Ray workload needs nothing else. |
 | `_HF_TOKEN` | HuggingFace token. Required only when `_MODEL_ID` is a gated HF repo (not a `gs://` path). |
 
@@ -143,7 +143,7 @@ Before creating the triggers, set up the following in your GCP project.
 
 | Substitution | Default | Description |
 | :----------- | :------ | :---------- |
-| `_WORKLOAD` | `hf-datasets-pytorch-lightning` | Workload directory under `gcsfs/tests/perf/macrobenchmarks/workloads/`: `hf-datasets-pytorch-lightning` or `ray-data-ray-train-pytorch`. The retained Cloud Build path is CPU-default for both. |
+| `_WORKLOAD` | `hf-datasets-pytorch-lightning` | Workload directory under `gcsfs/tests/perf/macrobenchmarks/workloads/`: `hf-datasets-pytorch-lightning`, `ray-data-ray-train-pytorch` or `adk-agent`. The retained Cloud Build path is CPU-default for all of them. |
 | `_BUCKET_TYPE` | `regional` | `regional`, `zonal`, `hns`, or a Rapid Cache Ultra type `{standard,hns}_rcu_{z,warm,cold}` (see below). `_DATASET_PATH` is copied into a fresh per-run bucket of this type, so its own type need not match. |
 | `_MACHINE_TYPE` | `c4-standard-192` | Node machine type for the workload pool. |
 | `_ENABLE_TIER1_NETWORKING` | `true` | Enable TIER_1 high-bandwidth egress (requires gVNIC / C-series). |
@@ -168,6 +168,7 @@ Before creating the triggers, set up the following in your GCP project.
 | `_JOBSET_VERSION` | `v0.12.0` | JobSet controller release to install. |
 | `_SKIP_CLEANUP` | `false` | Leave infra standing after the run (for debugging). |
 | `_RCU_WARMUP_SETTLE_SECONDS` | `""` | `*_rcu_warm` only: seconds to wait after the warm-up reads. Empty means 120 + 1.5 per GiB of the warmed objects. |
+| `_SCENARIO` | `iterative-workspace` | `adk-agent` only: `iterative-workspace`, `genmedia-pipeline` or `hitl-handoff`. Each scenario is its own `workload_name` (`adk-<scenario>`). |
 
 ### Interaction notes
 
@@ -178,6 +179,16 @@ Before creating the triggers, set up the following in your GCP project.
 * **Ranks/node cap**: keep `_RANKS_PER_NODE` at 4 on `c4-standard-192`. A
   restoring run's per-rank peak RSS roughly doubles (resident model+optimizer
   plus the `torch.load`'d checkpoint, ~92GB); 8 ranks × 92GB OOMs the 720GB host.
+* **ADK workload**: `_WORKLOAD=adk-agent` needs `_SEED_CHECKPOINT=false`, an
+  empty `_CHECKPOINT_LOAD_PATH` and a `regional`, `zonal` or `hns`
+  `_BUCKET_TYPE`. It needs no `_DATASET_PATH`. Its artifacts go to the per-run
+  checkpoint bucket, and no dataset bucket is created. Its chart installs
+  `google-adk[fsspec]` from `requirements.txt` before `_REQUIREMENTS`, so a
+  custom ADK build can be supplied alongside `gcsfs` in `_REQUIREMENTS`. Set
+  `_IMAGE` to a plain Python image that includes `git` (for `git+https`
+  requirements), such as `python:3.12`, with `_NODES=1` and
+  `_MACHINE_TYPE=c4-standard-48` (the smallest C4 machine that supports
+  `TIER_1` networking).
 * **Region/type coupling**: `_BUCKET_TYPE`, `_ZONE`, and `_DATASET_PATH` must
   agree, and the results bucket must be co-located with the build `LOCATION` (the
   BigQuery dataset is created there and cannot read a cross-region bucket).

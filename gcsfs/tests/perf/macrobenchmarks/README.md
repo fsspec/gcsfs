@@ -23,6 +23,7 @@ Choose a workload with the Cloud Build substitution `_WORKLOAD`.
 | `hf-datasets-pytorch-lightning` (Cloud Build `_WORKLOAD` default) | Hugging Face Datasets streaming → PyTorch Lightning, launched with `torchrun` | CPU only. See below. |
 | `ray-data-ray-train-pytorch` (Cloud Build `_WORKLOAD`) | Ray Data → Ray Train `TorchTrainer` | CPU by default. GPU with `workload.gpu=true`. |
 | `torchtitan` (Helm deployment on GPU cluster) | Upstream TorchTitan `main` `Trainer` (up to 5D parallelism: `PP` + `HSDP` + `CP` + `TP`) with a Grain dataloader streaming Parquet over `gcsfs` and TorchTitan's DCP checkpointer writing to `gs://` | Multi-node GPU training & checkpointing benchmark for **Llama 3.1 70B**. |
+| `adk-agent` (Cloud Build `_WORKLOAD`, with `_ADK_SCENARIO`) | ADK `FsspecArtifactService` over `gcsfs`, driven by `adk_bench.py` | CPU only, one pod. See below. |
 
 **Lightning workload**
 
@@ -68,6 +69,27 @@ Choose a workload with the Cloud Build substitution `_WORKLOAD`.
   BF16 compute (FSDP2 mixed precision).
 
 CPU results measure I/O behavior, not model compute speed.
+
+**ADK workload (`adk-agent`)**
+
+- Benchmarks ADK's `FsspecArtifactService` on `gs://`. It is not a training
+  workload: there is no dataset, model or checkpoint restore.
+- `adk_bench.py` calls the artifact service directly and replays the call
+  sequences of three `google/adk-recipes` patterns. `_ADK_SCENARIO` picks one:
+  - `iterative-workspace`: 32 sessions of 50 turns of small artifacts
+    (4–256 KB), with `LoadArtifactsTool`'s list before every model request,
+    version listing and one session rewind.
+  - `genmedia-pipeline`: 8 sessions saving and loading 2–100 MB images and a
+    video, then deleting the intermediate images.
+  - `hitl-handoff`: 32 sessions that upload 50–200 documents through the
+    `SaveFilesAsArtifactsPlugin` pattern, then resume in a fresh process.
+- Each scenario starts with a serial probe that counts gcsfs JSON requests per
+  op with `microbenchmarks/request_counter.py` (shipped into the chart as a
+  symlink).
+- Correctness checks (payload hashes, metadata, versions, keys, rewind,
+  deletes, concurrent saves) run outside the timed calls. Any failure fails
+  the pod, and the build uploads no row.
+- Simulated model think time is excluded from op latency.
 
 ## How a run executes
 
@@ -155,6 +177,11 @@ Each run produces one summary row. For column names, see
 - These columns are best effort and can be empty: system,
   read-amplification, and restore-throughput.
 - MFU/TFLOPs are not reported.
+- `adk-agent` rows (`workload_name` `adk-<scenario>`) use the same table. They
+  fill the run-config and system columns plus the `artifact_*` and workload
+  validation columns: per-op latency mean/p50/p95/p99, requests per op,
+  throughput, artifact-bucket read bytes and requests, and validation counts.
+  Training columns stay empty.
 
 ## Inputs
 
@@ -232,13 +259,23 @@ workloads/
 │   │   └── templates/      # JobSet, headless Service, ConfigMaps
 │   └── tests/
 └── torchtitan/
+│   ├── helm_chart/
+│   │   ├── Chart.yaml
+│   │   ├── values_base.yaml
+│   │   ├── torchtitan_train.py   # recipe + instrumented Trainer subclasses
+│   │   ├── launcher.sh
+│   │   ├── requirements.txt
+│   │   └── templates/      # JobSet, headless Service, ConfigMaps
+│   └── tests/
+└── adk-agent/
     ├── helm_chart/
     │   ├── Chart.yaml
     │   ├── values_base.yaml
-    │   ├── torchtitan_train.py   # recipe + instrumented Trainer subclasses
+    │   ├── adk_bench.py          # scenario driver and correctness checks
+    │   ├── request_counter.py    # symlink to microbenchmarks/request_counter.py
     │   ├── launcher.sh
     │   ├── requirements.txt
-    │   └── templates/      # JobSet, headless Service, ConfigMaps
+    │   └── templates/      # JobSet, ConfigMaps
     └── tests/
 ```
 
