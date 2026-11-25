@@ -624,13 +624,16 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
           Storage Control API: one attempt, and any API error other than
           ``NotFound``, or a timeout, falls back;
         * on the default endpoint, any non-transient API error other than
-          ``NotFound``, e.g. missing permission.
+          ``NotFound``, e.g. missing permission (``PermissionDenied``, or
+          ``Unauthenticated`` for an anonymous caller).
 
         ``NotFound`` is raised on every endpoint: only the Storage Control API
         answers it (an endpoint that does not serve the API fails with another
         status), so the bucket does not exist. On the default endpoint,
         transient errors (after the retry budget) are raised too: falling back
         there would silently change the semantics of HNS and zonal operations.
+        So is ``Unauthenticated`` for a caller with credentials, which means
+        the server rejected them, not that the layout may not be read.
         """
         location = self._grpc_location
         if location.startswith("http://"):
@@ -655,6 +658,16 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             if default_endpoint and (
                 isinstance(e, (api_exceptions.RetryError, asyncio.TimeoutError))
                 or is_transient_exception(e)
+                # gRPC rejects bad or expired credentials with "Request had
+                # invalid authentication credentials", which
+                # is_transient_exception does not match. Caching UNKNOWN for
+                # that would keep flat semantics for this instance even after
+                # its credentials work again. Anonymous callers get 401 for a
+                # missing permission, which does fall back.
+                or (
+                    isinstance(e, api_exceptions.Unauthenticated)
+                    and not isinstance(self.credential, AnonymousCredentials)
+                )
             ):
                 # The raised gapic error does not say why a plain read or
                 # write failed, so name the lookup and the opt-out here.

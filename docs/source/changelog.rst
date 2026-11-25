@@ -33,7 +33,8 @@ Unreleased
   once; on the default endpoint, answers that retrying will not change (such
   as a missing ``storage.objects.list`` permission) fall back, and every
   fallback except a missing bucket is remembered per filesystem instance
-  (``invalidate_storage_layout_cache()`` checks again). A lookup that still
+  (``invalidate_storage_layout_cache()`` checks again). Credentials that the
+  default endpoint rejects raise instead of falling back. A lookup that still
   fails after retries on the default endpoint now raises: during a Storage
   Control outage, the first operation on a bucket fails after about 60 s
   instead of silently using flat semantics (#1110).

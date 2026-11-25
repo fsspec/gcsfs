@@ -4454,8 +4454,9 @@ class TestExtendedGcsFileSystemBucketLayout:
         "error",
         [
             api_exceptions.PermissionDenied("denied"),
+            # What an anonymous caller gets for a private bucket.
             api_exceptions.Unauthenticated(
-                "caller does not have storage.objects.list access"
+                "Anonymous caller does not have storage.objects.list access"
             ),
             api_exceptions.InvalidArgument("bad request"),
             api_exceptions.MethodNotImplemented("not implemented"),
@@ -4559,6 +4560,33 @@ class TestExtendedGcsFileSystemBucketLayout:
         assert "bucket b" in message
         assert "Storage Control" in message
         assert "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=false" in message
+
+    @pytest.mark.asyncio
+    async def test_layout_lookup_raises_rejected_credentials(self, caplog):
+        # gRPC rejects bad or expired credentials with this 401 message, which
+        # is_transient_exception does not match. Caching UNKNOWN would keep
+        # flat semantics after the credentials work again.
+        fs = ExtendedGcsFileSystem(
+            token=Credentials(token="token"),
+            endpoint_url="https://storage.googleapis.com",
+            skip_instance_cache=True,
+        )
+        error = api_exceptions.Unauthenticated(
+            "Request had invalid authentication credentials. Expected OAuth 2 "
+            "access token, login cookie or other valid authentication credential."
+        )
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            self._layout_rpc(fs, side_effect=error) as (_, rpc),
+        ):
+            for _ in range(2):
+                with pytest.raises(api_exceptions.Unauthenticated):
+                    await fs._lookup_bucket_layout("b")
+        assert rpc.await_count == 2
+        assert "b" not in fs._storage_layout_cache
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 2
+        assert all("Storage Control" in r.getMessage() for r in warnings)
 
     @pytest.mark.asyncio
     async def test_layout_lookup_custom_endpoint_single_attempt(self):
