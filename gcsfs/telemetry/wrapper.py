@@ -686,14 +686,23 @@ def _setup_file_telemetry(file_obj, file_method: str = "") -> contextvars.Token 
         method = file_method
     else:
         method = current_method
+    params = getattr(file_obj, "caller_params", "") if method else ""
 
     # Fast path: telemetry already active (e.g. nested file method calls), skip a redundant set/reset
-    if current.get(Dimension.FRAMEWORK.value) == fw and current_method == method:
+    if (
+        current.get(Dimension.FRAMEWORK.value) == fw
+        and current_method == method
+        and current.get(Dimension.METHOD_PARAMS.value, "") == params
+    ):
         return None
 
     current[Dimension.FRAMEWORK.value] = fw
     if method is not None:
         current[Dimension.METHOD.value] = method
+    if params:
+        current[Dimension.METHOD_PARAMS.value] = params
+    else:
+        current.pop(Dimension.METHOD_PARAMS.value, None)
     return set_telemetry_context(current)
 
 
@@ -735,21 +744,31 @@ def wrap_file_methods(cls: type) -> None:
 
     orig_init = cls.__dict__.get("__init__", cls.__init__)
     if not getattr(orig_init, "_is_telemetry_init_wrapped", False):
+        init_pos_spec = _positional_tracked_params(orig_init, "open")
 
         @functools.wraps(orig_init)
         def init_wrapper(*args, **kwargs):
             self = args[0]
             if not hasattr(self, "caller_method"):
-                self.caller_method = get_telemetry_context().get(
-                    Dimension.METHOD.value, "open"
-                )
+                ctx = get_telemetry_context()
+                if Dimension.METHOD.value in ctx:
+                    self.caller_method = ctx[Dimension.METHOD.value]
+                    self.caller_params = ctx.get(Dimension.METHOD_PARAMS.value, "")
+                else:
+                    self.caller_method = "open"
+                    self.caller_params = (
+                        _extract_method_params(init_pos_spec, args, kwargs, "open")
+                        or ""
+                    )
             need_scope = is_gcs_file and not has_telemetry_context(Dimension.METHOD)
             was_init = getattr(self, "_initializing_telemetry", False)
             self._initializing_telemetry = True
             try:
                 if need_scope:
                     tokens_map = manager.default_usage_tracker.collect_tokens_map(
-                        call_scoped_only=True, method=self.caller_method
+                        call_scoped_only=True,
+                        method=self.caller_method,
+                        method_params=self.caller_params,
                     )
                     with _telemetry_context(tokens_map):
                         orig_init(*args, **kwargs)

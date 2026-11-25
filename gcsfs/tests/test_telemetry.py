@@ -831,9 +831,16 @@ class _DummyFS(fsspec.asyn.AsyncFileSystem):
         self._record()
         return f"https://signed/{path}"
 
-    def _open(self, path, mode="rb", **kwargs):
+    def _open(self, path, mode="rb", block_size=None, cache_options=None, **kwargs):
         self._record()
-        return _DummyFile(self, path, mode=mode, size=3, cache_type="none")
+        return _DummyFile(
+            self,
+            path,
+            mode=mode,
+            size=3,
+            cache_type=kwargs.pop("cache_type", "none"),
+            cache_options=cache_options,
+        )
 
     async def _walk(self, path, maxdepth=None, **kwargs):
         for i in range(4):
@@ -1242,15 +1249,30 @@ async def test_native_async_entrypoints_and_unwrapped_private_helper(detector):
 
 
 def test_fs_open_records_open_then_file_methods_without_leaking(detector):
-    """Verify `fs.open` records `open` on init and `file_read` on subsequent reads."""
+    """Verify `fs.open` captures positional `cache_options` and isolates handles from ambient `mp`."""
     fs = _DummyFS(skip_instance_cache=True)
 
-    with fs.open("bucket/a.txt", "rb") as f:
+    with fs.open(
+        "bucket/a.txt", "rb", None, {"maxblocks": 4}, cache_type="blockcache"
+    ) as f:
         assert get_telemetry_context() == {}
         assert f.read() == b"abc"
+    assert fs._recorded() == [
+        (("fw/pandas",), "open", frozenset({"cache_options"})),
+        (("fw/pandas",), "file_read", frozenset({"cache_options"})),
+    ]
 
-    assert [tokens for _, tokens in fs.seen] == [("fw/pandas",)] * 2
-    assert fs.seen_telemetry == ["open", "file_read"]
+    with fs.open("bucket/a.txt", "rb") as plain_f:
+        assert fs._recorded() == [(("fw/pandas",), "open", frozenset())]
+        with _scoped_ctx(
+            {
+                Dimension.FRAMEWORK.value: "ray",
+                Dimension.METHOD.value: "find",
+                Dimension.METHOD_PARAMS.value: "detail",
+            }
+        ):
+            assert plain_f.read(1) == b"a"
+    assert fs._recorded() == [(("fw/pandas",), "file_read", frozenset())]
 
 
 def test_with_telemetry_context_tracks_open_and_preserves_outer_method(detector):
@@ -1664,11 +1686,16 @@ def test_opted_out_fs_and_open_file_suppress_telemetry(
             spied_gcs_harness.clear()
             opted_out_file = stack.enter_context(
                 core_fs.open(
-                    "test-bucket/file.txt", "rb", block_size=2, cache_type="blockcache"
+                    "test-bucket/file.txt",
+                    "rb",
+                    block_size=2,
+                    cache_type="blockcache",
+                    cache_options={"maxblocks": 4},
                 )
             )
             assert opted_out_file.caller_framework == ""
             assert opted_out_file.caller_method == "open"
+            assert opted_out_file.caller_params == ""
             assert len(opted_out_file.read(2)) == 2
             with _scoped_ctx(
                 {
@@ -2197,11 +2224,50 @@ def test_zonal_file_lifecycle_detects_framework_once(monkeypatch, zonal_fs_harne
     assert zonal_fs_harness.captured
     assert all(p == frozenset() for _, _, _, p in zonal_fs_harness.captured)
 
+    from gcsfs.zonal_file import ZonalFile
+
+    for idx, open_fn in enumerate(
+        (
+            lambda p: fs.open(
+                p, "rb", cache_type="blockcache", cache_options={"maxblocks": 4}
+            ),
+            lambda p: ZonalFile(
+                fs, p, "rb", cache_type="blockcache", cache_options={"maxblocks": 4}
+            ),
+            lambda p: fs._open(
+                p, "rb", cache_type="blockcache", cache_options={"maxblocks": 4}
+            ),
+        )
+    ):
+        fs.invalidate_storage_layout_cache()
+        zonal_fs_harness.clear()
+        with open_fn(f"zonal-bucket/obj_{idx}") as zf:
+            assert (zf.caller_framework, zf.caller_method, zf.caller_params) == (
+                fw,
+                "open",
+                "cache_options",
+            )
+            read_out = []
+            t = threading.Thread(target=lambda: read_out.append(zf.read()))
+            t.start()
+            t.join()
+            assert read_out == [data]
+        assert {"layout", "http_info", "cat_file", "mrd_close"}.issubset(
+            {op for op, *_ in zonal_fs_harness.captured}
+        )
+        assert all(
+            p == frozenset({"cache_options"})
+            for _, _, _, p in zonal_fs_harness.captured
+        )
+        mrd_feat = _decode_features(dict(zonal_fs_harness.mrd_md[0])[GRPC_METADATA_KEY])
+        assert mrd_feat.method_params.cache_options is True
+        assert get_telemetry_context() == {}
+
 
 def test_zonal_file_pickle_reopen_detects_worker_framework_and_honors_opt_out(
     monkeypatch, zonal_fs_harness
 ):
-    """Verify ZonalFile pickle reopen detects worker framework on plain-driver handles and honors worker opt-out."""
+    """Verify ZonalFile pickle reopen detects worker framework, keeps explicit `cache_options`, and honors opt-out."""
     fs, data = zonal_fs_harness.fs, zonal_fs_harness.data
 
     detector = _CallerThreadOnlyDetector(None)
@@ -2212,8 +2278,14 @@ def test_zonal_file_pickle_reopen_detects_worker_framework_and_honors_opt_out(
         UsageMetricsTracker(detectors=[detector, gke_env]),
     )
 
-    with fs.open("zonal-bucket/obj", "rb", cache_type="none") as f:
+    with fs.open(
+        "zonal-bucket/obj",
+        "rb",
+        cache_type="blockcache",
+        cache_options={"maxblocks": 4},
+    ) as f:
         assert f.caller_framework == ""
+        assert f.caller_params == "cache_options"
         payload = pickle.dumps(f)
 
     detector.value = "ray"
@@ -2223,14 +2295,20 @@ def test_zonal_file_pickle_reopen_detects_worker_framework_and_honors_opt_out(
     with pickle.loads(payload) as reopened:
         assert reopened.caller_framework == "ray"
         assert reopened.caller_method == "open"
+        assert reopened.caller_params == "cache_options"
         assert reopened.read(4) == data[:4]
     assert detector.thread_names == [threading.current_thread().name]
     assert zonal_fs_harness.captured == [
-        ("layout", ("fw/ray", "env/gke"), "open", frozenset()),
-        ("http_info", ("fw/ray", "env/gke"), "open", frozenset()),
-        ("layout", ("fw/ray", "env/gke"), "open", frozenset()),
-        ("cat_file", ("fw/ray", "env/gke"), "file_read", frozenset()),
-        ("mrd_close", ("fw/ray", "env/gke"), "file_close", frozenset()),
+        ("layout", ("fw/ray", "env/gke"), "open", frozenset({"cache_options"})),
+        ("http_info", ("fw/ray", "env/gke"), "open", frozenset({"cache_options"})),
+        ("layout", ("fw/ray", "env/gke"), "open", frozenset({"cache_options"})),
+        ("cat_file", ("fw/ray", "env/gke"), "file_read", frozenset({"cache_options"})),
+        (
+            "mrd_close",
+            ("fw/ray", "env/gke"),
+            "file_close",
+            frozenset({"cache_options"}),
+        ),
     ]
 
     detector.thread_names.clear()
@@ -2240,7 +2318,11 @@ def test_zonal_file_pickle_reopen_detects_worker_framework_and_honors_opt_out(
         mp.setenv("DO_NOT_TRACK", "1")
         with pickle.loads(payload) as reopened_opted_out:
             with _scoped_ctx(
-                {Dimension.FRAMEWORK.value: "ray", Dimension.METHOD.value: "find"}
+                {
+                    Dimension.FRAMEWORK.value: "ray",
+                    Dimension.METHOD.value: "find",
+                    Dimension.METHOD_PARAMS.value: "detail",
+                }
             ):
                 assert reopened_opted_out.read(4) == data[:4]
     assert zonal_fs_harness.captured
@@ -2565,6 +2647,14 @@ _REAL_FS_PARAM_CASES = [
         frozenset({"detail", "prefix"}),
         id="walk",
     ),
+    pytest.param(
+        lambda fs, tmp_path: fs.read_text(
+            "test-bucket/file.txt", cache_options={"concurrency": 2}
+        ),
+        "read_text",
+        frozenset({"cache_options"}),
+        id="read_text",
+    ),
 ]
 
 
@@ -2856,7 +2946,9 @@ def test_walk_generator_retains_outer_context_when_unprimed_or_primed(detector):
 def test_gcsfile_pickle_reopen_detects_worker_framework_and_honors_opt_out(
     detector, spied_gcs_harness, monkeypatch
 ):
-    """Verify GCSFile pickle reopen detects worker framework, records `open`/`file_read`, and honors opt-out."""
+    """Verify GCSFile pickle reopen detects worker framework, keeps explicit `cache_options`, and honors opt-out."""
+    from gcsfs.core import GCSFile
+
     fs = spied_gcs_harness.fs
     gke_env = _CountingEnvDetector()
     monkeypatch.setattr(
@@ -2865,30 +2957,51 @@ def test_gcsfile_pickle_reopen_detects_worker_framework_and_honors_opt_out(
         UsageMetricsTracker(detectors=[detector, gke_env]),
     )
     detector.value = None
-    with fs.open("test-bucket/file.txt", "rb", size=4, cache_type="none") as f:
+    with fs.open("test-bucket/file.txt", "rb", size=4) as default_f:
+        assert default_f.caller_params == ""
+        default_payload = pickle.dumps(default_f)
+    with fs.open(
+        "test-bucket/file.txt",
+        "rb",
+        size=4,
+        cache_type="blockcache",
+        cache_options={"maxblocks": 4},
+    ) as f:
         assert f.caller_framework == ""
+        assert f.caller_params == "cache_options"
         assert len(f.read(1)) == 1
         payload = pickle.dumps(f)
 
     detector.value = "ray"
     detector.calls.clear()
     gke_env.calls = 0
+    with pickle.loads(default_payload) as default_reopened:
+        assert (
+            default_reopened.caller_framework,
+            default_reopened.caller_method,
+            default_reopened.caller_params,
+        ) == ("ray", "open", "")
+    detector.calls.clear()
     spied_gcs_harness.clear()
     with pickle.loads(payload) as reopened:
-        assert reopened.caller_framework == "ray"
-        assert reopened.caller_method == "open"
+        assert (
+            reopened.caller_framework,
+            reopened.caller_method,
+            reopened.caller_params,
+        ) == ("ray", "open", "cache_options")
         assert len(detector.calls) == 1
         open_seen = list(spied_gcs_harness.seen)
 
         spied_gcs_harness.clear()
         assert reopened.read() == b"OCK"
         assert spied_gcs_harness.seen == [
-            (("fw/ray", "env/gke"), "file_read", frozenset())
+            (("fw/ray", "env/gke"), "file_read", frozenset({"cache_options"}))
         ]
         assert len(detector.calls) == 1
     assert open_seen
     assert all(
-        entry == (("fw/ray", "env/gke"), "open", frozenset()) for entry in open_seen
+        entry == (("fw/ray", "env/gke"), "open", frozenset({"cache_options"}))
+        for entry in open_seen
     )
 
     detector.calls.clear()
@@ -2898,7 +3011,11 @@ def test_gcsfile_pickle_reopen_detects_worker_framework_and_honors_opt_out(
         mp.setenv("DO_NOT_TRACK", "1")
         with pickle.loads(payload) as reopened_opted_out:
             with _scoped_ctx(
-                {Dimension.FRAMEWORK.value: "ray", Dimension.METHOD.value: "cat"}
+                {
+                    Dimension.FRAMEWORK.value: "ray",
+                    Dimension.METHOD.value: "cat",
+                    Dimension.METHOD_PARAMS.value: "detail",
+                }
             ):
                 assert reopened_opted_out.read() == b"OCK"
     assert spied_gcs_harness.seen
@@ -2912,17 +3029,33 @@ def test_gcsfile_pickle_reopen_detects_worker_framework_and_honors_opt_out(
         mp.setenv("DO_NOT_TRACK", "1")
         with fs.open("test-bucket/file.txt", "rb", size=4, cache_type="none") as f_opt:
             assert f_opt.caller_framework == ""
+            assert f_opt.caller_params == ""
             driver_opted_out_payload = pickle.dumps(f_opt)
 
     detector.calls.clear()
     spied_gcs_harness.clear()
     with pickle.loads(driver_opted_out_payload) as reopened_enabled:
         assert reopened_enabled.caller_framework == "ray"
+        assert reopened_enabled.caller_params == ""
         spied_gcs_harness.clear()
         assert reopened_enabled.read() == b"MOCK"
         assert spied_gcs_harness.seen == [
             (("fw/ray", "env/gke"), "file_read", frozenset())
         ]
+
+    with _scoped_ctx(
+        {Dimension.METHOD.value: "", Dimension.METHOD_PARAMS.value: "detail"}
+    ):
+        with GCSFile(
+            fs,
+            "test-bucket/file.txt",
+            "rb",
+            size=4,
+            cache_type="blockcache",
+            cache_options={"maxblocks": 4},
+        ) as untracked_ctx_file:
+            assert untracked_ctx_file.caller_method == ""
+            assert untracked_ctx_file.caller_params == ""
 
 
 def test_unmapped_file_method_preserves_outer_or_unset_method(
