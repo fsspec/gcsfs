@@ -11,16 +11,16 @@ The Python data ecosystem comprises a rich variety of frameworks—including Pan
 What is Collected
 -----------------
 
-When an operation is executed, ``gcsfs`` identifies the name of the top-level calling framework and the compute environment, and appends an anonymous brand identifier token and an environment token to the HTTP ``User-Agent`` header of outgoing requests to Google Cloud Storage.
+When an operation is executed, ``gcsfs`` identifies the name of the top-level calling framework, the public method name, and the compute environment, and sends them exclusively in the structured ``X-Goog-Storage-Gcsfs-Features`` HTTP header (or ``x-goog-storage-gcsfs-features`` gRPC metadata) as a web-safe base64-encoded ``GcsfsFeatures`` protobuf payload. Outgoing HTTP ``User-Agent`` headers do not carry telemetry attribution tokens.
 
-Outgoing HTTP JSON requests also emit the encoded ``X-Goog-Storage-Gcsfs-Features`` header alongside ``User-Agent`` (matching ``x-goog-storage-gcsfs-features`` on gRPC), honoring caller-supplied overrides case-insensitively and omitting the header when no attribution dimensions are active.
+``X-Goog-Storage-Gcsfs-Features`` is omitted when no recognized attribution dimensions are active.
 
 Example Header
 ~~~~~~~~~~~~~~
 
 .. code-block:: text
 
-   User-Agent: python-gcsfs/2026.3.0 fw/pandas env/gke
+   User-Agent: python-gcsfs/2026.3.0
    X-Goog-Storage-Gcsfs-Features: EAEYAg==
 
 Recognized Frameworks
@@ -28,11 +28,11 @@ Recognized Frameworks
 
 The detector recognizes major ecosystem libraries, including:
 
-- **Data Processing & Analytics:** ``pandas`` (``fw/pandas``), ``polars`` (``fw/polars``), ``dask`` (``fw/dask``), ``ray`` (``fw/ray``), ``pyspark`` (``fw/spark``), ``pyarrow`` (``fw/pyarrow``), ``duckdb`` (``fw/duckdb``), ``xarray`` (``fw/xarray``), ``fastparquet`` (``fw/fastparquet``).
-- **Machine Learning & Deep Learning:** ``torch`` (``fw/torch``), ``torchdata`` (``fw/torchdata``), ``lightning`` / ``pytorch_lightning`` (``fw/lightning``), ``datasets`` (``fw/datasets``), ``transformers`` (``fw/transformers``), ``orbax`` (``fw/orbax``), ``tensorstore`` (``fw/tensorstore``), ``tensorflow`` (``fw/tensorflow``), ``jax`` (``fw/jax``).
-- **AI Agents:** Agent Development Kit, ``google.adk`` (``fw/adk``).
+- **Data Processing & Analytics:** ``pandas``, ``polars``, ``dask``, ``ray``, ``pyspark`` (``spark``), ``pyarrow``, ``duckdb``, ``xarray``, ``fastparquet``.
+- **Machine Learning & Deep Learning:** ``torch``, ``torchdata``, ``lightning`` / ``pytorch_lightning`` (``lightning``), ``datasets``, ``transformers``, ``orbax``, ``tensorstore``, ``tensorflow``, ``jax``.
+- **AI Agents:** Agent Development Kit, ``google.adk`` (``adk``).
 
-If no recognized framework is present on the call stack (e.g. pure Python scripts or unrecognized utilities), no framework token is added to the header. When multiple recognized libraries appear in the same call (for example, ``dask`` calling ``pandas`` and ``pyarrow``), only a single token for the outermost recognized framework (``fw/dask``) is included.
+If no recognized framework is present on the call stack (e.g. pure Python scripts or unrecognized utilities), the framework field is left unset in ``X-Goog-Storage-Gcsfs-Features``. When multiple recognized libraries appear in the same call (for example, ``dask`` calling ``pandas`` and ``pyarrow``), only the outermost recognized framework (``dask``) is recorded.
 
 Method Names
 ~~~~~~~~~~~~
@@ -44,11 +44,11 @@ Compute Environments
 
 The environment detector classifies the host into one of three values:
 
-- ``env/gce``: VMs on Compute Engine.
-- ``env/gke``: GKE pods.
-- ``env/oth``: Serverless runtimes (Cloud Run, Cloud Functions, App Engine) and hosts outside Google Cloud.
+- ``gce``: VMs on Compute Engine.
+- ``gke``: GKE pods.
+- ``oth`` (``GCSFS_ENVIRONMENT_OTHER``): Serverless runtimes (Cloud Run, Cloud Functions, App Engine) and hosts outside Google Cloud.
 
-Detection runs once per process (and not at all when telemetry is disabled). On Google Cloud VMs, ``gcsfs`` makes a background request to the `metadata server <https://cloud.google.com/compute/docs/metadata/overview>`_ to tell GKE apart from Compute Engine; elsewhere it uses only local environment variables and the machine's hardware product name. Setting ``GCE_METADATA_HOST``, ``GCE_METADATA_ROOT``, or ``GCE_METADATA_IP`` points ``gcsfs`` at that metadata server outside Google Cloud VMs too (unless a serverless runtime matched first), and ``NO_GCE_CHECK=true`` skips the network request altogether. Storage operations never wait for this lookup, so requests sent before it finishes omit the ``env/`` token.
+Detection runs once per process (and not at all when telemetry is disabled). On Google Cloud VMs, ``gcsfs`` makes a background request to the `metadata server <https://cloud.google.com/compute/docs/metadata/overview>`_ to tell GKE apart from Compute Engine; elsewhere it uses only local environment variables and the machine's hardware product name. Setting ``GCE_METADATA_HOST``, ``GCE_METADATA_ROOT``, or ``GCE_METADATA_IP`` points ``gcsfs`` at that metadata server outside Google Cloud VMs too (unless a serverless runtime matched first), and ``NO_GCE_CHECK=true`` skips the network request altogether. Storage operations never wait for this lookup, so requests sent before it finishes omit the environment field.
 
 How the environment is detected
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -80,12 +80,12 @@ Kubernetes pod).
 gRPC Metadata
 ~~~~~~~~~~~~~
 
-Because gRPC channels use a ``User-Agent`` fixed when the client is created, ``gcsfs`` instead attaches the encoded ``x-goog-storage-gcsfs-features`` metadata header (a web-safe base64-encoded ``GcsfsFeatures`` protobuf payload) when active attribution dimensions are present:
+gRPC calls use the same web-safe base64-encoded ``GcsfsFeatures`` protobuf payload in the ``x-goog-storage-gcsfs-features`` metadata header when active attribution dimensions are present:
 
 - **Storage Control Unary RPCs:** Every unary call (including LRO operations, bucket layout lookups, and HNS folder operations such as ``mkdir``, ``rmdir``, and ``mv``) attaches ``x-goog-storage-gcsfs-features`` per RPC.
 - **Rapid (Zonal) and Rapid Cache Ultra Stream Opens:** Initial read (``MRD``) stream opens, and appendable write stream opens (Rapid zonal writes, and Rapid Cache Ultra writes when ``rcu_rapid_write=True``), attach ``x-goog-storage-gcsfs-features`` at open time.
 
-Caller-supplied ``x-goog-storage-gcsfs-features`` metadata is preserved verbatim (case-insensitively) without being overwritten, and the header is omitted when no recognized attribution dimensions are active.
+The header is omitted when no recognized attribution dimensions are active.
 
 .. code-block:: text
 
@@ -104,7 +104,7 @@ Telemetry collection is strictly limited to open-source library names, public me
 - **No File Paths or Bucket Names:** Bucket names, object keys, folder hierarchies, and URIs are never collected.
 - **No User Code or Logic:** Variable names, function arguments, and script logic are never accessed.
 - **No Credentials or Identifiers:** API keys, service account credentials, IAM identities, project IDs, and IP addresses are never collected.
-- **Header Injection Safety:** All tokens are sanitized strictly against RFC 9110 HTTP token specifications (alphanumeric characters, hyphens, underscores, and dots only).
+- **Header Injection Safety:** Only predefined protobuf enum values and boolean flags are ever serialized into the URL-safe base64 ``GcsfsFeatures`` header; arbitrary or unrecognized strings are ignored and never emitted on the wire.
 - **No Cluster or Instance Names:** The metadata query checks only whether ``cluster-name`` is set and never sends cluster names, instance names, or zones to GCS.
 
 How It Works
@@ -146,6 +146,5 @@ The setting is read on every call, so it can be set (or changed) at any time bef
 When disabled:
 
 - All stack frame inspections and detector evaluations are skipped immediately.
-- Outgoing ``User-Agent`` headers omit ``fw/`` and ``env/`` telemetry tokens, HTTP requests omit ``X-Goog-Storage-Gcsfs-Features``, and gRPC calls omit ``x-goog-storage-gcsfs-features`` metadata.
+- HTTP requests omit ``X-Goog-Storage-Gcsfs-Features``, and gRPC calls omit ``x-goog-storage-gcsfs-features`` metadata.
 - ``gcsfs`` sends no requests to the metadata server.
-- Caller-supplied overrides (such as explicit HTTP ``X-Goog-Storage-Gcsfs-Features`` headers or gRPC ``x-goog-storage-gcsfs-features`` metadata) are preserved untouched.
