@@ -8,7 +8,6 @@ from collections.abc import Mapping
 from gcsfs.telemetry.context import (
     USER_AGENT_DIMENSIONS,
     Dimension,
-    canonicalize_method_params,
     get_telemetry_context,
     sanitize_token,
 )
@@ -52,7 +51,6 @@ class UsageMetricsTracker:
         *,
         call_scoped_only: bool,
         method: str | None = None,
-        method_params: str = "",
     ) -> dict[str, str]:
         """
         Collect telemetry tokens. For each dimension, the value already in the
@@ -70,8 +68,6 @@ class UsageMetricsTracker:
         method : str | None, optional
             Top-level public method name to attach under Dimension.METHOD
             (or "" as a negative-cache sentinel for untracked entry points).
-        method_params : str, optional
-            `.`-joined tracked parameter names to attach under Dimension.METHOD_PARAMS.
 
         Returns
         -------
@@ -85,8 +81,7 @@ class UsageMetricsTracker:
         tokens = get_telemetry_context()
         if method is not None and Dimension.METHOD.value not in tokens:
             tokens[Dimension.METHOD.value] = method
-            if method and (canon_mp := canonicalize_method_params(method_params)):
-                tokens[Dimension.METHOD_PARAMS.value] = canon_mp
+            tokens.pop(Dimension.METHOD_PARAMS.value, None)
 
         # Run registered detectors for any requested dimensions not already set
         for detector in self.detectors:

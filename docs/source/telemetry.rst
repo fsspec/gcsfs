@@ -37,7 +37,7 @@ If no recognized framework is present on the call stack (e.g. pure Python script
 Method Names
 ~~~~~~~~~~~~
 
-``gcsfs`` also records the top-level public filesystem or file operation name (such as ``ls``, ``cat_file``, ``find``, ``open``, or subsequent file reads and writes), never file paths, argument values, or payloads. For methods that accept ``recursive``, ``detail``, ``withdirs``, ``prefix``, or ``cache_options``, ``gcsfs`` also records only boolean flag presence for the outermost call (ignoring default ``"adaptive"`` cache settings on ``GCSFile`` while keeping explicit ``open()`` ``cache_options`` across handle operations).
+``gcsfs`` also records the top-level public filesystem or file operation name (such as ``ls``, ``cat_file``, ``find``, ``open``, or subsequent file reads and writes), never file paths, argument values, or payloads. For methods that accept ``recursive``, ``detail``, ``withdirs``, ``prefix``, or ``cache_options``, ``gcsfs`` also records only boolean flag presence for the outermost call (ignoring default ``"adaptive"`` cache settings on ``GCSFile`` and scoping explicit ``open()`` ``cache_options`` to ``open``).
 
 Compute Environments
 ~~~~~~~~~~~~~~~~~~~~

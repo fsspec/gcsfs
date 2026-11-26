@@ -154,6 +154,11 @@ _METHOD_TRACKED_PARAMS: dict[str, frozenset[str]] = {
     "write_text": frozenset({"cache_options"}),
 }
 
+_METHOD_IMPLICIT_TRUTHY_DEFAULTS: dict[str, frozenset[str]] = {
+    # `AsyncFileSystem._glob` defaults `withdirs` to True via `kwargs.pop("withdirs", True)`.
+    "glob": frozenset({"withdirs"}),
+}
+
 _ParamSpec = tuple[tuple[tuple[int, str], ...], frozenset[str], str]
 _EMPTY_PARAM_SPEC: _ParamSpec = ((), frozenset(), "")
 
@@ -172,16 +177,13 @@ def _is_truthy_param(val: Any) -> bool:
         return False
 
 
-@functools.lru_cache(maxsize=256)
-def _cached_positional_spec(
-    raw_fn: Callable, method_name: str
-) -> tuple[_ParamSpec, _ParamSpec]:
-    """Cache `(unbound_spec, bound_spec)` on unbound functions without retaining instances."""
+def _param_spec(func: Callable, method_name: str) -> _ParamSpec:
+    """Return `(pos_pairs, truthy_defaults, default_str)` for tracked parameters on `func`."""
     allowed = _METHOD_TRACKED_PARAMS[method_name]
     try:
-        params = list(inspect.signature(raw_fn).parameters.values())
+        params = list(inspect.signature(func).parameters.values())
     except (TypeError, ValueError):
-        return _EMPTY_PARAM_SPEC, _EMPTY_PARAM_SPEC
+        return _EMPTY_PARAM_SPEC
     pos_pairs = tuple(
         (idx, p.name)
         for idx, p in enumerate(params)
@@ -192,46 +194,52 @@ def _cached_positional_spec(
         )
         and p.name in allowed
     )
-    truthy_defaults = frozenset(
-        p.name
-        for p in params
-        if p.name in allowed
-        and p.default is not inspect.Parameter.empty
-        and _is_truthy_param(p.default)
+    implicit_defaults = (
+        _METHOD_IMPLICIT_TRUTHY_DEFAULTS.get(method_name, frozenset())
+        - {p.name for p in params}
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params)
+        else frozenset()
     )
-    default_str = ".".join(sorted(truthy_defaults))
-    unbound_spec: _ParamSpec = (pos_pairs, truthy_defaults, default_str)
-    bound_pairs = tuple((idx - 1, name) for idx, name in pos_pairs if idx >= 1)
-    bound_spec: _ParamSpec = (bound_pairs, truthy_defaults, default_str)
-    return unbound_spec, bound_spec
-
-
-def _positional_tracked_params(func: Callable, method_name: str) -> _ParamSpec:
-    """Return `(pos_pairs, truthy_defaults, default_str)` for tracked parameters on `func`."""
-    unwrapped = inspect.unwrap(func, stop=lambda f: isinstance(f, types.MethodType))
-    is_bound = isinstance(unwrapped, types.MethodType)
-    raw_fn = inspect.unwrap(unwrapped.__func__) if is_bound else unwrapped
-    try:
-        unbound_spec, bound_spec = _cached_positional_spec(raw_fn, method_name)
-    except TypeError:
-        unbound_spec, bound_spec = _cached_positional_spec.__wrapped__(
-            raw_fn, method_name
+    truthy_defaults = (
+        frozenset(
+            p.name
+            for p in params
+            if p.name in allowed
+            and p.default is not inspect.Parameter.empty
+            and _is_truthy_param(p.default)
         )
-    return bound_spec if is_bound else unbound_spec
+        | implicit_defaults
+    )
+    return pos_pairs, truthy_defaults, ".".join(sorted(truthy_defaults))
 
 
-def _pick_super_spec(
+@functools.lru_cache(maxsize=256)
+def _cached_param_spec(raw_fn: Callable, method_name: str) -> _ParamSpec:
+    """Cache `_param_spec` on unbound functions without retaining instances."""
+    return _param_spec(raw_fn, method_name)
+
+
+def _resolve_call_spec(
     target: Callable,
     orig_fn: Callable,
-    unbound_spec: _ParamSpec | None,
-    bound_spec: _ParamSpec | None,
-) -> _ParamSpec | None:
-    """Return precomputed spec when `target` still resolves to `orig_fn`, else `None`."""
+    orig_spec: _ParamSpec | None,
+    args: tuple,
+    pass_args: tuple,
+    method_name: str,
+) -> tuple[_ParamSpec | None, tuple]:
+    """Return `(spec, extract_args)` matched to `target` without retaining instances."""
+    if orig_spec is None:
+        return None, args
     if target is orig_fn:
-        return unbound_spec
-    if isinstance(target, types.MethodType) and target.__func__ is orig_fn:
-        return bound_spec
-    return None
+        return orig_spec, args
+    if isinstance(target, types.MethodType):
+        if target.__func__ is orig_fn:
+            return orig_spec, args
+        try:
+            return _cached_param_spec(target.__func__, method_name), args
+        except TypeError:
+            return _param_spec(target.__func__, method_name), args
+    return _param_spec(target, method_name), pass_args
 
 
 def _extract_method_params(
@@ -239,8 +247,8 @@ def _extract_method_params(
     args: tuple,
     kwargs: dict,
     method_name: str,
-) -> str | None:
-    """Extract sorted `.`-joined enabled parameter names, or `None` if opted out."""
+) -> str:
+    """Extract sorted `.`-joined enabled parameter names."""
     allowed = _METHOD_TRACKED_PARAMS[method_name]
     pos_pairs, truthy_defaults, default_str = pos_spec
     n_args = len(args)
@@ -248,8 +256,6 @@ def _extract_method_params(
     has_kw = bool(kwargs) and any(name in kwargs for name in allowed)
     if not has_pos and not has_kw:
         return default_str
-    if not manager.default_usage_tracker.is_enabled():
-        return None
     found = set(truthy_defaults)
     if has_pos:
         for idx, name in pos_pairs:
@@ -269,27 +275,20 @@ def _extract_method_params(
 
 
 def _collect_call_tokens(
-    func: Callable,
+    pos_spec: _ParamSpec | None,
     call_args: tuple,
     kwargs: dict,
     method_name: str,
-    pos_spec: _ParamSpec | None = None,
 ) -> dict[str, str]:
     """Collect outermost call telemetry, skipping param evaluation when disabled."""
-    if method_name in _METHOD_TRACKED_PARAMS:
-        spec = (
-            pos_spec
-            if pos_spec is not None
-            else _positional_tracked_params(func, method_name)
-        )
-        params_str = _extract_method_params(spec, call_args, kwargs, method_name)
-        if params_str is None:
-            return {}
-    else:
-        params_str = ""
-    return manager.default_usage_tracker.collect_tokens_map(
-        call_scoped_only=True, method=method_name, method_params=params_str
+    tokens_map = manager.default_usage_tracker.collect_tokens_map(
+        call_scoped_only=True, method=method_name
     )
+    if tokens_map and pos_spec is not None:
+        params_str = _extract_method_params(pos_spec, call_args, kwargs, method_name)
+        if params_str:
+            tokens_map[Dimension.METHOD_PARAMS.value] = params_str
+    return tokens_map
 
 
 def _resolve_super_method(
@@ -328,8 +327,6 @@ def _run_sync(
     func: Callable,
     *args,
     tokens_map: dict[str, str] | None = None,
-    method_name: str = "",
-    pos_spec: _ParamSpec | None = None,
     **kwargs,
 ) -> Any:
     """Set telemetry context on the caller thread and execute `func` via `fsspec.asyn.sync`."""
@@ -338,22 +335,23 @@ def _run_sync(
     if tokens_map is None:
         if has_telemetry_context(Dimension.METHOD):
             return fsspec.asyn.sync(loop, func, *args, **kwargs)
-        tokens_map = _collect_call_tokens(func, args, kwargs, method_name, pos_spec)
+        tokens_map = manager.default_usage_tracker.collect_tokens_map(
+            call_scoped_only=True, method=""
+        )
     with _telemetry_context(tokens_map):
         return fsspec.asyn.sync(loop, func, *args, **kwargs)
 
 
 def _snapshot_generator_tokens(
-    func: Callable,
+    pos_spec: _ParamSpec | None,
     call_args: tuple,
     kwargs: dict,
     method_name: str,
-    pos_spec: _ParamSpec | None = None,
 ) -> dict[str, str]:
     """Capture call-scoped telemetry tokens once for a generator's steps and close."""
     if has_telemetry_context(Dimension.METHOD):
         return get_telemetry_context()
-    return _collect_call_tokens(func, call_args, kwargs, method_name, pos_spec) or {
+    return _collect_call_tokens(pos_spec, call_args, kwargs, method_name) or {
         Dimension.METHOD.value: method_name
     }
 
@@ -370,10 +368,10 @@ def _gcs_async_wrapper(
     """
     if method_name is None:
         method_name = _tracked_method_name(func)
-    unbound_spec, bound_spec = (
-        _cached_positional_spec(inspect.unwrap(func), method_name)
+    spec = (
+        _param_spec(func, method_name)
         if method_name in _METHOD_TRACKED_PARAMS
-        else (None, None)
+        else None
     )
 
     if inspect.isasyncgenfunction(func):
@@ -381,12 +379,11 @@ def _gcs_async_wrapper(
         @functools.wraps(func)
         async def gen_wrapper(*args, **kwargs):
             target, pass_args = _resolve_super_method(func, super_cls, args)
+            call_spec, extract_args = _resolve_call_spec(
+                target, func, spec, args, pass_args, method_name
+            )
             tokens_map = _snapshot_generator_tokens(
-                target,
-                pass_args,
-                kwargs,
-                method_name,
-                _pick_super_spec(target, func, unbound_spec, bound_spec),
+                call_spec, extract_args, kwargs, method_name
             )
             gen = target(*pass_args, **kwargs)
             try:
@@ -410,13 +407,10 @@ def _gcs_async_wrapper(
         # O(1) fast path for nested calls (already inside _run_sync or another wrapped call)
         if has_telemetry_context(Dimension.METHOD):
             return await target(*pass_args, **kwargs)
-        tokens_map = _collect_call_tokens(
-            target,
-            pass_args,
-            kwargs,
-            method_name,
-            _pick_super_spec(target, func, unbound_spec, bound_spec),
+        call_spec, extract_args = _resolve_call_spec(
+            target, func, spec, args, pass_args, method_name
         )
+        tokens_map = _collect_call_tokens(call_spec, extract_args, kwargs, method_name)
         with _telemetry_context(tokens_map):
             return await target(*pass_args, **kwargs)
 
@@ -441,10 +435,10 @@ def _gcs_sync_wrapper(
     """
     if method_name is None:
         method_name = _tracked_method_name(func)
-    unbound_spec, bound_spec = (
-        _cached_positional_spec(inspect.unwrap(func), method_name)
+    spec = (
+        _param_spec(func, method_name)
         if method_name in _METHOD_TRACKED_PARAMS
-        else (None, None)
+        else None
     )
 
     if inspect.isasyncgenfunction(func):
@@ -452,14 +446,11 @@ def _gcs_sync_wrapper(
         @functools.wraps(func)
         def gen_wrapper(*args, **kwargs):
             self, actual_func, pass_args = _resolve_target_method(func, args)
-            spec = (
-                bound_spec
-                if isinstance(actual_func, types.MethodType)
-                and actual_func.__func__ is func
-                else None
+            call_spec, extract_args = _resolve_call_spec(
+                actual_func, func, spec, args, pass_args, method_name
             )
             tokens_map = _snapshot_generator_tokens(
-                actual_func, pass_args, kwargs, method_name, spec
+                call_spec, extract_args, kwargs, method_name
             )
 
             def _iter():
@@ -486,18 +477,20 @@ def _gcs_sync_wrapper(
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             self, actual_func, pass_args = _resolve_target_method(func, args)
-            spec = (
-                bound_spec
-                if isinstance(actual_func, types.MethodType)
-                and actual_func.__func__ is func
-                else None
-            )
+            if has_telemetry_context(Dimension.METHOD):
+                tokens_map = None
+            else:
+                call_spec, extract_args = _resolve_call_spec(
+                    actual_func, func, spec, args, pass_args, method_name
+                )
+                tokens_map = _collect_call_tokens(
+                    call_spec, extract_args, kwargs, method_name
+                )
             return _run_sync(
                 self.loop,
                 actual_func,
                 *pass_args,
-                method_name=method_name,
-                pos_spec=spec,
+                tokens_map=tokens_map,
                 **kwargs,
             )
 
@@ -509,13 +502,10 @@ def _gcs_sync_wrapper(
         target, pass_args = _resolve_super_method(func, super_cls, args)
         if has_telemetry_context(Dimension.METHOD):
             return target(*pass_args, **kwargs)
-        tokens_map = _collect_call_tokens(
-            target,
-            pass_args,
-            kwargs,
-            method_name,
-            _pick_super_spec(target, func, unbound_spec, bound_spec),
+        call_spec, extract_args = _resolve_call_spec(
+            target, func, spec, args, pass_args, method_name
         )
+        tokens_map = _collect_call_tokens(call_spec, extract_args, kwargs, method_name)
         with _telemetry_context(tokens_map):
             return target(*pass_args, **kwargs)
 
@@ -686,7 +676,15 @@ def _setup_file_telemetry(file_obj, file_method: str = "") -> contextvars.Token 
         method = file_method
     else:
         method = current_method
-    params = getattr(file_obj, "caller_params", "") if method else ""
+    params = (
+        getattr(file_obj, "caller_params", "")
+        if method
+        and (
+            saved_method != "open"
+            or getattr(file_obj, "_initializing_telemetry", False)
+        )
+        else ""
+    )
 
     # Fast path: telemetry already active (e.g. nested file method calls), skip a redundant set/reset
     if (
@@ -744,39 +742,53 @@ def wrap_file_methods(cls: type) -> None:
 
     orig_init = cls.__dict__.get("__init__", cls.__init__)
     if not getattr(orig_init, "_is_telemetry_init_wrapped", False):
-        init_pos_spec = _positional_tracked_params(orig_init, "open")
+        init_pos_spec = _param_spec(orig_init, "open")
 
         @functools.wraps(orig_init)
         def init_wrapper(*args, **kwargs):
             self = args[0]
-            if not hasattr(self, "caller_method"):
-                ctx = get_telemetry_context()
-                if Dimension.METHOD.value in ctx:
-                    self.caller_method = ctx[Dimension.METHOD.value]
-                    self.caller_params = ctx.get(Dimension.METHOD_PARAMS.value, "")
-                else:
-                    self.caller_method = "open"
-                    self.caller_params = (
-                        _extract_method_params(init_pos_spec, args, kwargs, "open")
-                        or ""
-                    )
+            if getattr(self, "_initializing_telemetry", False):
+                return orig_init(*args, **kwargs)
             need_scope = is_gcs_file and not has_telemetry_context(Dimension.METHOD)
-            was_init = getattr(self, "_initializing_telemetry", False)
+            tokens_map = (
+                manager.default_usage_tracker.collect_tokens_map(
+                    call_scoped_only=True,
+                    method="open",
+                )
+                if need_scope
+                else None
+            )
+            ctx = get_telemetry_context()
+            if Dimension.METHOD.value in ctx:
+                self.caller_method = ctx[Dimension.METHOD.value]
+                self.caller_params = (
+                    ctx.get(Dimension.METHOD_PARAMS.value, "")
+                    if self.caller_method
+                    else ""
+                )
+            else:
+                self.caller_method = "open"
+                enabled = (
+                    bool(tokens_map)
+                    if need_scope
+                    else manager.default_usage_tracker.is_enabled()
+                )
+                self.caller_params = (
+                    _extract_method_params(init_pos_spec, args, kwargs, "open")
+                    if enabled
+                    else ""
+                )
+            if tokens_map and self.caller_params:
+                tokens_map[Dimension.METHOD_PARAMS.value] = self.caller_params
             self._initializing_telemetry = True
             try:
                 if need_scope:
-                    tokens_map = manager.default_usage_tracker.collect_tokens_map(
-                        call_scoped_only=True,
-                        method=self.caller_method,
-                        method_params=self.caller_params,
-                    )
                     with _telemetry_context(tokens_map):
                         orig_init(*args, **kwargs)
                 else:
                     orig_init(*args, **kwargs)
             finally:
-                if not was_init:
-                    self.__dict__.pop("_initializing_telemetry", None)
+                self.__dict__.pop("_initializing_telemetry", None)
 
         init_wrapper._is_telemetry_init_wrapped = True
         setattr(cls, "__init__", init_wrapper)
