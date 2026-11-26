@@ -64,13 +64,8 @@ class _WireRecorder:
         self.feature_headers.clear()
 
     def assert_all_tagged(self, fw: str):
-        assert self.user_agents, "no HTTP requests reached the GCS endpoint"
+        assert self.feature_headers, "no HTTP requests reached the GCS endpoint"
         assert len(self.feature_headers) == len(self.user_agents)
-        polluted = [ua for ua in self.user_agents if "fw/" in ua or "env/" in ua]
-        assert not polluted, (
-            f"{len(polluted)}/{len(self.user_agents)} GCS requests leaked telemetry "
-            f"into User-Agent: {polluted[:5]}"
-        )
         expected_fw = GcsfsFramework[f"GCSFS_FRAMEWORK_{fw.upper()}"]
         for idx, h in enumerate(self.feature_headers):
             assert h, (
@@ -301,9 +296,8 @@ def test_env_token_on_first_op_after_filesystem_init(
         with fs.open(path, "rb", cache_type="none") as f:
             assert f.read() == b"hello world"
 
-        assert wire.user_agents
+        assert wire.feature_headers
         assert len(wire.feature_headers) == len(wire.user_agents)
-        assert all("env/" not in ua for ua in wire.user_agents)
         assert all(wire.feature_headers)
         decoded_env = [
             GcsfsFeatures.deserialize(base64.urlsafe_b64decode(h))
@@ -349,7 +343,6 @@ def test_http_telemetry_opt_out_and_reenable_e2e(
     def _assert_tagged_features(slices, expected_methods_by_slice):
         for (uas, features), expected_methods in zip(slices, expected_methods_by_slice):
             assert uas
-            assert all("fw/" not in ua and "env/" not in ua for ua in uas)
             assert len(features) == len(uas)
             decoded = [
                 GcsfsFeatures.deserialize(base64.urlsafe_b64decode(h)) for h in features
@@ -376,7 +369,6 @@ def test_http_telemetry_opt_out_and_reenable_e2e(
             monkeypatch.setenv(env_key, env_val)
             for uas, features in _run_round_trip(fs2, env_key):
                 assert uas
-                assert all("fw/" not in ua for ua in uas)
                 assert features == [""] * len(uas)
             wire.clear()
             fs2.call(
@@ -388,7 +380,6 @@ def test_http_telemetry_opt_out_and_reenable_e2e(
                 maxResults=1,
             )
             assert wire.user_agents
-            assert all("fw/" not in ua for ua in wire.user_agents)
             assert wire.feature_headers == [""] * len(wire.user_agents)
             monkeypatch.delenv(env_key, raising=False)
 

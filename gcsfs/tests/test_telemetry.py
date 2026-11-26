@@ -402,7 +402,7 @@ def test_unrecognized_and_malicious_context_values_never_reach_headers(monkeypat
     token = set_telemetry_context(Dimension.FRAMEWORK, "  PANDAS ")
     try:
         headers = fs._get_headers(None)
-        assert "fw/" not in headers["User-Agent"]
+        assert headers["User-Agent"] == f"python-gcsfs/{version}"
         decoded = _decode_features(headers[HTTP_HEADER_KEY])
         assert decoded.framework == GcsfsFramework.GCSFS_FRAMEWORK_PANDAS
     finally:
@@ -1343,11 +1343,8 @@ def test_http_headers_exclude_telemetry_from_user_agent_and_respect_opt_out(
         }
         assert tracker.get_dimension(Dimension.METHOD) == "find"
         headers = fs._get_headers(None)
-        ua = headers["User-Agent"]
         decoded = _decode_features(headers[HTTP_HEADER_KEY])
-        assert "fw/" not in ua
-        assert "env/" not in ua
-        assert "m/" not in ua
+        assert headers["User-Agent"] == f"python-gcsfs/{version}"
         assert (decoded.method, decoded.framework, decoded.environment) == (
             GcsfsMethod.GCSFS_METHOD_FIND,
             GcsfsFramework.GCSFS_FRAMEWORK_PANDAS,
@@ -1365,8 +1362,7 @@ def test_http_headers_exclude_telemetry_from_user_agent_and_respect_opt_out(
                 assert tracker.get_dimension(Dimension.METHOD) is None
                 assert tracker.collect_tokens_map(call_scoped_only=False) == {}
                 disabled_headers = fs._get_headers(None)
-                assert "fw/" not in disabled_headers["User-Agent"]
-                assert "env/" not in disabled_headers["User-Agent"]
+                assert disabled_headers["User-Agent"] == f"python-gcsfs/{version}"
                 assert HTTP_HEADER_KEY not in disabled_headers
 
 
@@ -1478,6 +1474,9 @@ def test_opted_out_fs_and_open_file_suppress_telemetry(
                 assert int(opted_out_file.info()["size"]) > 0
             assert len(spied_gcs_harness.seen) >= 3
             assert all(entry == ({}, None) for entry in spied_gcs_harness.seen)
+            assert spied_gcs_harness.feature_headers == [""] * len(
+                spied_gcs_harness.seen
+            )
             assert detector.calls == []
             assert gke_env.calls == 0
 
@@ -1492,6 +1491,22 @@ def test_opted_out_fs_and_open_file_suppress_telemetry(
         assert all(
             entry == ({"env": "gke"}, "file_info")
             for entry in spied_gcs_harness.seen[1:]
+        )
+        decoded_headers = [
+            _decode_features(h) for h in spied_gcs_harness.feature_headers
+        ]
+        assert len(decoded_headers) == len(spied_gcs_harness.seen)
+        assert (decoded_headers[0].environment, decoded_headers[0].method) == (
+            GcsfsEnvironment.GCSFS_ENVIRONMENT_GKE,
+            GcsfsMethod.GCSFS_METHOD_FILE_READ,
+        )
+        assert all(
+            (d.environment, d.method)
+            == (
+                GcsfsEnvironment.GCSFS_ENVIRONMENT_GKE,
+                GcsfsMethod.GCSFS_METHOD_FILE_INFO,
+            )
+            for d in decoded_headers[1:]
         )
         assert detector.calls == []
         assert gke_env.calls >= 2
@@ -1722,9 +1737,6 @@ def test_all_parent_methods_telemetry_coverage(
 
     assert len(user_agents) > 0, f"operation {name} did not execute any network calls"
     assert len(feature_headers) == len(user_agents)
-    assert all(
-        "fw/" not in ua for ua in user_agents
-    ), f"operation {name} leaked fw/ into User-Agent: {user_agents}"
     assert len(spied_gcs_harness.seen) > 0
     expected_set = (
         expected_method if isinstance(expected_method, set) else {expected_method}
@@ -1964,7 +1976,6 @@ def test_zonal_file_lifecycle_detects_framework_once(monkeypatch, zonal_fs_harne
     assert (
         len(zonal_fs_harness.feature_headers) == len(zonal_fs_harness.user_agents) > 0
     )
-    assert all("fw/" not in ua for ua in zonal_fs_harness.user_agents)
     assert all(
         _decode_features(h).framework == GcsfsFramework.GCSFS_FRAMEWORK_PANDAS
         for h in zonal_fs_harness.feature_headers
@@ -2056,6 +2067,17 @@ def test_zonal_file_pickle_reopen_detects_worker_framework_and_honors_opt_out(
         ("cat_file", {"fw": "ray", "env": "gke"}, "file_read"),
         ("mrd_close", {"fw": "ray", "env": "gke"}, "file_close"),
     ]
+    assert len(zonal_fs_harness.feature_headers) == 1
+    decoded_zonal = _decode_features(zonal_fs_harness.feature_headers[0])
+    assert (
+        decoded_zonal.framework,
+        decoded_zonal.environment,
+        decoded_zonal.method,
+    ) == (
+        GcsfsFramework.GCSFS_FRAMEWORK_RAY,
+        GcsfsEnvironment.GCSFS_ENVIRONMENT_GKE,
+        GcsfsMethod.GCSFS_METHOD_OPEN,
+    )
 
     detector.thread_names.clear()
     zonal_fs_harness.clear()
@@ -2069,6 +2091,7 @@ def test_zonal_file_pickle_reopen_detects_worker_framework_and_honors_opt_out(
                 assert reopened_opted_out.read(4) == data[:4]
     assert zonal_fs_harness.captured
     assert all((fw_env, m) == ({}, None) for _, fw_env, m in zonal_fs_harness.captured)
+    assert zonal_fs_harness.feature_headers == [""] * len(zonal_fs_harness.user_agents)
     assert detector.thread_names == []
     assert gke_env.calls == 0
     assert get_telemetry_context() == {}
@@ -2323,7 +2346,6 @@ async def test_gcsfs_native_async_telemetry_propagation(spied_gcs_harness):
         assert len(spied_gcs_harness.feature_headers) == len(
             spied_gcs_harness.user_agents
         )
-        assert all("fw/" not in ua for ua in spied_gcs_harness.user_agents)
         assert all(
             (d.framework, d.method)
             == (GcsfsFramework.GCSFS_FRAMEWORK_JAX, GcsfsMethod.GCSFS_METHOD_CAT)
@@ -2486,6 +2508,17 @@ def test_aliases_and_composite_methods_record_own_method_names(
         (fw_env, m) == ({"fw": "pandas"}, expected_method)
         for fw_env, m in spied_gcs_harness.seen
     )
+    expected_method_enum = (
+        GcsfsMethod[f"GCSFS_METHOD_{expected_method.upper()}"]
+        if expected_method
+        else GcsfsMethod.GCSFS_METHOD_UNSPECIFIED
+    )
+    assert len(spied_gcs_harness.feature_headers) == len(spied_gcs_harness.seen)
+    assert all(
+        (d.framework, d.method)
+        == (GcsfsFramework.GCSFS_FRAMEWORK_PANDAS, expected_method_enum)
+        for d in (_decode_features(h) for h in spied_gcs_harness.feature_headers)
+    )
 
 
 def test_file_handle_methods_record_distinct_file_tokens(detector, spied_gcs_harness):
@@ -2620,13 +2653,34 @@ def test_gcsfile_pickle_reopen_detects_worker_framework_and_honors_opt_out(
         assert reopened.caller_method == "open"
         assert len(detector.calls) == 1
         open_seen = list(spied_gcs_harness.seen)
+        open_features = list(spied_gcs_harness.feature_headers)
 
         spied_gcs_harness.clear()
         assert reopened.read() == b"OCK"
         assert spied_gcs_harness.seen == [({"fw": "ray", "env": "gke"}, "file_read")]
+        read_decoded = _decode_features(spied_gcs_harness.feature_headers[0])
+        assert (
+            read_decoded.framework,
+            read_decoded.environment,
+            read_decoded.method,
+        ) == (
+            GcsfsFramework.GCSFS_FRAMEWORK_RAY,
+            GcsfsEnvironment.GCSFS_ENVIRONMENT_GKE,
+            GcsfsMethod.GCSFS_METHOD_FILE_READ,
+        )
         assert len(detector.calls) == 1
     assert open_seen
     assert all(entry == ({"fw": "ray", "env": "gke"}, "open") for entry in open_seen)
+    assert len(open_features) == len(open_seen)
+    assert all(
+        (d.framework, d.environment, d.method)
+        == (
+            GcsfsFramework.GCSFS_FRAMEWORK_RAY,
+            GcsfsEnvironment.GCSFS_ENVIRONMENT_GKE,
+            GcsfsMethod.GCSFS_METHOD_OPEN,
+        )
+        for d in (_decode_features(h) for h in open_features)
+    )
 
     detector.calls.clear()
     spied_gcs_harness.clear()
@@ -2640,6 +2694,7 @@ def test_gcsfile_pickle_reopen_detects_worker_framework_and_honors_opt_out(
                 assert reopened_opted_out.read() == b"OCK"
     assert spied_gcs_harness.seen
     assert all(entry == ({}, None) for entry in spied_gcs_harness.seen)
+    assert spied_gcs_harness.feature_headers == [""] * len(spied_gcs_harness.seen)
     assert detector.calls == []
     assert gke_env.calls == 0
     assert get_telemetry_context() == {}
@@ -2658,6 +2713,16 @@ def test_gcsfile_pickle_reopen_detects_worker_framework_and_honors_opt_out(
         spied_gcs_harness.clear()
         assert reopened_enabled.read() == b"MOCK"
         assert spied_gcs_harness.seen == [({"fw": "ray", "env": "gke"}, "file_read")]
+        reenabled_decoded = _decode_features(spied_gcs_harness.feature_headers[0])
+        assert (
+            reenabled_decoded.framework,
+            reenabled_decoded.environment,
+            reenabled_decoded.method,
+        ) == (
+            GcsfsFramework.GCSFS_FRAMEWORK_RAY,
+            GcsfsEnvironment.GCSFS_ENVIRONMENT_GKE,
+            GcsfsMethod.GCSFS_METHOD_FILE_READ,
+        )
 
 
 def test_unmapped_file_method_preserves_outer_or_unset_method(
@@ -3628,9 +3693,6 @@ def test_mid_operation_probe_resolution_updates_subsequent_requests(
 
     assert len(mock_gcs_harness.user_agents) == 2
     assert len(mock_gcs_harness.feature_headers) == 2
-    assert all(
-        "fw/" not in ua and "env/" not in ua for ua in mock_gcs_harness.user_agents
-    )
     first = _decode_features(mock_gcs_harness.feature_headers[0])
     second = _decode_features(mock_gcs_harness.feature_headers[1])
     assert (first.framework, first.environment) == (
@@ -4424,27 +4486,27 @@ async def test_control_plane_interceptor_preserves_call_details(
 
 
 @pytest.mark.parametrize(
-    ("caller", "expected_keys", "expected_ua_key", "expected_ua_token"),
+    ("caller", "expected_keys", "expected_ua_key", "expected_ua"),
     [
         pytest.param(
             None,
             ("User-Agent", "X-Goog-Storage-Gcsfs-Features"),
             "User-Agent",
-            "python-gcsfs/",
+            f"python-gcsfs/{version}",
             id="none-headers",
         ),
         pytest.param(
             {},
             ("User-Agent", "X-Goog-Storage-Gcsfs-Features"),
             "User-Agent",
-            "python-gcsfs/",
+            f"python-gcsfs/{version}",
             id="empty-dict",
         ),
         pytest.param(
             {"Range": "bytes=0-15"},
             ("Range", "User-Agent", "X-Goog-Storage-Gcsfs-Features"),
             "User-Agent",
-            "python-gcsfs/",
+            f"python-gcsfs/{version}",
             id="unrelated-range-header",
         ),
         pytest.param(
@@ -4465,21 +4527,21 @@ async def test_control_plane_interceptor_preserves_call_details(
             {"x-goog-storage-gcsfs-features": "caller-lower"},
             ("User-Agent", "X-Goog-Storage-Gcsfs-Features"),
             "User-Agent",
-            "python-gcsfs/",
+            f"python-gcsfs/{version}",
             id="caller-features-lowercase-replaced",
         ),
         pytest.param(
             {"X-Goog-Storage-Gcsfs-Features": "caller-canonical"},
             ("User-Agent", "X-Goog-Storage-Gcsfs-Features"),
             "User-Agent",
-            "python-gcsfs/",
+            f"python-gcsfs/{version}",
             id="caller-features-canonical-replaced",
         ),
         pytest.param(
             {"X-GOOG-STORAGE-GCSFS-FEATURES": "caller-upper"},
             ("User-Agent", "X-Goog-Storage-Gcsfs-Features"),
             "User-Agent",
-            "python-gcsfs/",
+            f"python-gcsfs/{version}",
             id="caller-features-uppercase-replaced",
         ),
         pytest.param(
@@ -4499,7 +4561,7 @@ async def test_control_plane_interceptor_preserves_call_details(
             ],
             ("Range", "User-Agent", "X-Goog-Storage-Gcsfs-Features"),
             "User-Agent",
-            "python-gcsfs/",
+            f"python-gcsfs/{version}",
             id="caller-sequence-of-pairs",
         ),
     ],
@@ -4509,7 +4571,7 @@ def test_get_headers_single_lookup_and_caller_precedence(
     caller,
     expected_keys,
     expected_ua_key,
-    expected_ua_token,
+    expected_ua,
 ):
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
     monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
@@ -4541,9 +4603,7 @@ def test_get_headers_single_lookup_and_caller_precedence(
         k: v for k, v in caller_dict.items() if k.lower() != HTTP_HEADER_KEY.lower()
     }
     assert non_feature_caller.items() <= headers.items()
-    assert expected_ua_token in headers[expected_ua_key]
-    assert "fw/" not in headers[expected_ua_key]
-    assert "env/" not in headers[expected_ua_key]
+    assert headers[expected_ua_key] == expected_ua
     assert headers[HTTP_HEADER_KEY] == "EAE="
     assert [k for k in headers if k.lower() == HTTP_HEADER_KEY.lower()] == [
         HTTP_HEADER_KEY
@@ -4559,14 +4619,14 @@ def test_get_headers_single_lookup_and_caller_precedence(
         inactive_headers = fs._get_headers(caller)
     assert not any(k.lower() == HTTP_HEADER_KEY.lower() for k in inactive_headers)
     assert non_feature_caller.items() <= inactive_headers.items()
-    assert expected_ua_token in inactive_headers[expected_ua_key]
+    assert inactive_headers[expected_ua_key] == expected_ua
 
     # When telemetry is opted out, any incoming features header is stripped too.
     monkeypatch.setenv("DO_NOT_TRACK", "1")
     disabled_headers = fs._get_headers(caller)
     assert not any(k.lower() == HTTP_HEADER_KEY.lower() for k in disabled_headers)
     assert non_feature_caller.items() <= disabled_headers.items()
-    assert expected_ua_token in disabled_headers[expected_ua_key]
+    assert disabled_headers[expected_ua_key] == expected_ua
 
 
 def test_get_headers_skips_schema_import_when_no_tokens_active(monkeypatch):
@@ -4581,8 +4641,7 @@ def test_get_headers_skips_schema_import_when_no_tokens_active(monkeypatch):
     headers = fs._get_headers(None, cache_type="none", cache_source="explicit")
 
     assert "gcsfs.telemetry.schema" not in sys.modules
-    assert "cache_type/none:e" in headers["User-Agent"]
-    assert "fw/" not in headers["User-Agent"]
+    assert headers["User-Agent"] == f"python-gcsfs/{version} cache_type/none:e"
     assert HTTP_HEADER_KEY not in headers
 
 
@@ -4599,8 +4658,7 @@ def test_get_headers_includes_process_scoped_env_with_call_context(monkeypatch):
     finally:
         reset_telemetry_context(token)
 
-    assert "fw/" not in headers["User-Agent"]
-    assert "env/" not in headers["User-Agent"]
+    assert headers["User-Agent"] == f"python-gcsfs/{version}"
     assert headers[HTTP_HEADER_KEY] == "EAEYAg=="
 
 
@@ -4621,10 +4679,8 @@ def test_http_user_agent_excludes_all_telemetry_and_feature_header_carries_all(
     finally:
         reset_telemetry_context(token)
 
-    ua = headers["User-Agent"]
     decoded = _decode_features(headers[HTTP_HEADER_KEY])
-    assert "cache_type/none:e" in ua
-    assert all(prefix not in ua for prefix in ("fw/", "env/", "m/", "mp/"))
+    assert headers["User-Agent"] == f"python-gcsfs/{version} cache_type/none:e"
     assert (decoded.method, decoded.framework, decoded.environment) == (
         GcsfsMethod.GCSFS_METHOD_CAT,
         GcsfsFramework.GCSFS_FRAMEWORK_PANDAS,
@@ -4676,16 +4732,17 @@ def test_wrapped_fs_and_open_file_dynamic_opt_out_toggle(mock_gcs_harness, monke
 
     assert same_singleton
     for enabled, disabled, noop in env_results:
-        assert "fw/" not in enabled["User-Agent"]
+        assert enabled["User-Agent"] == f"python-gcsfs/{version}"
         assert enabled[HTTP_HEADER_KEY] == "EAE="
         assert noop == (None, 0)
-        assert "fw/" not in disabled["User-Agent"]
+        assert disabled["User-Agent"] == f"python-gcsfs/{version}"
         assert not any(k.lower() == "x-goog-storage-gcsfs-features" for k in disabled)
-    assert "fw/" not in reenabled["User-Agent"]
+    assert reenabled["User-Agent"] == f"python-gcsfs/{version}"
     assert reenabled[HTTP_HEADER_KEY] == "EAE="
     for opt_out, uas, features in read_results:
-        assert uas and all("cache_type/none:e" in ua for ua in uas)
-        assert all("fw/" not in ua for ua in uas)
+        assert uas and all(
+            ua == f"python-gcsfs/{version} cache_type/none:e" for ua in uas
+        )
         if opt_out:
             assert features == [""] * len(uas)
         else:
@@ -4716,7 +4773,6 @@ def test_unrecognized_long_framework_omitted_while_method_params_encoded(monkeyp
         reset_telemetry_context(token)
 
     decoded = _decode_features(headers[HTTP_HEADER_KEY])
-    assert "fw/" not in headers["User-Agent"]
-    assert "mp/" not in headers["User-Agent"]
+    assert headers["User-Agent"] == f"python-gcsfs/{version}"
     assert decoded.framework == GcsfsFramework.GCSFS_FRAMEWORK_UNSPECIFIED
     assert decoded.method_params.cache_options is True

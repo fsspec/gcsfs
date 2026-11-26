@@ -11,7 +11,7 @@ The Python data ecosystem comprises a rich variety of frameworks—including Pan
 What is Collected
 -----------------
 
-When an operation is executed, ``gcsfs`` identifies the name of the top-level calling framework, the public method name, and the compute environment, and sends them exclusively in the structured ``X-Goog-Storage-Gcsfs-Features`` HTTP header (or ``x-goog-storage-gcsfs-features`` gRPC metadata) as a web-safe base64-encoded ``GcsfsFeatures`` protobuf payload. Outgoing HTTP ``User-Agent`` headers do not carry telemetry attribution tokens.
+When an operation is executed, ``gcsfs`` identifies the name of the top-level calling framework, the public method name, and the compute environment, and sends them in the ``X-Goog-Storage-Gcsfs-Features`` header as a web-safe base64-encoded ``GcsfsFeatures`` protobuf payload.
 
 ``X-Goog-Storage-Gcsfs-Features`` is omitted when no recognized attribution dimensions are active.
 
@@ -80,10 +80,10 @@ Kubernetes pod).
 gRPC Metadata
 ~~~~~~~~~~~~~
 
-gRPC calls use the same web-safe base64-encoded ``GcsfsFeatures`` protobuf payload in the ``x-goog-storage-gcsfs-features`` metadata header when active attribution dimensions are present:
+gRPC calls send the same web-safe base64-encoded ``GcsfsFeatures`` protobuf payload as lowercase metadata (``x-goog-storage-gcsfs-features``) when active attribution dimensions are present:
 
-- **Storage Control Unary RPCs:** Every unary call (including LRO operations, bucket layout lookups, and HNS folder operations such as ``mkdir``, ``rmdir``, and ``mv``) attaches ``x-goog-storage-gcsfs-features`` per RPC.
-- **Rapid (Zonal) and Rapid Cache Ultra Stream Opens:** Initial read (``MRD``) stream opens, and appendable write stream opens (Rapid zonal writes, and Rapid Cache Ultra writes when ``rcu_rapid_write=True``), attach ``x-goog-storage-gcsfs-features`` at open time.
+- **Storage Control Unary RPCs:** Every unary call (including LRO operations, bucket layout lookups, and HNS folder operations such as ``mkdir``, ``rmdir``, and ``mv``) attaches the header per RPC.
+- **Rapid (Zonal) and Rapid Cache Ultra Stream Opens:** Initial read (``MRD``) stream opens, and appendable write stream opens (Rapid zonal writes, and Rapid Cache Ultra writes when ``rcu_rapid_write=True``), attach the header at open time.
 
 The header is omitted when no recognized attribution dimensions are active.
 
@@ -146,5 +146,5 @@ The setting is read on every call, so it can be set (or changed) at any time bef
 When disabled:
 
 - All stack frame inspections and detector evaluations are skipped immediately.
-- HTTP requests omit ``X-Goog-Storage-Gcsfs-Features``, and gRPC calls omit ``x-goog-storage-gcsfs-features`` metadata.
+- Outgoing HTTP and gRPC requests omit ``X-Goog-Storage-Gcsfs-Features``.
 - ``gcsfs`` sends no requests to the metadata server.

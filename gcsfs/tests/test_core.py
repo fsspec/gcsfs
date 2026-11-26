@@ -5269,36 +5269,30 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs, skip_if_grpc_rea
 
 
 @pytest.mark.parametrize(
-    "input_headers,cache_type,cache_source,framework,expected_in,expected_not_in,expected_fw",
+    "input_headers,cache_type,cache_source,framework,expected_ua",
     [
-        (None, None, None, None, ["python-gcsfs/"], ["cache_type"], None),
+        (None, None, None, None, f"python-gcsfs/{version}"),
         (
             None,
             "readahead",
             "explicit",
             None,
-            ["python-gcsfs/", "cache_type/readahead:e"],
-            [],
-            None,
+            f"python-gcsfs/{version} cache_type/readahead:e",
         ),
         (
             None,
             "none",
             "default",
             None,
-            ["python-gcsfs/", "cache_type/none:d"],
-            [],
-            None,
+            f"python-gcsfs/{version} cache_type/none:d",
         ),
-        (None, None, None, "torch", ["python-gcsfs/"], ["fw/torch"], "torch"),
+        (None, None, None, "torch", f"python-gcsfs/{version}"),
         (
             {"User-Agent": "my-custom-agent"},
             None,
             None,
             "pandas",
-            ["my-custom-agent"],
-            ["fw/pandas"],
-            "pandas",
+            "my-custom-agent",
         ),
     ],
 )
@@ -5308,11 +5302,9 @@ def test_user_agent_telemetry_integration(
     cache_type,
     cache_source,
     framework,
-    expected_in,
-    expected_not_in,
-    expected_fw,
+    expected_ua,
 ):
-    """Verify _get_headers builds clean User-Agent and emits telemetry in X-Goog-Storage-Gcsfs-Features."""
+    """Verify _get_headers builds User-Agent cleanly and emits telemetry in X-Goog-Storage-Gcsfs-Features."""
     import base64
     import contextlib
 
@@ -5341,14 +5333,8 @@ def test_user_agent_telemetry_integration(
             input_headers, cache_type=cache_type, cache_source=cache_source
         )
 
-    ua = headers["User-Agent"]
-    for token in expected_in:
-        assert token in ua
-    for token in expected_not_in:
-        assert token not in ua
-    assert "fw/" not in ua
-    assert "env/" not in ua
-    if expected_fw is None:
+    assert headers["User-Agent"] == expected_ua
+    if framework is None:
         assert HTTP_HEADER_KEY not in headers
     else:
         assert HTTP_HEADER_KEY in headers
@@ -5356,8 +5342,7 @@ def test_user_agent_telemetry_integration(
             base64.urlsafe_b64decode(headers[HTTP_HEADER_KEY])
         )
         assert (
-            decoded.framework
-            == GcsfsFramework[f"GCSFS_FRAMEWORK_{expected_fw.upper()}"]
+            decoded.framework == GcsfsFramework[f"GCSFS_FRAMEWORK_{framework.upper()}"]
         )
 
 

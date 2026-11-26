@@ -44,9 +44,9 @@ Unreleased
   when ``cache_type`` is not set turns off the default ``adaptive`` cache and falls back
   to ``readahead``, as in 2026.8.x (#1172).
 * Framework telemetry now recognizes the Agent Development Kit (``google.adk``) and
-  reports ``adk`` in the ``X-Goog-Storage-Gcsfs-Features`` HTTP header (and
-  ``x-goog-storage-gcsfs-features`` gRPC metadata). Other ``google`` packages, such as
-  ``google-auth`` and ``google-cloud-storage``, are not reported as a framework.
+  reports ``adk`` in the ``X-Goog-Storage-Gcsfs-Features`` header. Other ``google``
+  packages, such as ``google-auth`` and ``google-cloud-storage``, are not reported as
+  a framework.
 * **Zero-copy gRPC reads for Rapid and Rapid Cache Ultra buckets.** When opening
   a gRPC read stream (``init_mrd``), ``gcsfs`` sets
   ``GCS_PYTHON_CLIENT_ZERO_COPY_BIDI_READ=1`` if unset (set ``=0`` to keep the

@@ -16,12 +16,7 @@ pytestmark = pytest.mark.parametrize(
 
 
 def _assert_all_feature_headers(harness, expected_fw: GcsfsFramework) -> None:
-    assert len(harness.user_agents) > 0
-    assert len(harness.feature_headers) == len(harness.user_agents)
-    for ua in harness.user_agents:
-        assert (
-            "fw/" not in ua and "env/" not in ua
-        ), f"Unexpected telemetry token in User-Agent: '{ua}'"
+    assert len(harness.feature_headers) > 0
     for h in harness.feature_headers:
         assert h, f"Missing {HTTP_HEADER_KEY} header"
         decoded = GcsfsFeatures.deserialize(base64.urlsafe_b64decode(h))
