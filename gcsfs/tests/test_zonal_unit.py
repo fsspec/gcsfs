@@ -1913,6 +1913,137 @@ async def test_get_file_request_rejects_invalid_chunksize(
         assert not lpath.exists()
 
 
+def _md5_b64(payload: bytes) -> str:
+    import base64
+    import hashlib
+
+    return base64.b64encode(hashlib.md5(payload).digest()).decode()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+@pytest.mark.parametrize("consistency", ["md5", "crc32c", "size"])
+@pytest.mark.parametrize("use_fs_default", [False, True])
+async def test_get_file_request_validates_consistency(
+    async_gcs,
+    gcs_bucket_mocks,
+    monkeypatch,
+    tmp_path,
+    file_path,
+    bucket_layout,
+    consistency,
+    use_fs_default,
+):
+    """
+    Tests that the single-stream gRPC download runs the requested consistency
+    check, whether it comes from the call or from the filesystem default.
+    """
+    _enable_crc32c_checker(monkeypatch)
+    kwargs = {}
+    if use_fs_default:
+        monkeypatch.setattr(async_gcs, "consistency", consistency)
+    else:
+        kwargs["consistency"] = consistency
+
+    with gcs_bucket_mocks(json_data, bucket_type_val=bucket_layout) as mocks:
+        mocks["downloader"].persisted_size = len(json_data)
+        mocks["pool"].details = {
+            "size": len(json_data),
+            "md5Hash": _md5_b64(json_data),
+            "crc32c": _crc32c_b64(json_data),
+        }
+        lpath = tmp_path / "output.txt"
+        with mock.patch(
+            "gcsfs.extended_gcsfs.get_consistency_checker",
+            wraps=gcsfs.extended_gcsfs.get_consistency_checker,
+        ) as spy_checker:
+            await async_gcs._get_file_request(
+                file_path, str(lpath), chunksize=50, **kwargs
+            )
+
+        spy_checker.assert_called_once_with(consistency)
+        assert lpath.read_bytes() == json_data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+@pytest.mark.parametrize(
+    "consistency, bad_details",
+    [
+        pytest.param("md5", {"md5Hash": _md5_b64(b"wrong")}, id="md5"),
+        pytest.param("crc32c", {"crc32c": _md5_b64(b"wrong")[:8]}, id="crc32c"),
+    ],
+)
+async def test_get_file_request_checksum_mismatch_removes_file(
+    async_gcs,
+    gcs_bucket_mocks,
+    monkeypatch,
+    tmp_path,
+    file_path,
+    bucket_layout,
+    consistency,
+    bad_details,
+):
+    """
+    Tests that a checksum mismatch on the single-stream gRPC download raises
+    ChecksumError and does not keep the local file.
+    """
+    from gcsfs.retry import ChecksumError
+
+    _enable_crc32c_checker(monkeypatch)
+
+    with gcs_bucket_mocks(json_data, bucket_type_val=bucket_layout) as mocks:
+        mocks["downloader"].persisted_size = len(json_data)
+        mocks["pool"].details = {"size": len(json_data), **bad_details}
+        lpath = tmp_path / "output.txt"
+        with pytest.raises(ChecksumError):
+            await async_gcs._get_file_request(
+                file_path, str(lpath), consistency=consistency
+            )
+
+        assert not lpath.exists()
+        mocks["pool"].close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+@pytest.mark.parametrize("consistency", ["md5", "crc32c"])
+async def test_get_file_request_stale_metadata_falls_back_to_size_check(
+    async_gcs,
+    gcs_bucket_mocks,
+    monkeypatch,
+    tmp_path,
+    file_path,
+    bucket_layout,
+    consistency,
+):
+    """
+    Tests that hashes of stale metadata, which describe a shorter prefix than
+    the MRD's persisted_size, are not compared against the downloaded bytes.
+    """
+    _enable_crc32c_checker(monkeypatch)
+    stale = json_data[:10]
+
+    with gcs_bucket_mocks(json_data, bucket_type_val=bucket_layout) as mocks:
+        mocks["downloader"].persisted_size = len(json_data)
+        mocks["pool"].details = {
+            "size": len(stale),
+            "md5Hash": _md5_b64(stale),
+            "crc32c": _crc32c_b64(stale),
+        }
+        lpath = tmp_path / "output.txt"
+        with mock.patch(
+            "gcsfs.extended_gcsfs.get_consistency_checker",
+            wraps=gcsfs.extended_gcsfs.get_consistency_checker,
+        ) as spy_checker:
+            await async_gcs._get_file_request(
+                file_path, str(lpath), consistency=consistency
+            )
+
+        spy_checker.assert_called_once_with("size")
+        assert lpath.read_bytes() == json_data
+
+
 @pytest.mark.asyncio
 async def test_merge_zonal_not_supported(async_gcs, zonal_write_mocks):
     """Test _merge for Zonal buckets raises NotImplementedError."""

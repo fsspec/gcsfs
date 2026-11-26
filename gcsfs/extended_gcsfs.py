@@ -32,6 +32,7 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
 from gcsfs._dircache import HnsDirCacheUpdater
+from gcsfs.checkers import get_consistency_checker
 from gcsfs.concurrency import split_range
 from gcsfs.core import (
     GCSFile,
@@ -2692,7 +2693,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             Callback to monitor the download progress.
         **kwargs:
             For Zonal and RCU buckets, `chunksize` bytes (int) can be provided to control
-            the download chunk size (default is 128KB).
+            the download chunk size (default is 128KB). `consistency` ('none',
+            'size', 'md5' or 'crc32c') overrides the filesystem default and is
+            validated against the object metadata before the local file is kept.
         """
         bucket, key, path_generation = self.split_path(rpath)
 
@@ -2704,6 +2707,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if os.path.isdir(lpath):
             return
 
+        consistency = kwargs.pop("consistency", self.consistency)
         chunksize = kwargs.pop("chunksize", 4096 * 32)  # 128KB default
         if chunksize is None or chunksize <= 0:
             raise ValueError(f"chunksize must be a positive integer, got {chunksize!r}")
@@ -2732,6 +2736,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 lparent = os.path.dirname(lpath) or os.curdir
 
                 if size is None and getattr(mrd_pool, "finalized", None) is False:
+                    # Neither a persisted size nor metadata hashes describe the
+                    # bytes of this unfinalized stream, so there is nothing to
+                    # validate `consistency` against.
                     callback.set_size(None)
                     os.makedirs(lparent, exist_ok=True)
                     with open(lpath, "wb") as f2:
@@ -2751,6 +2758,16 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         )
                         size = (await self._info(rpath, **kwargs)).get("size", 0)
 
+                    details = dict(mrd_pool.details or {})
+                    if int(details.get("size", -1)) != size:
+                        # Metadata hashes don't describe the bytes the MRD will serve.
+                        details.pop("crc32c", None)
+                        details.pop("md5Hash", None)
+                        if consistency in ("md5", "crc32c"):
+                            consistency = "size"
+                    details["size"] = size
+                    checker = get_consistency_checker(consistency)
+
                     callback.set_size(size)
                     os.makedirs(lparent, exist_ok=True)
 
@@ -2766,6 +2783,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                                 break
 
                             f2.write(data)
+                            checker.update(data)
                             offset += len(data)
                             callback.relative_update(len(data))
 
@@ -2773,6 +2791,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         raise aiohttp.ClientError(
                             f"Expected {size} bytes, but only received {offset} bytes"
                         )
+                    # Validate before keeping lpath; a failure removes it below.
+                    checker.validate_json_response(details)
         except Exception as e:
             # Clean up the corrupted file before raising error
             if os.path.exists(lpath):

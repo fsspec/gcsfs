@@ -7,6 +7,10 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
+* ``get()`` / ``get_file()`` on Zonal and RCU buckets now honours ``consistency``
+  (``"size"``, ``"md5"`` or ``"crc32c"``, from the call or the filesystem default)
+  on single-stream gRPC downloads; a mismatch raises ``ChecksumError`` and the
+  local file is removed.
 * ``sign()`` now works with credentials that have no private key, such as
   Compute Engine and GKE Workload Identity credentials. When the credentials
   cannot sign, the URL is signed through the IAM Credentials ``signBlob`` API
