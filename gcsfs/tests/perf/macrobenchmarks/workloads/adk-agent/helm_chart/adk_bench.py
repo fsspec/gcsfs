@@ -13,6 +13,7 @@ Usage::
 
 import argparse
 import asyncio
+import concurrent.futures
 import dataclasses
 import datetime
 import hashlib
@@ -94,6 +95,7 @@ class PayloadSpec:
     mime_type: Optional[str] = None
     display_name: Optional[str] = None
     custom_metadata: Optional[Dict[str, str]] = None
+    expected_sha256: Optional[str] = None
     verified: bool = False
 
     def payload(self) -> bytes:
@@ -108,16 +110,21 @@ class PayloadSpec:
         return hashlib.shake_256(self.seed.encode()).digest(self.size)
 
     def sha256(self) -> str:
-        return hashlib.sha256(self.payload()).hexdigest()
+        if self.expected_sha256 is None:
+            self.expected_sha256 = hashlib.sha256(self.payload()).hexdigest()
+        return self.expected_sha256
 
     def to_part(self) -> types.Part:
         if self.kind == "tombstone":
+            self.expected_sha256 = hashlib.sha256(b"").hexdigest()
             return artifact_util._new_rewind_tombstone()
+        data = self.payload()
+        self.expected_sha256 = hashlib.sha256(data).hexdigest()
         if self.kind == "text":
-            return types.Part(text=self.payload().decode())
+            return types.Part(text=data.decode())
         return types.Part(
             inline_data=types.Blob(
-                data=self.payload(),
+                data=data,
                 mime_type=self.mime_type,
                 display_name=self.display_name,
             )
@@ -248,6 +255,22 @@ class Bench:
         self.untimed_read_bytes = 0
         self.user_scopes: Dict[str, Scope] = {}
         self.sessions: List[SessionState] = []
+        self._cpu_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="adkbench-cpu"
+        )
+
+    def close(self) -> None:
+        self._cpu_pool.shutdown(wait=True)
+
+    async def _make_part(self, spec: PayloadSpec) -> types.Part:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._cpu_pool, spec.to_part)
+
+    async def _verify_part(
+        self, part: Optional[types.Part], spec: Optional[PayloadSpec]
+    ) -> Optional[str]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._cpu_pool, check_part, part, spec)
 
     def new_session(self, user_index: int, session_index: int) -> SessionState:
         user_id = f"u{user_index:03d}"
@@ -302,7 +325,7 @@ class Bench:
             )
 
     async def save(self, state: SessionState, filename: str, spec: PayloadSpec) -> int:
-        part = spec.to_part()
+        part = await self._make_part(spec)
         version = await self._timed(
             "save",
             self.service.save_artifact(
@@ -332,7 +355,7 @@ class Bench:
         # Concurrent sessions of one user can add user: versions meanwhile.
         if not filename.startswith("user:"):
             spec = state.scope_for(filename).latest(filename)
-            error = check_part(part, spec)
+            error = await self._verify_part(part, spec)
             if error is None and spec is not None:
                 spec.verified = True
             self.checks.expect(error, f"{state.session_id}/{filename} latest")
@@ -351,7 +374,7 @@ class Bench:
             loaded_bytes=part_size,
         )
         spec = state.scope_for(filename).versions.get(filename, {}).get(version)
-        error = check_part(part, spec)
+        error = await self._verify_part(part, spec)
         if error is None and spec is not None:
             spec.verified = True
         self.checks.expect(error, f"{state.session_id}/{filename} v{version}")
@@ -445,6 +468,7 @@ class Bench:
                 )
                 continue
             part = await self.load_version(state, filename, target)
+            save_part = artifact_util._new_rewind_tombstone() if part is None else part
             version = await self._timed(
                 "save",
                 self.service.save_artifact(
@@ -452,9 +476,9 @@ class Bench:
                     user_id=state.user_id,
                     session_id=state.session_id,
                     filename=filename,
-                    artifact=part,
+                    artifact=save_part,
                 ),
-                sent_bytes=part_size(part),
+                sent_bytes=part_size(save_part),
             )
             rewound_spec = dataclasses.replace(
                 scope.versions[filename][target], verified=False
@@ -708,6 +732,7 @@ class Bench:
 
         self.emit_lines = False
         try:
+            await self.save(state, "user:probe.bin", small("user"))
             for version in range(3):
                 await self.save(
                     state, "probe_existing.bin", small(f"existing{version}")
@@ -745,6 +770,7 @@ class Bench:
                 )
             return requests_per_op
         finally:
+            self.user_scopes.pop(state.user_id, None)
             self.emit_lines = True
 
     async def validate_final_state(self, sessions: List[SessionState]) -> None:
@@ -759,6 +785,22 @@ class Bench:
                 self.checks.expect(
                     None if versions == expected else f"{versions} != {expected}",
                     f"{user_id}/{filename} final versions",
+                )
+                if expected != list(range(len(expected))):
+                    self.checks.expect(
+                        f"versions {expected} are not contiguous",
+                        f"{user_id}/{filename}",
+                    )
+                latest = scope.latest(filename)
+                if not saved or (latest is not None and latest.verified):
+                    continue
+                part = await self.service.load_artifact(
+                    app_name=APP_NAME, user_id=user_id, filename=filename
+                )
+                self.untimed_read_bytes += part_size(part)
+                self.checks.expect(
+                    await self._verify_part(part, latest),
+                    f"{user_id}/{filename} final latest",
                 )
 
     async def _validate_session(self, state: SessionState) -> None:
@@ -791,7 +833,7 @@ class Bench:
             )
             self.untimed_read_bytes += part_size(part)
             self.checks.expect(
-                check_part(part, latest),
+                await self._verify_part(part, latest),
                 f"{state.session_id}/{filename} final latest",
             )
 
@@ -799,6 +841,7 @@ class Bench:
         """Check custom_metadata persistence and K-way concurrent exclusive creates."""
         state = self.new_session(998, 9998)
         self.sessions.remove(state)
+        self.user_scopes.pop(state.user_id, None)
         session = {
             "app_name": APP_NAME,
             "user_id": state.user_id,
@@ -813,7 +856,7 @@ class Bench:
         )
         await self.service.save_artifact(
             filename="target.png",
-            artifact=target.to_part(),
+            artifact=await self._make_part(target),
             custom_metadata={"owner": "adkbench", "stage": "final"},
             **session,
         )
@@ -841,12 +884,13 @@ class Bench:
             )
             for index in range(CONCURRENT_SAVES)
         ]
+        parts = [await self._make_part(spec) for spec in specs]
         versions = await asyncio.gather(
             *(
                 self.service.save_artifact(
-                    filename="race.bin", artifact=spec.to_part(), **session
+                    filename="race.bin", artifact=part, **session
                 )
-                for spec in specs
+                for part in parts
             )
         )
         self.checks.expect(
@@ -862,7 +906,9 @@ class Bench:
                 filename="race.bin", version=version, **session
             )
             self.untimed_read_bytes += part_size(part)
-            self.checks.expect(check_part(part, spec), f"race.bin v{version}")
+            self.checks.expect(
+                await self._verify_part(part, spec), f"race.bin v{version}"
+            )
         await self.service.delete_artifact(filename="race.bin", **session)
         remaining = await self.service.list_versions(filename="race.bin", **session)
         self.checks.expect(
@@ -928,62 +974,74 @@ async def run_scenario(args, scenario: Scenario) -> Dict[str, Any]:
     bench = Bench(
         build_service(base_url),
         scenario,
-        seed=args.run_tag,
+        seed=args.seed,
         uri_scheme=scheme,
         phase=args.phase,
     )
-    result: Dict[str, Any] = {"cold_first_op_ms": None}
+    try:
+        result: Dict[str, Any] = {"cold_first_op_ms": None}
 
-    if args.phase == "resume":
-        with open(args.manifest) as fh:
-            state_from_json(bench, json.load(fh))
-        sessions = list(bench.sessions)
-        # The first call of a fresh process and service instance is the cold op.
-        await bench.hitl_resume_session(sessions[0])
-        result["cold_first_op_ms"] = bench.first_latency_ms
-        await asyncio.gather(*(bench.hitl_resume_session(s) for s in sessions[1:]))
-        await bench.validate_final_state(sessions)
-        result["checks"], result["failures"] = bench.checks.count, bench.checks.failures
-        result["ops"] = bench.emitted
+        if args.phase == "resume":
+            with open(args.manifest) as fh:
+                state_from_json(bench, json.load(fh))
+            sessions = list(bench.sessions)
+            # The first call of a fresh process and service instance is the cold op.
+            await bench.hitl_resume_session(sessions[0])
+            result["cold_first_op_ms"] = bench.first_latency_ms
+            await asyncio.gather(*(bench.hitl_resume_session(s) for s in sessions[1:]))
+            result["state"] = state_to_json(bench)
+            result["checks"], result["failures"] = (
+                bench.checks.count,
+                bench.checks.failures,
+            )
+            result["ops"] = bench.emitted
+            result["untimed_read_bytes"] = bench.untimed_read_bytes
+            return result
+
+        await bench.probe()
+        bench.first_latency_ms = None
+        result["window_start"] = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        start = time.perf_counter()
+        if args.scenario == "iterative-workspace":
+            states = [bench.new_session(i, i) for i in range(scenario.sessions)]
+            await asyncio.gather(
+                *(bench.iterative_workspace_session(s) for s in states)
+            )
+        elif args.scenario == "genmedia-pipeline":
+            states = [bench.new_session(i, i) for i in range(scenario.sessions)]
+            await asyncio.gather(*(bench.genmedia_session(s) for s in states))
+        else:
+            states = [
+                bench.new_session(user, user * scenario.sessions + index)
+                for user in range(scenario.users)
+                for index in range(scenario.sessions)
+            ]
+            await asyncio.gather(*(bench.hitl_upload_session(s) for s in states))
+            resume = await run_resume_process(args, bench)
+            if "state" in resume:
+                state_from_json(bench, resume["state"])
+            result["cold_first_op_ms"] = resume.get("cold_first_op_ms")
+            result["resume_ops"] = resume.get("ops", 0)
+            bench.untimed_read_bytes += resume.get("untimed_read_bytes", 0)
+            bench.checks.count += resume.get("checks", 0)
+            bench.checks.failures += resume.get("failures", ["resume process failed"])
+        result["total_s"] = time.perf_counter() - start
+        result["window_end"] = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        await bench.validate_final_state(bench.sessions)
+        await bench.validate_metadata_and_concurrency()
+        result["checks"], result["failures"] = (
+            bench.checks.count,
+            bench.checks.failures,
+        )
+        result["ops"] = bench.emitted + result.get("resume_ops", 0)
         result["untimed_read_bytes"] = bench.untimed_read_bytes
         return result
-
-    await bench.probe()
-    bench.first_latency_ms = None
-    result["window_start"] = datetime.datetime.now(datetime.timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
-    start = time.perf_counter()
-    if args.scenario == "iterative-workspace":
-        states = [bench.new_session(i, i) for i in range(scenario.sessions)]
-        await asyncio.gather(*(bench.iterative_workspace_session(s) for s in states))
-    elif args.scenario == "genmedia-pipeline":
-        states = [bench.new_session(i, i) for i in range(scenario.sessions)]
-        await asyncio.gather(*(bench.genmedia_session(s) for s in states))
-    else:
-        states = [
-            bench.new_session(user, user * scenario.sessions + index)
-            for user in range(scenario.users)
-            for index in range(scenario.sessions)
-        ]
-        await asyncio.gather(*(bench.hitl_upload_session(s) for s in states))
-        resume = await run_resume_process(args, bench)
-        result["cold_first_op_ms"] = resume.get("cold_first_op_ms")
-        result["resume_ops"] = resume.get("ops", 0)
-        bench.untimed_read_bytes += resume.get("untimed_read_bytes", 0)
-        bench.checks.count += resume.get("checks", 0)
-        bench.checks.failures += resume.get("failures", ["resume process failed"])
-    result["total_s"] = time.perf_counter() - start
-    result["window_end"] = datetime.datetime.now(datetime.timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
-    if args.scenario != "hitl-handoff":
-        await bench.validate_final_state(states)
-    await bench.validate_metadata_and_concurrency()
-    result["checks"], result["failures"] = bench.checks.count, bench.checks.failures
-    result["ops"] = bench.emitted + result.get("resume_ops", 0)
-    result["untimed_read_bytes"] = bench.untimed_read_bytes
-    return result
+    finally:
+        bench.close()
 
 
 async def run_resume_process(args, bench: Bench) -> Dict[str, Any]:
@@ -1002,6 +1060,8 @@ async def run_resume_process(args, bench: Bench) -> Dict[str, Any]:
             args.base_url,
             "--run-tag",
             args.run_tag,
+            "--seed",
+            args.seed,
             "--phase",
             "resume",
             "--manifest",
@@ -1024,6 +1084,7 @@ def parse_args(argv=None):
     parser.add_argument("--scenario", required=True, choices=sorted(SCENARIOS))
     parser.add_argument("--base-url", required=True, help="gs://bucket/prefix")
     parser.add_argument("--run-tag", default=uuid.uuid4().hex[:8])
+    parser.add_argument("--seed", default="42")
     parser.add_argument("--phase", default="main", choices=["main", "resume"])
     parser.add_argument("--manifest", help=argparse.SUPPRESS)
     parser.add_argument("--result-file", help=argparse.SUPPRESS)

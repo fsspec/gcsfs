@@ -1,8 +1,8 @@
-"""Offline tests for the ADK artifact benchmark driver.
+"""Tests for the ADK artifact benchmark driver.
 
-They run every scenario at reduced scale against ADK's ``InMemoryArtifactService``,
-so no bucket is needed. Skipped when google-adk is not installed (it is not a
-gcsfs test dependency).
+Covers all scenarios against ``InMemoryArtifactService`` plus end-to-end
+integration against ``FsspecArtifactService`` on ``gcsfs`` and
+``fake-gcs-server``. Skipped only when ``google-adk`` is not installed.
 """
 
 import asyncio
@@ -15,14 +15,17 @@ import pytest
 pytest.importorskip("google.adk")
 
 HELM_CHART_DIR = Path(__file__).resolve().parents[1] / "helm_chart"
+MICROBENCH_DIR = Path(__file__).resolve().parents[4] / "microbenchmarks"
 METRICS_DIR = Path(__file__).resolve().parents[7] / "cloudbuild" / "macrobenchmarks"
-sys.path.insert(0, str(HELM_CHART_DIR))
-sys.path.insert(0, str(METRICS_DIR))
+for _extra_path in (HELM_CHART_DIR, MICROBENCH_DIR, METRICS_DIR):
+    if str(_extra_path) not in sys.path:
+        sys.path.insert(0, str(_extra_path))
 
 import adk_bench  # noqa: E402
 from google.adk.artifacts.in_memory_artifact_service import (  # noqa: E402
     InMemoryArtifactService,
 )
+from google.adk.integrations.fsspec import FsspecArtifactService  # noqa: E402
 from google.genai import types  # noqa: E402
 from metrics.parsers import adk as adk_parser  # noqa: E402
 from metrics.parsers.common import LogEntry  # noqa: E402
@@ -80,6 +83,8 @@ def in_memory(monkeypatch, tmp_path):
                 args.base_url,
                 "--run-tag",
                 args.run_tag,
+                "--seed",
+                args.seed,
                 "--phase",
                 "resume",
                 "--manifest",
@@ -198,6 +203,7 @@ def test_bench_names_and_times_ops(capsys):
         await bench.delete(state, "f.md")
 
     asyncio.run(calls())
+    bench.close()
 
     lines = capsys.readouterr().out.splitlines()
     assert [line.split("Op: ")[1].split(" :")[0] for line in lines] == list(
@@ -205,3 +211,128 @@ def test_bench_names_and_times_ops(capsys):
     )
     assert lines[0].startswith("Artifact Op : Seq: main:1 : Op: save : Latency: ")
     assert lines[0].endswith("ms : Bytes: 5 : Ok: true")
+
+
+def test_seed_is_independent_of_run_tag(in_memory, capsys):
+    code_a = adk_bench.main(
+        ["--scenario", "hitl-handoff", "--base-url", "memory://bench", "--run-tag", "a"]
+    )
+    lines_a = capsys.readouterr().out.splitlines()
+    in_memory["service"] = InMemoryArtifactService()
+    code_b = adk_bench.main(
+        ["--scenario", "hitl-handoff", "--base-url", "memory://bench", "--run-tag", "b"]
+    )
+    lines_b = capsys.readouterr().out.splitlines()
+
+    assert code_a == 0 and code_b == 0
+    parsed_a = adk_parser.parse_entries(
+        LogEntry(timestamp=0.0, message=line) for line in lines_a
+    )
+    parsed_b = adk_parser.parse_entries(
+        LogEntry(timestamp=0.0, message=line) for line in lines_b
+    )
+    assert sorted((m.op, m.bytes) for m in parsed_a.artifact_op_metrics) == sorted(
+        (m.op, m.bytes) for m in parsed_b.artifact_op_metrics
+    )
+
+
+def test_rewind_handles_missing_historical_version_without_aborting():
+    class MissingVersionService(InMemoryArtifactService):
+        async def load_artifact(self, **kwargs):
+            if kwargs.get("version") is not None:
+                return None
+            return await super().load_artifact(**kwargs)
+
+    bench = adk_bench.Bench(
+        MissingVersionService(),
+        adk_bench.Scenario(sessions=1, turns=1, think_time_s=0.0),
+        seed="s",
+        uri_scheme="memory",
+    )
+    state = bench.new_session(0, 0)
+
+    async def calls():
+        await bench.save(
+            state, "doc.txt", adk_bench.PayloadSpec(seed="v0", size=8, kind="text")
+        )
+        snapshot = {"doc.txt": state.session_scope.latest_version("doc.txt")}
+        await bench.save(
+            state, "doc.txt", adk_bench.PayloadSpec(seed="v1", size=8, kind="text")
+        )
+        await bench.rewind(state, snapshot)
+
+    asyncio.run(calls())
+    bench.close()
+
+    assert bench.checks.failures
+    assert any("load returned None" in failure for failure in bench.checks.failures)
+
+
+def test_corrupted_user_artifact_fails_final_validation(in_memory, capsys):
+    class CorruptUserOnlyService(InMemoryArtifactService):
+        async def load_artifact(self, **kwargs):
+            part = await super().load_artifact(**kwargs)
+            if (
+                kwargs.get("session_id") is None
+                and part is not None
+                and part.inline_data is not None
+                and part.inline_data.data
+            ):
+                data = bytearray(part.inline_data.data)
+                data[0] ^= 0xFF
+                part = part.model_copy(deep=True)
+                part.inline_data.data = bytes(data)
+            return part
+
+    in_memory["service"] = CorruptUserOnlyService()
+
+    code, lines = _run("hitl-handoff", capsys)
+
+    assert code == 1
+    (workload,) = [line for line in lines if line.startswith("Artifact Workload")]
+    assert not workload.endswith("Failures: 0")
+
+
+def test_driver_runs_against_fsspec_artifact_service_and_gcsfs(
+    gcs_factory, flat_bucket, monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        adk_bench,
+        "build_service",
+        lambda base_url: FsspecArtifactService(
+            base_url, fs=gcs_factory(use_listings_cache=False)
+        ),
+    )
+    monkeypatch.setattr(adk_bench, "KIB", 16)
+    monkeypatch.setattr(
+        adk_bench,
+        "SCENARIOS",
+        {
+            **adk_bench.SCENARIOS,
+            "iterative-workspace": adk_bench.Scenario(
+                sessions=2, turns=6, think_time_s=0.0
+            ),
+        },
+    )
+
+    code = adk_bench.main(
+        [
+            "--scenario",
+            "iterative-workspace",
+            "--base-url",
+            f"gs://{flat_bucket}/adk",
+            "--run-tag",
+            "emu",
+        ]
+    )
+    lines = capsys.readouterr().out.splitlines()
+
+    assert code == 0, "\n".join(lines[-20:])
+    parsed = adk_parser.parse_entries(
+        LogEntry(timestamp=0.0, message=line) for line in lines
+    )
+    probes = {p.op: p.requests_per_op for p in parsed.artifact_probe_metrics}
+    assert all(count > 0 for count in probes.values()), probes
+    assert probes["list_keys"] == 2.0
+    (workload,) = parsed.artifact_workload_metrics
+    assert workload.validation_failures == 0

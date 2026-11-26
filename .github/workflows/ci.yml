@@ -96,6 +96,11 @@ jobs:
             --log-date-format="%H:%M:%S" \
             -n auto \
             gcsfs/
+      - name: Run ADK Macrobenchmark Driver Unit Tests
+        run: |
+          export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-service-account-credentials.json
+          pip install "google-adk[fsspec]==2.15.1"
+          pytest -vv gcsfs/tests/perf/macrobenchmarks/workloads/adk-agent/tests --run-benchmarks-infra
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:

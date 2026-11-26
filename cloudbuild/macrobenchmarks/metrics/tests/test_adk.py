@@ -104,13 +104,18 @@ def test_parse_entries_deduplicates_identical_and_rejects_conflicting_or_malform
     duplicated = _entries() + [
         _op("main:1", "save", 10.0, size=2000),
         _probe("save", 3.0),
+        _workload(cold="412.5", ops=10, failures=0),
     ]
     parsed = adk.parse_entries(duplicated)
     assert len(parsed.artifact_op_metrics) == 10
     assert len(parsed.artifact_probe_metrics) == len(PROBES)
+    assert len(parsed.artifact_workload_metrics) == 1
 
     with pytest.raises(adk.MetricEventError):
         adk.parse_entries([_op("main:1", "save", 10.0), _op("main:1", "save", 99.0)])
+
+    with pytest.raises(adk.MetricEventError):
+        adk.parse_entries([_workload(cold="412.5"), _workload(cold="999.0")])
 
     with pytest.raises(adk.MetricEventError):
         adk.parse_entries([LogEntry(timestamp=1.0, message="Artifact Op : truncated")])
@@ -289,8 +294,11 @@ def test_calculate_rejects_non_contiguous_op_sequences(tmp_path):
 
 
 def test_calculate_rejects_duplicated_workload_lines(tmp_path):
-    entries = _entries() + [_workload(cold="412.5")]
-    raw_dir = _write_raw(tmp_path, entries)
+    raw_dir = tmp_path / "raw"
+    parsed = adk.parse_entries(_entries())
+    parsed.artifact_workload_metrics.append(parsed.artifact_workload_metrics[0])
+    raw_store.write_artifact_metrics(parsed, str(raw_dir))
+    raw_store.write_system_metrics([], str(raw_dir))
 
     with pytest.raises(SystemExit):
         _run_calculate(tmp_path, raw_dir)

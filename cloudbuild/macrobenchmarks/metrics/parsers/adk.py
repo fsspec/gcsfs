@@ -68,6 +68,7 @@ def parse_entries(entries: Iterable[LogEntry]) -> ParsedArtifactMetrics:
     parsed = ParsedArtifactMetrics()
     seen_ops = {}
     seen_probes = {}
+    seen_workload = None
     for entry in entries:
         message = (entry.message or "").rstrip("\r\n")
         if not any(prefix in message for prefix in METRIC_PREFIXES):
@@ -119,24 +120,28 @@ def parse_entries(entries: Iterable[LogEntry]) -> ParsedArtifactMetrics:
                 checks,
                 failures,
             ) = match.groups()
-            parsed.artifact_workload_metrics.append(
-                schema.ArtifactWorkloadMetrics(
-                    window_start=window_start,
-                    window_end=window_end,
-                    total_s=_finite_nonnegative(total, "total_s"),
-                    cold_first_op_ms=(
-                        None
-                        if cold == "N/A"
-                        else _finite_nonnegative(cold, "cold_first_op_ms")
-                    ),
-                    sessions=int(sessions),
-                    turns=int(turns),
-                    ops=int(ops),
-                    untimed_read_bytes=int(untimed_read_bytes),
-                    validation_checks=int(checks),
-                    validation_failures=int(failures),
-                )
+            record = schema.ArtifactWorkloadMetrics(
+                window_start=window_start,
+                window_end=window_end,
+                total_s=_finite_nonnegative(total, "total_s"),
+                cold_first_op_ms=(
+                    None
+                    if cold == "N/A"
+                    else _finite_nonnegative(cold, "cold_first_op_ms")
+                ),
+                sessions=int(sessions),
+                turns=int(turns),
+                ops=int(ops),
+                untimed_read_bytes=int(untimed_read_bytes),
+                validation_checks=int(checks),
+                validation_failures=int(failures),
             )
+            if seen_workload is not None:
+                if seen_workload != record:
+                    raise MetricEventError("conflicting duplicate workload record")
+                continue
+            seen_workload = record
+            parsed.artifact_workload_metrics.append(record)
             continue
         raise MetricEventError(f"unrecognized artifact metric record: {message}")
     return parsed

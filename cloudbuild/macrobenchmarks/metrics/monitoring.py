@@ -262,15 +262,33 @@ def collect_node_capacity(
     return rows
 
 
+def _in_window_interval(start_epoch: int, end_epoch: int, period: int) -> tuple:
+    """Align ``(start_epoch, end_epoch)`` so points stay inside the window.
+
+    Cloud Monitoring aligns backwards from ``end_time`` and returns points
+    stamped in ``(start_time, end_time]``. Advancing ``start_time`` by
+    ``(end - start) % period`` drops the leading partial period that would
+    reach before ``start_epoch``, while keeping ``end_epoch`` exact avoids
+    reaching past ``end_epoch``. When the window is shorter than one alignment
+    period, query ``(end_epoch - period, end_epoch)`` so one sample is returned
+    without spilling into post-run checks.
+    """
+    duration = end_epoch - start_epoch
+    if duration < period:
+        return end_epoch - period, end_epoch
+    return start_epoch + duration % period, end_epoch
+
+
 def _monitoring_windows(
     start_time: str, end_time: str, period: int, artifact_workload_rows: list = None
 ) -> tuple:
     """Return ``((pod_start, pod_end), (bucket_start, bucket_end))`` in epoch seconds.
 
     For artifact runs, pod CPU/memory/network are scoped to the driver's
-    measured scenario window (excluding image pull and ``pip install``), while
-    bucket ``DELTA`` totals span the full step plus two alignment periods after
-    ``end_time`` so reads from final-state checks near pod exit are not clipped.
+    measured scenario window (excluding image pull, ``pip install``, ``probe``
+    and post-run validation), while bucket ``DELTA`` totals span the full step
+    plus two alignment periods after ``end_time`` so reads from final-state
+    checks near pod exit are not clipped.
     """
     step_start = _to_epoch(start_time)
     step_end = _to_epoch(end_time)
@@ -283,7 +301,7 @@ def _monitoring_windows(
     if window_start and window_end:
         measured_start = _to_epoch(window_start)
         measured_end = max(_to_epoch(window_end), measured_start + 1)
-        pod_window = _align_interval(measured_start, measured_end, period)
+        pod_window = _in_window_interval(measured_start, measured_end, period)
     bucket_window = _align_interval(step_start, step_end + 2 * period, period)
     return pod_window, bucket_window
 

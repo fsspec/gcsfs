@@ -23,7 +23,7 @@ Choose a workload with the Cloud Build substitution `_WORKLOAD`.
 | `hf-datasets-pytorch-lightning` (Cloud Build `_WORKLOAD` default) | Hugging Face Datasets streaming → PyTorch Lightning, launched with `torchrun` | CPU only. See below. |
 | `ray-data-ray-train-pytorch` (Cloud Build `_WORKLOAD`) | Ray Data → Ray Train `TorchTrainer` | CPU by default. GPU with `workload.gpu=true`. |
 | `torchtitan` (Helm deployment on GPU cluster) | Upstream TorchTitan `main` `Trainer` (up to 5D parallelism: `PP` + `HSDP` + `CP` + `TP`) with a Grain dataloader streaming Parquet over `gcsfs` and TorchTitan's DCP checkpointer writing to `gs://` | Multi-node GPU training & checkpointing benchmark for **Llama 3.1 70B**. |
-| `adk-agent` (Cloud Build `_WORKLOAD`, with `_ADK_SCENARIO`) | ADK `FsspecArtifactService` over `gcsfs`, driven by `adk_bench.py` | CPU only, one pod. See below. |
+| `adk-agent` (Cloud Build `_WORKLOAD`, with `_SCENARIO`) | ADK `FsspecArtifactService` over `gcsfs`, driven by `adk_bench.py` | CPU only, one pod. See below. |
 
 **Lightning workload**
 
@@ -75,7 +75,7 @@ CPU results measure I/O behavior, not model compute speed.
 - Benchmarks ADK's `FsspecArtifactService` on `gs://`. It is not a training
   workload: there is no dataset, model or checkpoint restore.
 - `adk_bench.py` calls the artifact service directly and replays the call
-  sequences of three `google/adk-recipes` patterns. `_ADK_SCENARIO` picks one:
+  sequences of three `google/adk-recipes` patterns. `_SCENARIO` picks one:
   - `iterative-workspace`: 32 sessions of 50 turns of small artifacts
     (4–256 KB), with `LoadArtifactsTool`'s list before every model request,
     version listing and one session rewind.
@@ -83,9 +83,10 @@ CPU results measure I/O behavior, not model compute speed.
     video, then deleting the intermediate images.
   - `hitl-handoff`: 32 sessions that upload 50–200 documents through the
     `SaveFilesAsArtifactsPlugin` pattern, then resume in a fresh process.
-- Each scenario starts with a serial probe that counts gcsfs JSON requests per
-  op with `microbenchmarks/request_counter.py` (shipped into the chart as a
-  symlink).
+- Each scenario starts with a serial probe that counts gcsfs HTTP JSON API
+  requests per op with `microbenchmarks/request_counter.py` (shipped into the
+  chart as a symlink). Storage Control gRPC calls (HNS and zonal folder ops)
+  and Rapid data gRPC calls are not counted.
 - Correctness checks (payload hashes, metadata, versions, keys, rewind,
   deletes, concurrent saves) run outside the timed calls. Any failure fails
   the pod, and the build uploads no row.
