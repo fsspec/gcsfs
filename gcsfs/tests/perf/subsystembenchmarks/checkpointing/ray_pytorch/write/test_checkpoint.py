@@ -2,6 +2,7 @@ import os
 
 import pytest
 
+from gcsfs.tests.perf.subsystembenchmarks._common import placement
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch import configs
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch.configs import (
     RayCheckpointConfigurator,
@@ -23,7 +24,9 @@ CASES = [
 
 
 @pytest.mark.timeout(7200)
-@pytest.mark.parametrize("params", CASES, ids=lambda p: p.name)
+@pytest.mark.parametrize(
+    "params", placement.select(CASES, group="checkpointing/ray_pytorch")
+)
 def test_checkpoint_save(benchmark, params, monitor):
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing.checkpoint_case import (
         run_checkpoint_case,

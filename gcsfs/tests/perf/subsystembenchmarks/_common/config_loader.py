@@ -10,6 +10,23 @@ import os
 
 import yaml
 
+CONFIG_ENV = "GCSFS_SUBSYSTEM_CONFIG"
+
+
+def group_config_path(group_dir: str) -> str:
+    """Return the selected config YAML path under ``group_dir``."""
+    config_name = os.environ.get(CONFIG_ENV) or "configs.yaml"
+    return os.path.join(group_dir, config_name)
+
+
+def load_group_config(group_dir: str) -> dict:
+    """Load the YAML config dict for ``group_dir``, or ``{}`` if absent."""
+    path = group_config_path(group_dir)
+    if not os.path.isfile(path):
+        return {}
+    with open(path, "r") as f:
+        return yaml.safe_load(f) or {}
+
 
 def requested_sweep_axes():
     value = os.environ.get("GCSFS_SUBSYSTEM_SWEEP_AXES", "")
@@ -36,8 +53,7 @@ class BaseBenchmarkConfigurator:
         # GCSFS_SUBSYSTEM_CONFIG names an alternate config file in the group directory,
         # e.g. configs.ci.yaml for the per-PR suite (cloudbuild/subsystembenchmarks/
         # scripts/run-ci.sh). A missing file raises instead of falling back.
-        config_name = os.environ.get("GCSFS_SUBSYSTEM_CONFIG") or "configs.yaml"
-        self.config_path = os.path.join(os.path.dirname(module_file), config_name)
+        self.config_path = group_config_path(os.path.dirname(module_file))
 
     def _load_config(self):
         with open(self.config_path, "r") as f:

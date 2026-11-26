@@ -19,7 +19,13 @@ def _validate_device(device: str) -> str:
 
 
 def run_device() -> str:
-    return _validate_device(os.environ.get(DEVICE_ENV, "cpu"))
+    """Return the requested device; ``auto`` (run.py's default) resolves via accelerator."""
+    requested = os.environ.get(DEVICE_ENV, "cpu")
+    if requested == "auto":
+        from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
+
+        requested = accelerator.device_kind()
+    return _validate_device(requested)
 
 
 def device_capacity(device: str) -> int:

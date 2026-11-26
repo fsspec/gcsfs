@@ -580,9 +580,11 @@ def test_setup_stages_model_for_legacy_checkpoint_groups_only(tmp_path):
         setup_text = f.read()
 
     stage_block = setup_text.split(
-        'pip install -r "gcsfs/tests/perf/subsystembenchmarks/$GROUP/requirements.txt" >/dev/null\n',
+        "install_editable_gcsfs\n",
         1,
-    )[1].split('\nread -r -a REQUIREMENT_SPECS <<< "$REQUIREMENTS_OVERRIDE"', 1)[0]
+    )[1].split(
+        '\ninstall_requirements_override "${REQUIREMENTS_OVERRIDE:-}"', 1
+    )[0]
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()

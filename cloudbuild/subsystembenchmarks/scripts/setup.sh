@@ -15,8 +15,12 @@ pip install --upgrade pip >/dev/null
 if [[ ! -d .git ]]; then
   export SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0"
 fi
-pip install -e . >/dev/null
-pip install -r "gcsfs/tests/perf/subsystembenchmarks/$GROUP/requirements.txt" >/dev/null
+# shellcheck disable=SC1091
+source cloudbuild/subsystembenchmarks/scripts/install-group.sh
+install_group_requirements
+install_accelerator_packages
+# Install local editable gcsfs after group requirements so its fsspec floor wins.
+install_editable_gcsfs
 
 if [[ "${GROUP}" == "checkpointing/pytorch_lightning" || "${GROUP}" == "checkpointing/ray_pytorch" ]]; then
   STAGE_MODEL_ID="${MODEL_ID:-}"
@@ -54,16 +58,10 @@ with open(sys.argv[1]) as f:
   fi
 fi
 
-read -r -a REQUIREMENT_SPECS <<< "$REQUIREMENTS_OVERRIDE"
-if ((${#REQUIREMENT_SPECS[@]})); then
-  # Resolve any dependencies needed by the override, then reinstall only the
-  # requested packages in case an existing installation has the same version.
-  pip install -- "${REQUIREMENT_SPECS[@]}"
-  pip install --no-deps --force-reinstall -- "${REQUIREMENT_SPECS[@]}"
-fi
-REQUIREMENTS_OVERRIDE="${REQUIREMENT_SPECS[*]}"
+install_requirements_override "${REQUIREMENTS_OVERRIDE:-}"
+
 REQUIREMENTS_RESOLVED=$(pip list --format=json)
 {
-  printf 'export GCSFS_SUBSYSTEM_REQUIREMENTS_OVERRIDE=%q\n' "$REQUIREMENTS_OVERRIDE"
+  printf 'export GCSFS_SUBSYSTEM_REQUIREMENTS_OVERRIDE=%q\n' "$GCSFS_SUBSYSTEM_REQUIREMENTS_OVERRIDE"
   printf 'export GCSFS_SUBSYSTEM_REQUIREMENTS_RESOLVED=%q\n' "$REQUIREMENTS_RESOLVED"
 } >> "$HOME/ssb_cloudbuild.env"

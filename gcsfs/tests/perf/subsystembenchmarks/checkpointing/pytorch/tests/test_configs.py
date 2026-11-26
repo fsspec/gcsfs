@@ -3,12 +3,9 @@ import pathlib
 
 import pytest
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator, placement
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.configs import (
-    HostConfig,
     PyTorchCheckpointConfigurator,
-    case_params,
-    host_config,
-    placement_skip_reason,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.layout import Layout
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny import (
@@ -66,6 +63,7 @@ def _cases(group: str = "load"):
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
+    accelerator.device_kind.cache_clear()
     for key in (
         "GCSFS_SUBSYSTEM_MODEL_ID",
         "GCSFS_SUBSYSTEM_BUCKET_TYPE",
@@ -73,8 +71,14 @@ def _clean_env(monkeypatch):
         "GCSFS_BENCHMARK_FILTER",
         "GCSFS_SUBSYSTEM_CONFIG",
         "GCSFS_SUBSYSTEM_DEVICE",
+        placement.NODES_ENV,
+        placement.DEVICES_PER_NODE_ENV,
+        placement.COLLECTED_CASES_FILE_ENV,
+        placement.GROUP_ENV,
     ):
         monkeypatch.delenv(key, raising=False)
+    yield
+    accelerator.device_kind.cache_clear()
 
 
 def test_group_row_counts_and_frameworks():
@@ -114,7 +118,8 @@ def test_reshard_rows_all_set_source_and_load_rows_never_do():
         assert "-from-" not in c.name
 
 
-def test_ws16_rows_skip_on_8_rank_host():
+def test_ws16_rows_skip_on_8_rank_host(monkeypatch):
+    monkeypatch.setenv(placement.DEVICES_PER_NODE_ENV, "8")
     expected_skipped = {
         "save": "save-llama_3_1_8b-pp-hsdp-tp-pp2dpr2dp2tp2-ws16-reg",
         "load": "load-llama_3_1_8b-pp-hsdp-tp-pp2dpr2dp2tp2-ws16-reg",
@@ -124,7 +129,10 @@ def test_ws16_rows_skip_on_8_rank_host():
         ),
     }
     for group, expected_id in expected_skipped.items():
-        params = case_params(*GROUP_SPECS[group], host=HostConfig(1, 8))
+        cls, path = GROUP_SPECS[group]
+        params = placement.select(
+            cls(path).generate_cases(), group=f"checkpointing/pytorch_{group}"
+        )
         assert len(params) == 12
         assert all(p.id == p.values[0].name for p in params)
         skipped = {}
@@ -133,22 +141,29 @@ def test_ws16_rows_skip_on_8_rank_host():
                 (mark,) = param.marks
                 assert mark.mark.name == "skip"
                 skipped[param.id] = mark.mark.kwargs["reason"]
-        assert skipped == {expected_id: "needs 16 ranks, run has 1x8"}, group
+        assert skipped == {expected_id: "needs 16 devices; host has 8"}, group
 
 
-def test_case_params_default_host_follows_cuda_device_count(monkeypatch):
+def test_placement_select_default_host_follows_cuda_device_count(monkeypatch):
     import torch
 
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import MAX_RANKS
 
-    assert HostConfig() == HostConfig(1, MAX_RANKS)
-    assert host_config("cpu") == HostConfig(1, MAX_RANKS)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: 8)
-    assert host_config("cuda") == HostConfig(1, 8)
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_DEVICE", "cpu")
+    accelerator.device_kind.cache_clear()
+    assert placement.devices_per_node() == MAX_RANKS
 
     monkeypatch.setenv("GCSFS_SUBSYSTEM_DEVICE", "cuda")
+    monkeypatch.setattr(accelerator, "_cuda_available", lambda: True)
+    accelerator.device_kind.cache_clear()
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 8)
+    assert placement.devices_per_node() == 8
+
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 4)
-    default_params = case_params(PyTorchLoadConfigurator, CONFIG)
+    default_params = placement.select(
+        PyTorchLoadConfigurator(CONFIG).generate_cases(),
+        group="checkpointing/pytorch_load",
+    )
     assert len(default_params) == 12
     assert all(p.marks for p in default_params)
 
@@ -315,7 +330,11 @@ def test_parameters_layouts_max_world_size_and_extra_columns(monkeypatch):
         "setup_pipeline_parallel_size": 2,
         "setup_expert_parallel_size": 1,
     }
+    from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
+
     monkeypatch.setenv("GCSFS_SUBSYSTEM_DEVICE", "cuda")
+    monkeypatch.setattr(accelerator, "_cuda_available", lambda: True)
+    accelerator.device_kind.cache_clear()
     assert p.extra_columns()["device"] == "cuda"
 
     wider_target = make_params(
@@ -407,23 +426,30 @@ def test_columns_in_schema():
                 assert col in fields_by_name, f"param column {col} missing from schema"
 
 
-def test_placement_skip_reason_cuda_capacity():
+def test_placement_skip_reason_cuda_capacity(monkeypatch):
     ws16 = make_params(strategy="pp_hsdp_tp", pp=2, dpr=2, dp=2, tp=2, world_size=16)
-    assert placement_skip_reason(ws16, HostConfig(1, 8)) == (
-        "needs 16 ranks, run has 1x8"
+    monkeypatch.setenv(placement.DEVICES_PER_NODE_ENV, "8")
+    assert placement.skip_reason(ws16, "checkpointing/pytorch_load") == (
+        "needs 16 devices; host has 8"
     )
-    assert placement_skip_reason(ws16, HostConfig(1, 16)) is None
-    assert placement_skip_reason(ws16, HostConfig(2, 8)) is None
+    monkeypatch.setenv(placement.DEVICES_PER_NODE_ENV, "16")
+    assert placement.skip_reason(ws16, "checkpointing/pytorch_load") is None
+    monkeypatch.setenv(placement.DEVICES_PER_NODE_ENV, "8")
+    monkeypatch.setenv(placement.NODES_ENV, "2")
+    assert placement.skip_reason(ws16, "checkpointing/pytorch_load") is None
+    monkeypatch.delenv(placement.NODES_ENV)
 
     reshard = make_params(
         dp=4,
         world_size=4,
         source={"strategy": "fsdp", "data_parallel_size": 8, "world_size": 8},
     )
-    assert placement_skip_reason(reshard, HostConfig(1, 4)) == (
-        "needs 8 ranks, run has 1x4"
+    monkeypatch.setenv(placement.DEVICES_PER_NODE_ENV, "4")
+    assert placement.skip_reason(reshard, "checkpointing/pytorch_reshard") == (
+        "needs 8 devices; host has 4"
     )
-    assert placement_skip_reason(reshard, HostConfig(1, 8)) is None
+    monkeypatch.setenv(placement.DEVICES_PER_NODE_ENV, "8")
+    assert placement.skip_reason(reshard, "checkpointing/pytorch_reshard") is None
 
 
 def _collect(suite_dir, flag, env):
@@ -472,3 +498,19 @@ def test_group_pytest_collection_honors_benchmark_flags():
             f"{group_name} leaked live benchmark items under --run-benchmarks-infra:\n"
             f"{infra.stdout}\n{infra.stderr}"
         )
+
+
+def test_extra_columns_device_follows_default_auto(monkeypatch):
+    p = make_params()
+    monkeypatch.setenv(accelerator.DEVICE_ENV, "auto")
+    monkeypatch.setattr(accelerator, "_cuda_hardware_present", lambda: False)
+    monkeypatch.setattr(accelerator, "_cuda_available", lambda: False)
+    monkeypatch.setattr(accelerator, "_tpu_hardware_present", lambda: False)
+    accelerator.device_kind.cache_clear()
+    try:
+        assert p.extra_columns()["device"] == "cpu"
+        monkeypatch.setattr(accelerator, "_cuda_available", lambda: True)
+        accelerator.device_kind.cache_clear()
+        assert p.extra_columns()["device"] == "cuda"
+    finally:
+        accelerator.device_kind.cache_clear()

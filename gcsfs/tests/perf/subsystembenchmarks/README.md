@@ -27,10 +27,20 @@ A group is a `<subsystem>/<implementation>` directory with its own
 Data-loading groups detect CUDA automatically. On a GPU host, each round
 includes copying batches to the GPU. The exceptions are WebDataset with
 `decode: false` and Ray Data cases with feature columns, where there is nothing to copy.
-`checkpointing/pytorch_{save,load,reshard}` run on CPU (`gloo`) by default and
-on GPU (`cpu:gloo,cuda:nccl`) with `--device=cuda` (`ws16` rows skip on an 8-GPU
-host); `checkpointing/pytorch_lightning` and `checkpointing/ray_pytorch` always
-run on CPU (`gloo`).
+`checkpointing/pytorch_{save,load,reshard}` run on the device that `--device`
+resolves (default `auto`: CUDA when available, else CPU; these groups do not
+support TPU yet), using `gloo` on CPU and
+`cpu:gloo,cuda:nccl` on GPU; `checkpointing/pytorch_lightning` and
+`checkpointing/ray_pytorch` always run on CPU (`gloo`).
+
+- **Skip rules:** without `--nodes`, a case that needs more devices than the host
+  has skips (`needs W devices; host has D`; CPU hosts allow up to 16 ranks).
+  Ranks own one device each, except data loading on GPU, where ranks share GPUs
+  and any host with a GPU runs every case. Known
+  framework limitations on a specific accelerator are declared explicitly in
+  `_common/limitations.py` and documented with repros in
+  [`limitations.md`](limitations.md) (for example, `checkpointing/pytorch_lightning`
+  skips on TPU because Lightning does not support TorchTPU).
 
 ### Wide-table projected reads (`dataloading/ray_data`)
 
@@ -174,24 +184,30 @@ For checkpointing groups:
   a Hugging Face repo ID. Variants that pin their own `model_id` (the OLMoE
   rows in `checkpointing/pytorch_{save,load,reshard}`) are skipped while
   `--model-id` is set, so the override runs exactly the model you asked for.
-- With `--device=cuda` on `checkpointing/pytorch_{save,load,reshard}`, rank
-  capacity equals `torch.cuda.device_count()`, so `ws16` rows skip on an 8-GPU
-  host.
+- On a CUDA host, `checkpointing/pytorch_{save,load,reshard}` rank capacity
+  equals `torch.cuda.device_count()`, so `ws16` rows skip on an 8-GPU host.
 - These groups need a very large-memory host. A code comment in
   `checkpointing/checkpoint_case.py` targets a 732 GB VM.
 
 | Flag | Default | Meaning |
 | :-- | :-- | :-- |
 | `--group` | required | One group from the table above. |
-| `--bucket-prefix` | required | Name prefix for the per-case buckets. |
-| `--project` | required | GCP project for buckets and metrics. |
-| `--location` | required | Bucket region. |
+| `--bucket-prefix` | required (unless listing) | Name prefix for the per-case buckets. |
+| `--project` | required (unless listing) | GCP project for buckets and metrics. |
+| `--location` | required (unless listing) | Bucket region. |
 | `--bucket-type` | `regional` | `regional`, `zonal` (needs `--zone`), `hns`, `rapid_cache_cold` or `rapid_cache_warm` (need `--zone`), or an [RCU type](#rcu-bucket-types) (needs `--zone`). |
 | `--zone` | none | Zone for `zonal` buckets, Anywhere Caches and Rapid Cache Ultra caches. |
 | `--sweep-axes` | all | Axes to run, in addition to the baseline. |
 | `--filter` | none | pytest `-k` expression. |
+| `--cases` | none | Whitespace-separated exact case IDs to run; an unknown ID is an error. |
 | `--model-id` | from config | Checkpointing model override. |
-| `--device` | `cpu` | `cpu` or `cuda`; execution device for `checkpointing/pytorch_{save,load,reshard}` (`ws16` rows skip on an 8-GPU host). |
+| `--device` | `auto` | `auto`, `cpu`, or `cuda`; execution device for `checkpointing/pytorch_{save,load,reshard}` (`auto` picks CUDA, else CPU). |
+| `--nodes` | unset | Node count (`>= 1`) in a multi-node job; selects only the cases that need exactly this many nodes (see the skip rules above; DCP cases need `ceil(max(world_size, source world_size) / devices_per_node)`). |
+| `--devices-per-node` | probed | Accelerators per node (`>= 1`) used for case sizing, and for listing off-cluster. |
+| `--list-node-counts` | off | Print the sorted JSON list of distinct node counts needed by enabled, non-skipped cases and exit 0. |
+| `--list-cases` | off | Print the JSON list of enabled, non-skipped cases as `{"id", "nodes"}` and exit 0. |
+| `--preflight` | off | Before running cases, create and delete a bucket of `--bucket-type`, and list and read one file of every `gs://` `model_id`. |
+| `--results-dir` | `__run__/<timestamp>` | Directory for `results.json` and `results.csv`; concurrent runs need distinct directories. |
 | `--amplification-wait` | `300` | Seconds to wait before querying Cloud Monitoring. |
 | `--amplification-retry-wait` | `60` | Seconds to wait before one retry of missing metrics. |
 | `--require-amplification` | off | Fail if eligible rows still lack amplification metrics. |
@@ -236,9 +252,10 @@ pytest gcsfs/tests/perf/subsystembenchmarks --run-benchmarks-infra
 
 ```text
 subsystembenchmarks/
-├── run.py              # CLI, group discovery, amplification, table output
+├── run.py              # CLI, group discovery, node-count listing, preflight, amplification
 ├── conftest.py
-├── _common/            # pytest invocation, config loading, CSV report, metadata
+├── limitations.md      # proven accelerator/framework limitations cited by _common/limitations.py
+├── _common/            # accelerator, placement, limitations, multi-node channel, preflight, CLI, CSV report
 ├── dataloading/
 │   ├── read_case.py    # shared data-loading case lifecycle
 │   ├── driver.py       # read-driver interface, rank reduction
