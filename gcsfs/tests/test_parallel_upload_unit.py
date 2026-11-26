@@ -1,8 +1,11 @@
 """Unit tests for parallel uploads. The SDK call and the bucket layout lookup are mocked."""
 
+import array
 import base64
+import contextlib
 import datetime
 import importlib.util
+import logging
 import pathlib
 import sys
 import types
@@ -10,10 +13,16 @@ from unittest import mock
 
 import fsspec
 import pytest
+from google.api_core import exceptions as api_exceptions
 from google.cloud import _storage_v2
+from google.cloud.storage.asyncio.async_appendable_object_writer import (
+    AsyncAppendableObjectWriter,
+)
 
 from gcsfs import parallel_upload
-from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
+from gcsfs.core import GCSFileSystem
+from gcsfs.extended_gcsfs import BucketLayout, ExtendedGcsFileSystem
+from gcsfs.tests import layouts
 from gcsfs.tests.utils import is_real_gcs
 
 pytestmark = pytest.mark.skipif(
@@ -415,3 +424,446 @@ async def test_upload_rejects_kms_key_name_with_crypto_key_version(
     ):
         await upload(object(), "bkt", "key", source, kms_key_name=versioned_key)
     getattr(sdk, sdk_attr).assert_not_awaited()
+
+
+BUCKET = "bkt"
+PATH = f"{BUCKET}/key"
+THRESHOLD = 8
+BIG = b"x" * THRESHOLD
+SMALL = b"x" * (THRESHOLD - 1)
+PARALLEL, HTTP, APPENDABLE = "parallel", "http", "appendable"
+
+
+@contextlib.contextmanager
+def _mocked(layout, **fs_kwargs):
+    """A filesystem with the flag on, and a mock for each place a write can go."""
+    fs_kwargs.setdefault("parallel_upload", True)
+    fs = _fs(parallel_upload_threshold=THRESHOLD, **fs_kwargs)
+    fs._grpc_client = mock.MagicMock()
+    fs._storage_layout_cache[BUCKET] = layout
+    writer = mock.AsyncMock(spec=AsyncAppendableObjectWriter)
+    writer._is_stream_open = True
+    with (
+        mock.patch.object(
+            fs, "_get_grpc_client", autospec=True, return_value=fs._grpc_client
+        ),
+        # Already a mock for the whole session (conftest), so it has no spec.
+        mock.patch.object(
+            fs, "_get_bucket_layout", new_callable=mock.AsyncMock
+        ) as lookup,
+        mock.patch.object(
+            fs,
+            "_write_file_cache_update",
+            autospec=True,
+            wraps=fs._write_file_cache_update,
+        ) as cache_update,
+        mock.patch(
+            "gcsfs.parallel_upload.parallel_upload_bytes", autospec=True
+        ) as upload_bytes,
+        mock.patch(
+            "gcsfs.zb_hns_utils.init_aaow", autospec=True, return_value=writer
+        ) as appendable,
+        mock.patch("gcsfs.core.GCSFileSystem._pipe_file", autospec=True) as http_pipe,
+    ):
+        yield types.SimpleNamespace(
+            fs=fs,
+            lookup=lookup,
+            cache_update=cache_update,
+            upload_bytes=upload_bytes,
+            appendable=appendable,
+            http_pipe=http_pipe,
+        )
+
+
+def _route(m):
+    """The one path the write took."""
+    counts = {
+        PARALLEL: m.upload_bytes.await_count,
+        HTTP: m.http_pipe.await_count,
+        APPENDABLE: m.appendable.await_count,
+    }
+    assert sum(counts.values()) == 1, counts
+    return next(path for path, count in counts.items() if count)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "layout, fs_kwargs, call_kwargs, data, expected",
+    [
+        # Buckets written over HTTP: parallel at or above the threshold.
+        (layouts.STANDARD, {}, {}, BIG, PARALLEL),
+        (layouts.STANDARD_HIERARCHICAL, {}, {}, BIG, PARALLEL),
+        (layouts.STANDARD_RCU, {}, {}, BIG, PARALLEL),
+        (layouts.STANDARD, {}, {}, SMALL, HTTP),
+        (layouts.STANDARD, {"parallel_upload": False}, {}, BIG, HTTP),
+        # Preconditions keep the current path.
+        (layouts.STANDARD, {}, {"mode": "create"}, BIG, HTTP),
+        (layouts.STANDARD, {}, {"if_generation_match": 5}, BIG, HTTP),
+        # A failed layout lookup keeps the current path.
+        (BucketLayout.UNKNOWN, {}, {}, BIG, HTTP),
+        # Zonal buckets: only writes that end finalized.
+        (layouts.ZONAL_HIERARCHICAL, {}, {}, BIG, APPENDABLE),
+        (layouts.ZONAL_HIERARCHICAL, {}, {"finalize_on_close": True}, BIG, PARALLEL),
+        (layouts.ZONAL_HIERARCHICAL, {"finalize_on_close": True}, {}, BIG, PARALLEL),
+        (
+            layouts.ZONAL_HIERARCHICAL,
+            {},
+            {"finalize_on_close": True},
+            SMALL,
+            APPENDABLE,
+        ),
+        # RCU buckets with rcu_rapid_write: only writes that end finalized.
+        (layouts.STANDARD_RCU, {"rcu_rapid_write": True}, {}, BIG, PARALLEL),
+        (layouts.STANDARD_RCU, {"rcu_rapid_write": True}, {}, SMALL, APPENDABLE),
+        (
+            layouts.STANDARD_RCU,
+            {"rcu_rapid_write": True},
+            {"finalize_on_close": False},
+            BIG,
+            APPENDABLE,
+        ),
+        (layouts.STANDARD, {}, {"metadata": {"k": ""}}, BIG, HTTP),
+        (layouts.STANDARD, {}, {"metadata": {"k": None}}, BIG, HTTP),
+        (layouts.STANDARD, {}, {"metadata": {"": "v"}}, BIG, HTTP),
+        (
+            layouts.ZONAL_HIERARCHICAL,
+            {},
+            {"finalize_on_close": True, "metadata": {"k": ""}},
+            BIG,
+            PARALLEL,
+        ),
+    ],
+)
+async def test_pipe_file_routing(layout, fs_kwargs, call_kwargs, data, expected):
+    with _mocked(layout, **fs_kwargs) as m:
+        await m.fs._pipe_file(PATH, data, **call_kwargs)
+    assert _route(m) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", [BUCKET, f"{BUCKET}/"])
+async def test_pipe_file_bucket_only_path_keeps_the_existing_path(path):
+    with _mocked(layouts.STANDARD) as m:
+        await m.fs._pipe_file(path, BIG)
+    assert _route(m) == HTTP
+
+
+@pytest.mark.asyncio
+async def test_pipe_file_upload_arguments():
+    kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
+    with _mocked(layouts.STANDARD, parallel_upload_segment_size=4096) as m:
+        await m.fs._pipe_file(
+            PATH,
+            BIG,
+            metadata={"k": "v"},
+            content_type="text/plain",
+            fixed_key_metadata={"cache_control": "no-cache"},
+            kms_key_name=kms_key,
+        )
+    call = m.upload_bytes.await_args
+    assert call.args == (m.fs._grpc_client, BUCKET, "key", BIG)
+    assert call.kwargs == dict(
+        content_type="text/plain",
+        metadata={"k": "v"},
+        fixed_key_metadata={"cache_control": "no-cache"},
+        storage_class=None,
+        kms_key_name=kms_key,
+        segment_size=4096,
+        max_workers=None,
+    )
+    m.cache_update.assert_awaited_once_with(PATH)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "layout, fs_kwargs, storage_class",
+    [
+        (layouts.STANDARD, {}, None),
+        (layouts.STANDARD_RCU, {}, None),
+        (layouts.STANDARD_RCU, {"rcu_rapid_write": True}, "RAPID"),
+        (layouts.ZONAL_HIERARCHICAL, {"finalize_on_close": True}, None),
+    ],
+)
+async def test_pipe_file_storage_class(layout, fs_kwargs, storage_class):
+    with _mocked(layout, **fs_kwargs) as m:
+        await m.fs._pipe_file(PATH, BIG)
+    assert m.upload_bytes.await_args.kwargs.get("storage_class") == storage_class
+
+
+@pytest.mark.asyncio
+async def test_pipe_file_per_call_segment_size_and_concurrency():
+    with _mocked(layouts.STANDARD, parallel_upload_segment_size=4096) as m:
+        await m.fs._pipe_file(
+            PATH, BIG, parallel_upload_segment_size=8192, concurrency=3
+        )
+    kwargs = m.upload_bytes.await_args.kwargs
+    assert (kwargs["segment_size"], kwargs["max_workers"]) == (8192, 3)
+
+
+@pytest.mark.asyncio
+async def test_pipe_file_per_call_none_keeps_the_filesystem_segment_size():
+    with _mocked(layouts.STANDARD, parallel_upload_segment_size=4096) as m:
+        await m.fs._pipe_file(
+            PATH, BIG, parallel_upload_segment_size=None, concurrency=None
+        )
+    kwargs = m.upload_bytes.await_args.kwargs
+    assert (kwargs["segment_size"], kwargs["max_workers"]) == (4096, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("data", [BIG, SMALL], ids=["big", "small"])
+@pytest.mark.parametrize(
+    "name, value",
+    [
+        ("concurrency", 0),
+        ("concurrency", False),
+        ("parallel_upload_segment_size", 0),
+        ("parallel_upload_segment_size", "bad"),
+    ],
+)
+async def test_pipe_file_rejects_invalid_per_call_options(name, value, data):
+    with _mocked(layouts.STANDARD) as m:
+        with pytest.raises(ValueError, match=name):
+            await m.fs._pipe_file(PATH, data, **{name: value})
+    m.upload_bytes.assert_not_awaited()
+    m.http_pipe.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pipe_file_ignores_per_call_options_when_the_option_is_off():
+    with _mocked(layouts.STANDARD, parallel_upload=False) as m:
+        await m.fs._pipe_file(
+            PATH, BIG, parallel_upload_segment_size="bad", concurrency=0
+        )
+    assert _route(m) == HTTP
+
+
+@pytest.mark.asyncio
+async def test_pipe_file_content_type_none_uses_the_default():
+    with _mocked(layouts.STANDARD) as m:
+        await m.fs._pipe_file(PATH, BIG, content_type=None)
+    content_type = m.upload_bytes.await_args.kwargs["content_type"]
+    assert content_type == "application/octet-stream"
+
+
+@pytest.mark.asyncio
+async def test_pipe_file_threshold_counts_bytes():
+    data = array.array("q", [1])  # one item, eight bytes
+    with _mocked(layouts.STANDARD) as m:
+        await m.fs._pipe_file(PATH, data)
+    assert _route(m) == PARALLEL
+    assert len(m.upload_bytes.await_args.args[3]) == THRESHOLD
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fs_kwargs, call_kwargs, warns",
+    [
+        ({}, {"consistency": "md5"}, True),
+        ({"consistency": "md5"}, {}, True),
+        ({}, {"consistency": "size"}, True),
+        ({}, {"consistency": "crc32c"}, True),
+        ({}, {}, False),
+        ({}, {"consistency": "none"}, False),
+        ({"consistency": "md5"}, {"consistency": "none"}, False),
+    ],
+)
+async def test_pipe_file_warns_when_consistency_is_ignored(
+    caplog, fs_kwargs, call_kwargs, warns
+):
+    with (
+        _mocked(layouts.STANDARD, **fs_kwargs) as m,
+        caplog.at_level(logging.WARNING, logger="gcsfs"),
+    ):
+        await m.fs._pipe_file(PATH, BIG, **call_kwargs)
+    assert _route(m) == PARALLEL
+    assert any("consistency" in r.getMessage() for r in caplog.records) is warns
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rejection", [api_exceptions.InvalidArgument, api_exceptions.FailedPrecondition]
+)
+async def test_pipe_file_retries_without_rapid_after_rcu_disabled(caplog, rejection):
+    with (
+        _mocked(layouts.STANDARD_RCU, rcu_rapid_write=True) as m,
+        caplog.at_level(logging.WARNING, logger="gcsfs"),
+    ):
+        m.upload_bytes.side_effect = [rejection("rejected"), None]
+        m.lookup.return_value = layouts.STANDARD
+        await m.fs._pipe_file(PATH, BIG)
+    assert [c.kwargs["storage_class"] for c in m.upload_bytes.await_args_list] == [
+        "RAPID",
+        None,
+    ]
+    assert m.fs._storage_layout_cache[BUCKET] == layouts.STANDARD
+    assert any("Retrying the upload" in r.getMessage() for r in caplog.records)
+    m.cache_update.assert_awaited_once_with(PATH)
+
+
+@pytest.mark.asyncio
+async def test_pipe_file_failed_retry_is_not_repeated():
+    second = api_exceptions.InvalidArgument("rejected again")
+    with _mocked(layouts.STANDARD_RCU, rcu_rapid_write=True) as m:
+        m.upload_bytes.side_effect = [
+            api_exceptions.InvalidArgument("rejected"),
+            second,
+        ]
+        m.lookup.return_value = layouts.STANDARD
+        with pytest.raises(api_exceptions.InvalidArgument) as excinfo:
+            await m.fs._pipe_file(PATH, BIG)
+    assert excinfo.value is second
+    assert m.upload_bytes.await_count == 2
+    m.cache_update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "layout, fs_kwargs, error, expected_lookups",
+    [
+        (layouts.STANDARD, {}, api_exceptions.InvalidArgument("rejected"), 0),
+        (
+            layouts.ZONAL_HIERARCHICAL,
+            {"finalize_on_close": True},
+            api_exceptions.InvalidArgument("rejected"),
+            0,
+        ),
+        (
+            layouts.STANDARD_RCU,
+            {"rcu_rapid_write": True},
+            api_exceptions.InvalidArgument("rejected"),
+            1,
+        ),
+        (
+            layouts.STANDARD_RCU,
+            {"rcu_rapid_write": True},
+            api_exceptions.FailedPrecondition("rejected"),
+            1,
+        ),
+        (
+            layouts.STANDARD_RCU,
+            {"rcu_rapid_write": True},
+            api_exceptions.ServiceUnavailable("unavailable"),
+            1,
+        ),
+        (
+            layouts.STANDARD_RCU,
+            {"rcu_rapid_write": True},
+            NotImplementedError("no SDK support"),
+            0,
+        ),
+    ],
+)
+async def test_pipe_file_other_errors_surface_unchanged(
+    layout, fs_kwargs, error, expected_lookups
+):
+    with _mocked(layout, **fs_kwargs) as m:
+        m.upload_bytes.side_effect = error
+        m.lookup.return_value = layout
+        with pytest.raises(type(error)) as excinfo:
+            await m.fs._pipe_file(PATH, BIG)
+    assert excinfo.value is error
+    assert (m.upload_bytes.await_count, m.lookup.await_count) == (1, expected_lookups)
+    m.cache_update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "layout, fs_kwargs",
+    [
+        (layouts.STANDARD, {}),
+        (layouts.STANDARD_RCU, {}),
+        (layouts.ZONAL_HIERARCHICAL, {"finalize_on_close": True}),
+    ],
+)
+async def test_pipe_file_forwards_kms_key_name(layout, fs_kwargs):
+    kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
+    with (
+        mock.patch("gcsfs.zb_hns_utils.Preconditions", None),
+        _mocked(layout, **fs_kwargs) as m,
+    ):
+        await m.fs._pipe_file(PATH, BIG, kms_key_name=kms_key)
+    assert _route(m) == PARALLEL
+    assert m.upload_bytes.await_args.kwargs["kms_key_name"] == kms_key
+
+
+@pytest.mark.asyncio
+async def test_pipe_file_rejects_kms_key_name_on_rcu_rapid_write():
+    kms_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k"
+    with _mocked(layouts.STANDARD_RCU, rcu_rapid_write=True) as m:
+        with pytest.raises(
+            NotImplementedError, match="not supported for gRPC RAPID uploads"
+        ):
+            await m.fs._pipe_file(PATH, BIG, kms_key_name=kms_key)
+    m.upload_bytes.assert_not_awaited()
+    m.cache_update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "layout, fs_kwargs",
+    [
+        (layouts.STANDARD, {}),
+        (layouts.STANDARD_RCU, {}),
+        (layouts.ZONAL_HIERARCHICAL, {"finalize_on_close": True}),
+    ],
+)
+async def test_pipe_file_rejects_kms_key_name_with_crypto_key_version(
+    layout, fs_kwargs
+):
+    versioned_key = "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"
+    with _mocked(layout, **fs_kwargs) as m:
+        with pytest.raises(
+            ValueError,
+            match="kms_key_name must not include /cryptoKeyVersions/",
+        ):
+            await m.fs._pipe_file(PATH, BIG, kms_key_name=versioned_key)
+    m.upload_bytes.assert_not_awaited()
+    m.cache_update.assert_not_awaited()
+
+
+def test_pipe_file_sync_end_to_end(sdk):
+    """Only the SDK call is faked: sync pipe_file, the Blob, and the cache."""
+    fs = _fs(parallel_upload=True, parallel_upload_threshold=THRESHOLD)
+    fs._grpc_client = mock.MagicMock()
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD
+    fs.dircache[f"{BUCKET}/dir"] = [{"name": f"{BUCKET}/dir/old", "type": "file"}]
+    fs.dircache[BUCKET] = [{"name": f"{BUCKET}/dir", "type": "directory"}]
+
+    fs.pipe_file(
+        f"gs://{BUCKET}/dir/key",
+        BIG,
+        metadata={"k": "v"},
+        content_type="text/plain",
+        fixed_key_metadata={"cache_control": "no-cache"},
+        parallel_upload_segment_size=8192,
+        concurrency=3,
+    )
+
+    call = sdk.upload_chunks_concurrently_from_bytes.await_args
+    assert call.args == (fs._grpc_client, BUCKET, "dir/key", BIG)
+    assert call.kwargs["preferred_segment_size_bytes"] == 8192
+    assert call.kwargs["max_workers"] == 3
+    blob = call.kwargs["blob"]
+    assert (blob.bucket.name, blob.name) == (BUCKET, "dir/key")
+    assert (blob.content_type, blob.metadata, blob.cache_control) == (
+        "text/plain",
+        {"k": "v"},
+        "no-cache",
+    )
+    # Only the listing of the parent directory, which was cached, is dropped.
+    assert f"{BUCKET}/dir" not in fs.dircache
+    assert BUCKET in fs.dircache
+
+
+@pytest.mark.asyncio
+async def test_core_pipe_file_ignores_extra_keyword_arguments():
+    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    with mock.patch("gcsfs.core.simple_upload", autospec=True) as upload:
+        await fs._pipe_file(
+            PATH, SMALL, parallel_upload_segment_size=8192, concurrency=3
+        )
+    upload.assert_awaited_once()
+    assert not {"parallel_upload_segment_size", "concurrency"} & set(
+        upload.await_args.kwargs
+    )
