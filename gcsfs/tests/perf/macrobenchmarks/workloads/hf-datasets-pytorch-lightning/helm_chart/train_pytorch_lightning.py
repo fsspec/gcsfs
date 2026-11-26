@@ -80,6 +80,8 @@ from torch.distributed.tensor.parallel import (
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 
+# TODO: Remove this workaround once a `datasets` release includes
+# https://github.com/huggingface/datasets/pull/9085.
 def _patch_datasets_worker_restore():
     """Avoid premature worker state_dict load in datasets >= 5.1.
 
