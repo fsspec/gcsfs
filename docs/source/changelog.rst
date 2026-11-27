@@ -111,7 +111,7 @@ Unreleased
 
   The ``User-Agent`` header carries no usage-attribution tokens (only
   ``python-gcsfs/<version>`` and, on HTTP reads, the existing
-  ``cache_type/<type>[:e|:d]`` hint). No user data, paths, argument values,
+  ``cache_type/<type>[:e|:d]`` token). No user data, paths, argument values,
   credentials, or cluster/instance names are ever collected. Telemetry can be
   disabled immediately at any time by setting ``DO_NOT_TRACK=1`` or
   ``GCSFS_NO_TELEMETRY=true``. See :doc:`telemetry` for details (#1097, #1098,
