@@ -1,7 +1,7 @@
 Telemetry & Usage Attribution
 =============================
 
-``gcsfs`` includes lightweight, automatic usage telemetry to identify the upstream data science and machine learning libraries, top-level public operations (and whether five allowlisted flags are enabled), and the compute environments from which clients interact with Google Cloud Storage (GCS).
+``gcsfs`` includes lightweight, automatic usage telemetry to identify the upstream data science and machine learning libraries, top-level public operations (and whether allowlisted flags are enabled), and the compute environments from which clients interact with Google Cloud Storage (GCS).
 
 Purpose
 -------
@@ -11,7 +11,7 @@ The Python data ecosystem comprises a rich variety of frameworks—including Pan
 What is Collected
 -----------------
 
-When an operation is executed, ``gcsfs`` identifies the name of the top-level calling framework, the public method name, whether five allowlisted method flags (``recursive``, ``detail``, ``withdirs``, ``prefix``, ``cache_options``) are enabled, and the compute environment, and sends them in the ``x-goog-storage-gcsfs-features`` header as a web-safe base64-encoded ``GcsfsFeatures`` protobuf payload.
+When an operation is executed, ``gcsfs`` identifies the name of the top-level calling framework, the public method name, whether allowlisted method flags (``recursive``, ``detail``, ``withdirs``, ``prefix``, ``cache_options``) are enabled, and the compute environment, and sends them in the ``x-goog-storage-gcsfs-features`` header as a web-safe base64-encoded ``GcsfsFeatures`` protobuf payload.
 
 ``x-goog-storage-gcsfs-features`` is an internal header managed by ``gcsfs``: any caller-supplied per-request value is stripped or replaced, and the header is omitted when no recognized attribution dimensions are active.
 
@@ -100,11 +100,11 @@ The header is omitted when no recognized attribution dimensions are active.
 Privacy & Security Guarantees
 -----------------------------
 
-Telemetry collection is strictly limited to open-source library names, public method names, whether five allowlisted method flags (``recursive``, ``detail``, ``withdirs``, ``prefix``, ``cache_options``) are enabled (truthy, including defaults), and environment categories (``gce``, ``gke``, ``oth``), and respects user privacy and security:
+Telemetry collection is strictly limited to open-source library names, public method names, whether allowlisted method flags (``recursive``, ``detail``, ``withdirs``, ``prefix``, ``cache_options``) are enabled (truthy, including defaults), and environment categories (``gce``, ``gke``, ``oth``), and respects user privacy and security:
 
 - **No User Data or Payloads:** Object contents read or written are never inspected or recorded.
 - **No File Paths or Bucket Names:** Bucket names, object keys, folder hierarchies, and URIs are never collected.
-- **No Argument Values or User Logic:** Variable names, script logic, and raw argument values (such as prefix strings, paths, or ``cache_options`` contents) are never collected; parameter tracking checks only boolean truthiness on the five allowlisted flags.
+- **No Argument Values or User Logic:** Variable names, script logic, and raw argument values (such as prefix strings, paths, or ``cache_options`` contents) are never collected; parameter tracking checks only boolean truthiness on allowlisted flags.
 - **No Credentials or Identifiers:** API keys, service account credentials, IAM identities, project IDs, and IP addresses are never collected.
 - **Header Injection Safety:** Only predefined protobuf enum values and boolean flags are ever serialized into the URL-safe base64 ``GcsfsFeatures`` header; arbitrary or unrecognized strings are ignored and never emitted on the wire.
 - **No Cluster or Instance Names:** The metadata query checks only whether ``cluster-name`` is set and never sends cluster names, instance names, or zones to GCS.
