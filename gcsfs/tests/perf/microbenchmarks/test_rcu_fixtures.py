@@ -429,6 +429,10 @@ def test_benchmark_io_fixture_primes_grpc_client_on_extended_fs_for_small_rcu_wa
         get_folder=mock.AsyncMock(side_effect=api_exceptions.NotFound("not a folder"))
     )
 
+    async def _fake_get_grpc_client(self):
+        self._grpc_client = fake_grpc_client
+        return fake_grpc_client
+
     with (
         mock.patch.object(
             ExtendedGcsFileSystem,
@@ -453,10 +457,12 @@ def test_benchmark_io_fixture_primes_grpc_client_on_extended_fs_for_small_rcu_wa
             "_rm",
             new_callable=mock.AsyncMock,
         ),
-        mock.patch(
-            "gcsfs.extended_gcsfs.AsyncGrpcClient",
-            return_value=fake_grpc_client,
-        ) as grpc_client_cls,
+        mock.patch.object(
+            ExtendedGcsFileSystem,
+            "_get_grpc_client",
+            autospec=True,
+            side_effect=_fake_get_grpc_client,
+        ) as get_grpc_client_mock,
         mock.patch(
             "gcsfs.zb_hns_utils.init_aaow",
             new_callable=mock.AsyncMock,
@@ -479,7 +485,7 @@ def test_benchmark_io_fixture_primes_grpc_client_on_extended_fs_for_small_rcu_wa
         gcs, file_paths, yielded_params = next(gen)
         try:
             assert gcs._grpc_client is fake_grpc_client
-            grpc_client_cls.assert_called_once()
+            get_grpc_client_mock.assert_awaited_once()
             init_aaow.assert_not_awaited()
             init_mrd.assert_awaited_once()
             assert init_mrd.await_args is not None

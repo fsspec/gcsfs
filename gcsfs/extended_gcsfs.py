@@ -17,12 +17,14 @@ from urllib.parse import urlsplit
 
 import aiohttp
 import fsspec
+import grpc
 from fsspec import asyn
 from fsspec.callbacks import NoOpCallback
 from google.api_core import exceptions as api_exceptions
 from google.api_core.client_info import ClientInfo
 from google.api_core.client_options import ClientOptions
 from google.auth.credentials import AnonymousCredentials
+from google.cloud import _storage_v2 as storage_v2
 from google.cloud import storage_control_v2
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     AsyncAppendableObjectWriter,
@@ -313,6 +315,49 @@ async def _close_pool(pool):
     return close_task.result()
 
 
+class _SecureAnonymousAsyncGrpcClient(AsyncGrpcClient):
+    """Anonymous AsyncGrpcClient backed by a pre-built TLS StorageAsyncClient."""
+
+    def __init__(self, grpc_client):
+        self._grpc_client = grpc_client
+
+
+def _extract_grpc_endpoint(location):
+    """Extract ``host[:port]`` from a location string without scheme or path."""
+    return location.split("://", 1)[-1].split("/")[0] if location else ""
+
+
+def _create_secure_anonymous_grpc_client(endpoint, client_info, client_options):
+    """Build an anonymous AsyncGrpcClient over a TLS-encrypted gRPC channel.
+
+    ``AsyncGrpcClient`` opens ``grpc.aio.insecure_channel`` whenever
+    ``AnonymousCredentials`` are provided. For non-``http://`` endpoints we
+    construct a ``grpc.aio.secure_channel`` instead so server certificates are
+    verified and traffic is encrypted.
+    """
+    if not endpoint:
+        raise ValueError("Cannot initialize anonymous gRPC client without an endpoint")
+    channel = grpc.aio.secure_channel(
+        endpoint,
+        grpc.ssl_channel_credentials(),
+        options=(
+            ("grpc.primary_user_agent", client_info.to_user_agent()),
+            ("grpc.max_send_message_length", -1),
+            ("grpc.max_receive_message_length", -1),
+        ),
+    )
+    transport = storage_v2.services.storage.transports.StorageGrpcAsyncIOTransport(
+        channel=channel,
+        host=endpoint,
+    )
+    storage_client = storage_v2.StorageAsyncClient(
+        transport=transport,
+        client_info=client_info,
+        client_options=client_options,
+    )
+    return _SecureAnonymousAsyncGrpcClient(storage_client)
+
+
 def _parse_bool_flag(value, name):
     """Normalize a boolean option that may arrive as a string from config or env."""
     if isinstance(value, str):
@@ -541,15 +586,24 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 quota_project_id=self._user_project,
                 universe_domain=_gcp_universe_domain(),
             )
-            if self._grpc_location:
+            location = self._grpc_location or ""
+            endpoint = _extract_grpc_endpoint(location)
+            if endpoint:
                 # client_options expects only the host:port, without any protocol or path components.
-                endpoint = self._grpc_location.split("://")[-1].split("/")[0]
                 client_options.api_endpoint = endpoint
-            self._grpc_client = AsyncGrpcClient(
-                credentials=self.credential,
-                client_info=ClientInfo(user_agent=f"{USER_AGENT}/{version}"),
-                client_options=client_options,
-            )
+            client_info = ClientInfo(user_agent=f"{USER_AGENT}/{version}")
+            if isinstance(
+                self.credential, AnonymousCredentials
+            ) and not location.lower().startswith("http://"):
+                self._grpc_client = _create_secure_anonymous_grpc_client(
+                    endpoint, client_info, client_options
+                )
+            else:
+                self._grpc_client = AsyncGrpcClient(
+                    credentials=self.credential,
+                    client_info=client_info,
+                    client_options=client_options,
+                )
         return self._grpc_client
 
     async def _get_control_plane_client(self):
@@ -574,7 +628,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             }
             if self._grpc_location:
                 # Extract host:port safely (strips protocol and trailing URL paths if any).
-                endpoint = self._grpc_location.split("://")[-1].split("/")[0]
+                endpoint = _extract_grpc_endpoint(self._grpc_location)
                 channel_kwargs["host"] = endpoint
 
             channel = transport_cls.create_channel(**channel_kwargs)
@@ -693,7 +747,7 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         lookup succeeded on this instance, and ``None`` when unknown.
         """
         location = self._grpc_location
-        if location.startswith("http://"):
+        if location.lower().startswith("http://"):
             return False
         if _is_default_storage_endpoint(location) or self._control_api_learned:
             return True
