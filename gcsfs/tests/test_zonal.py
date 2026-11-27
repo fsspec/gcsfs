@@ -17,6 +17,7 @@ from unittest import mock
 
 import fsspec
 import pytest
+from google.api_core import exceptions as api_exceptions
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     _DEFAULT_FLUSH_INTERVAL_BYTES,
     AsyncAppendableObjectWriter,
@@ -123,6 +124,13 @@ def gcs_bucket_mocks(request):
 
         mock_pool.close.side_effect = close_pool
 
+        # On an HNS bucket, _info probes get_folder alongside the object lookup.
+        # Answer it like the service does for an object so no real channel connects.
+        mock_control_plane_client = mock.Mock()
+        mock_control_plane_client.get_folder = mock.AsyncMock(
+            side_effect=api_exceptions.NotFound("not a folder")
+        )
+
         with (
             mock.patch(
                 patch_target_sync_lookup_bucket_layout, return_value=bucket_type_val
@@ -130,6 +138,11 @@ def gcs_bucket_mocks(request):
             mock.patch(
                 patch_target_lookup_bucket_layout,
                 return_value=bucket_type_val,
+            ),
+            mock.patch(
+                "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_control_plane_client",
+                new_callable=mock.AsyncMock,
+                return_value=mock_control_plane_client,
             ),
             mock.patch(patch_target_create_mrd, mock_create_mrd),
             mock.patch(

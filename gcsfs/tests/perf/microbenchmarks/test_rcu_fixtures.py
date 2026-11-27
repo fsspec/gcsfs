@@ -2,6 +2,7 @@ import unittest.mock as mock
 from types import SimpleNamespace
 
 import pytest
+from google.api_core import exceptions as api_exceptions
 
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 from gcsfs.tests import layouts
@@ -422,12 +423,24 @@ def test_benchmark_io_fixture_primes_grpc_client_on_extended_fs_for_small_rcu_wa
     def _make_fs(**kwargs):
         return ExtendedGcsFileSystem(token="anon", skip_instance_cache=True, **kwargs)
 
+    # On an HNS bucket, _info probes get_folder alongside the object lookup.
+    # Answer it like the service does for an object so no real channel connects.
+    fake_control_plane_client = SimpleNamespace(
+        get_folder=mock.AsyncMock(side_effect=api_exceptions.NotFound("not a folder"))
+    )
+
     with (
         mock.patch.object(
             ExtendedGcsFileSystem,
             "_get_bucket_layout",
             new_callable=mock.AsyncMock,
             return_value=bucket_layout,
+        ),
+        mock.patch.object(
+            ExtendedGcsFileSystem,
+            "_get_control_plane_client",
+            new_callable=mock.AsyncMock,
+            return_value=fake_control_plane_client,
         ),
         mock.patch.object(
             ExtendedGcsFileSystem,
