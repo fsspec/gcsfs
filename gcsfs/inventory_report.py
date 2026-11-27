@@ -258,10 +258,8 @@ class InventoryReport:
         # Validate date, making sure the current date is within the start and end range.
         today = datetime.now()
         if today < start_date or today > end_date:
-            raise ValueError(
-                f"Current date {today} is outside the range \
-                {start_date} and {end_date} specified by the inventory report config."
-            )
+            raise ValueError(f"Current date {today} is outside the range \
+                {start_date} and {end_date} specified by the inventory report config.")
 
         # Validate object name exists in the metadata fields.
         # Note that the size field is mandated to be included in the
@@ -347,10 +345,8 @@ class InventoryReport:
 
         # If no reports are fetched, indicates there is an error.
         if len(inventory_report_metadata) == 0:
-            raise ValueError(
-                "No inventory reports to fetch. Check if \
-                your inventory report is set up correctly."
-            )
+            raise ValueError("No inventory reports to fetch. Check if \
+                your inventory report is set up correctly.")
 
         return inventory_report_metadata
 

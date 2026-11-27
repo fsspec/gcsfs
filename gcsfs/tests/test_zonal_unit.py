@@ -2689,3 +2689,551 @@ async def test_core_upload_helpers_route_rcu_to_extended_with_rcu_rapid_write(
 
     mock_ext_simple_upload.assert_awaited_once()
     mock_ext_initiate_upload.assert_awaited_once()
+
+
+def _make_versioned_mrd_env(versions_by_gen):
+    """Build fake HTTP object metadata and MRD factory keyed by generation string."""
+
+    async def fake_call(method, path, *args, **kwargs):
+        assert method == "GET"
+        gen = kwargs.get("generation")
+        chosen_gen = str(gen) if gen is not None else "222"
+        if chosen_gen not in versions_by_gen:
+            raise FileNotFoundError(path)
+        payload = versions_by_gen[chosen_gen]
+        key_name = args[1] if len(args) > 1 else "obj"
+        bucket_name = args[0] if args else TEST_ZONAL_BUCKET
+        return {
+            "kind": "storage#object",
+            "bucket": bucket_name,
+            "name": key_name,
+            "size": str(len(payload)),
+            "generation": chosen_gen,
+            "timeFinalized": "2026-11-17T00:00:00Z",
+        }
+
+    async def fake_create_mrd(
+        client, bucket_name, object_name, generation=None, **kwargs
+    ):
+        chosen_gen = str(generation) if generation is not None else "222"
+        if chosen_gen not in versions_by_gen:
+            from google.api_core.exceptions import NotFound
+
+            raise NotFound(f"{bucket_name}/{object_name}#{chosen_gen}")
+        payload = versions_by_gen[chosen_gen]
+
+        async def download_ranges(read_requests, metadata=None):
+            for offset, length, buf in read_requests:
+                buf.write(payload[offset : offset + length])
+
+        mrd = mock.Mock(spec=AsyncMultiRangeDownloader)
+        mrd.persisted_size = len(payload)
+        mrd.bucket_name = bucket_name
+        mrd.object_name = object_name
+        mrd.download_ranges = mock.AsyncMock(side_effect=download_ranges)
+        mrd.close = mock.AsyncMock()
+        return mrd
+
+    return fake_call, fake_create_mrd
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+async def test_cat_file_and_cat_honor_generation_end_to_end(bucket_layout):
+    """_cat_file and _cat read the pinned generation via MRDPoolCache and _info."""
+    versions = {"111": b"v1-payload", "222": b"v2-longer-live-payload"}
+    fake_call, fake_create_mrd = _make_versioned_mrd_env(versions)
+    fs = ExtendedGcsFileSystem(
+        token="anon",
+        loop=asyncio.get_running_loop(),
+        skip_instance_cache=True,
+    )
+    assert fs.version_aware is False
+    fs._grpc_client = mock.MagicMock()
+    va_fs = ExtendedGcsFileSystem(
+        token="anon",
+        version_aware=True,
+        loop=asyncio.get_running_loop(),
+        skip_instance_cache=True,
+    )
+    va_fs._grpc_client = mock.MagicMock()
+    path = f"{TEST_ZONAL_BUCKET}/obj"
+    # Seed dircache with live generation 222 to verify generation=111 does not read 222.
+    fs.dircache[TEST_ZONAL_BUCKET] = [
+        {
+            "bucket": TEST_ZONAL_BUCKET,
+            "name": path,
+            "size": len(versions["222"]),
+            "generation": "222",
+            "type": "file",
+            "timeFinalized": "2026-11-17T00:00:00Z",
+        }
+    ]
+
+    try:
+        with (
+            mock.patch.object(
+                fs,
+                "_lookup_bucket_layout",
+                new=mock.AsyncMock(return_value=bucket_layout),
+            ),
+            mock.patch.object(
+                fs, "_call", new=mock.AsyncMock(side_effect=fake_call)
+            ) as mock_call,
+            mock.patch.object(
+                va_fs,
+                "_lookup_bucket_layout",
+                new=mock.AsyncMock(return_value=bucket_layout),
+            ),
+            mock.patch.object(
+                va_fs, "_call", new=mock.AsyncMock(side_effect=fake_call)
+            ),
+            mock.patch(
+                "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
+                new=mock.AsyncMock(side_effect=fake_create_mrd),
+            ) as mock_create_mrd,
+        ):
+            assert await fs._cat_file(path, generation="111") == b"v1-payload"
+            assert mock_call.await_args.kwargs["generation"] == "111"
+            assert mock_create_mrd.await_args.args[3] == "111"
+
+            # Passing int 111 reuses the idle MRD from the "111" pool cache entry.
+            assert (
+                await fs._cat_file(path, start=3, end=10, generation=111) == b"payload"
+            )
+            assert mock_create_mrd.await_count == 1
+
+            assert await fs._cat(path, generation="111") == b"v1-payload"
+
+            # #gen fragment and conflict cases require version_aware=True.
+            assert await va_fs._cat_file(f"{path}#111") == b"v1-payload"
+            assert await va_fs._cat_file(f"{path}#111", generation=111) == b"v1-payload"
+
+            with pytest.raises(ValueError, match="Cannot coalesce generations"):
+                await va_fs._cat_file(f"{path}#111", generation="222")
+    finally:
+        await fs._mrd_pool_cache.close()
+        await va_fs._mrd_pool_cache.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+async def test_cat_file_missing_persisted_size_forwards_generation(bucket_layout):
+    """Fallback _info() in _cat_file receives the coalesced or pool generation."""
+    from gcsfs.zb_hns_utils import MRDPool
+
+    fs = ExtendedGcsFileSystem(
+        token="anon", loop=asyncio.get_running_loop(), skip_instance_cache=True
+    )
+    path = f"{TEST_ZONAL_BUCKET}/obj"
+
+    mock_downloader = mock.Mock(spec=AsyncMultiRangeDownloader)
+    mock_downloader.persisted_size = None
+    mock_downloader.object_name = "obj"
+
+    async def download_ranges(reqs, metadata=None):
+        for offset, length, buf in reqs:
+            buf.write(b"0123456789"[offset : offset + length])
+
+    mock_downloader.download_ranges = mock.AsyncMock(side_effect=download_ranges)
+
+    pool = MRDPool(fs, TEST_ZONAL_BUCKET, "obj", "456", finalized=False, pool_size=1)
+    pool._initialized = True
+    pool._active_count = 1
+    pool._all_mrds.append(mock_downloader)
+    pool._free_mrds.put_nowait(mock_downloader)
+
+    with (
+        mock.patch.object(
+            fs, "_lookup_bucket_layout", new=mock.AsyncMock(return_value=bucket_layout)
+        ),
+        mock.patch.object(
+            fs._mrd_pool_cache, "get", new=mock.AsyncMock(return_value=pool)
+        ),
+        mock.patch.object(pool, "close", new=mock.AsyncMock()),
+        mock.patch.object(
+            fs, "_info", new=mock.AsyncMock(return_value={"size": 10})
+        ) as mock_info,
+    ):
+        out = await fs._cat_file(path, start=-4, end=None, generation="111")
+        assert out == b"6789"
+        mock_info.assert_awaited_once_with(path, generation="111")
+
+        mock_info.reset_mock()
+        # When mrd is passed directly (e.g. ZonalFile), fall back to pool.generation.
+        out2 = await fs._cat_file(path, start=0, end=4, mrd=pool)
+        assert out2 == b"0123"
+        mock_info.assert_awaited_once_with(path, generation="456")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+async def test_finalized_pool_reuses_pool_persisted_size_when_stream_omits_it(
+    tmp_path, caplog, bucket_layout
+):
+    """Redirected streams with mrd.persisted_size=None reuse pool.persisted_size when finalized."""
+    versions = {"111": b"v1-payload"}
+    fake_call, base_create_mrd = _make_versioned_mrd_env(versions)
+
+    async def redirected_create_mrd(*args, **kwargs):
+        mrd = await base_create_mrd(*args, **kwargs)
+        mrd.persisted_size = None
+        return mrd
+
+    fs = ExtendedGcsFileSystem(
+        token="anon", loop=asyncio.get_running_loop(), skip_instance_cache=True
+    )
+    fs._grpc_client = mock.MagicMock()
+    path = f"{TEST_ZONAL_BUCKET}/obj"
+    lpath = tmp_path / "redirected.bin"
+
+    try:
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            mock.patch.object(
+                fs,
+                "_lookup_bucket_layout",
+                new=mock.AsyncMock(return_value=bucket_layout),
+            ),
+            mock.patch.object(
+                fs, "_call", new=mock.AsyncMock(side_effect=fake_call)
+            ) as mock_call,
+            mock.patch(
+                "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
+                new=mock.AsyncMock(side_effect=redirected_create_mrd),
+            ),
+        ):
+            assert await fs._cat_file(path, generation="111") == b"v1-payload"
+            # Only 1 _info GET during MRDPoolCache.get; no fallback _info or warning.
+            assert mock_call.await_count == 1
+            assert "has no 'persisted_size'" not in caplog.text
+
+            mock_call.reset_mock()
+            await fs._get_file_request(path, str(lpath), generation="111")
+            assert lpath.read_bytes() == b"v1-payload"
+            assert mock_call.await_count == 1
+            assert "has no 'persisted_size'" not in caplog.text
+    finally:
+        await fs._mrd_pool_cache.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+async def test_cat_ranges_honors_generation_and_isolates_conflicts(bucket_layout):
+    """_cat_ranges threads generation= to MRDPoolCache, _info fallback, and regional fallback."""
+    from gcsfs.zb_hns_utils import MRDPool
+
+    versions = {"111": b"v1-payload", "222": b"v2-longer-live-payload"}
+    fake_call, fake_create_mrd = _make_versioned_mrd_env(versions)
+    fs = ExtendedGcsFileSystem(
+        token="anon",
+        loop=asyncio.get_running_loop(),
+        skip_instance_cache=True,
+    )
+    assert fs.version_aware is False
+    fs._grpc_client = mock.MagicMock()
+    va_fs = ExtendedGcsFileSystem(
+        token="anon",
+        version_aware=True,
+        loop=asyncio.get_running_loop(),
+        skip_instance_cache=True,
+    )
+    va_fs._grpc_client = mock.MagicMock()
+    zonal_path = f"{TEST_ZONAL_BUCKET}/obj"
+    regional_path = f"{TEST_BUCKET}/reg"
+
+    async def lookup_layout(bucket):
+        return bucket_layout if bucket == TEST_ZONAL_BUCKET else layouts.STANDARD
+
+    try:
+        with (
+            mock.patch.object(fs, "_lookup_bucket_layout", side_effect=lookup_layout),
+            mock.patch.object(fs, "_call", new=mock.AsyncMock(side_effect=fake_call)),
+            mock.patch.object(
+                va_fs, "_lookup_bucket_layout", side_effect=lookup_layout
+            ),
+            mock.patch.object(
+                va_fs, "_call", new=mock.AsyncMock(side_effect=fake_call)
+            ),
+            mock.patch(
+                "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
+                new=mock.AsyncMock(side_effect=fake_create_mrd),
+            ) as mock_create_mrd,
+        ):
+            res = await fs._cat_ranges(
+                [zonal_path, zonal_path], [0, 3], [2, 10], generation="111"
+            )
+            assert res == [b"v1", b"payload"]
+            assert mock_create_mrd.await_args.args[3] == "111"
+
+            # Conflicting path#gen + generation= is isolated per object when on_error="return".
+            mixed_conflict = await va_fs._cat_ranges(
+                [f"{zonal_path}#222", zonal_path],
+                [0, 0],
+                [2, 2],
+                generation="111",
+                on_error="return",
+            )
+            assert isinstance(mixed_conflict[0], ValueError)
+            assert mixed_conflict[1] == b"v1"
+
+            with pytest.raises(ValueError, match="Cannot coalesce generations"):
+                await va_fs._cat_ranges(
+                    [f"{zonal_path}#222", zonal_path],
+                    [0, 0],
+                    [2, 2],
+                    generation="111",
+                    on_error="raise",
+                )
+
+            # Mixed zonal + regional forwards generation= to the regional _cat_file call.
+            with mock.patch.object(
+                fs, "_cat_file", new=mock.AsyncMock(return_value=b"reg-v1")
+            ) as mock_cat_file:
+                mixed = await fs._cat_ranges(
+                    [zonal_path, regional_path], [0, 0], [2, 6], generation="111"
+                )
+            assert mixed == [b"v1", b"reg-v1"]
+            mock_cat_file.assert_awaited_once_with(
+                regional_path, start=0, end=6, generation="111"
+            )
+    finally:
+        await fs._mrd_pool_cache.close()
+        await va_fs._mrd_pool_cache.close()
+
+    # Verify _cat_ranges fallback _info() uses explicit generation= or pool.generation
+    # when persisted_size is None on an unfinalized MRDPool.
+    unfinalized_pool = MRDPool(
+        fs, TEST_ZONAL_BUCKET, "obj", "456", finalized=False, pool_size=1
+    )
+    unfinalized_pool._initialized = True
+    with (
+        mock.patch.object(
+            fs, "_lookup_bucket_layout", new=mock.AsyncMock(return_value=bucket_layout)
+        ),
+        mock.patch.object(
+            fs._mrd_pool_cache, "get", new=mock.AsyncMock(return_value=unfinalized_pool)
+        ),
+        mock.patch.object(unfinalized_pool, "close", new=mock.AsyncMock()),
+        mock.patch.object(
+            fs, "_download_range_group", new=mock.AsyncMock(return_value=[b"01234"])
+        ),
+        mock.patch.object(
+            fs, "_info", new=mock.AsyncMock(return_value={"size": 10})
+        ) as mock_info,
+    ):
+        res_fb = await fs._cat_ranges([zonal_path], [0], [5], generation="111")
+        assert res_fb == [b"01234"]
+        mock_info.assert_awaited_once_with(zonal_path, generation="111")
+
+        mock_info.reset_mock()
+        res_pool_gen = await fs._cat_ranges([zonal_path], [0], [5])
+        assert res_pool_gen == [b"01234"]
+        mock_info.assert_awaited_once_with(zonal_path, generation="456")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+async def test_fetch_range_split_honors_generation(bucket_layout):
+    """_fetch_range_split coalesces generation= before _info() and MRDPoolCache.get()."""
+    from gcsfs.zb_hns_utils import MRDPool
+
+    fs = ExtendedGcsFileSystem(
+        token="anon",
+        loop=asyncio.get_running_loop(),
+        skip_instance_cache=True,
+    )
+    assert fs.version_aware is False
+    va_fs = ExtendedGcsFileSystem(
+        token="anon",
+        version_aware=True,
+        loop=asyncio.get_running_loop(),
+        skip_instance_cache=True,
+    )
+
+    path = f"{TEST_ZONAL_BUCKET}/obj"
+    mock_pool = mock.AsyncMock(spec=MRDPool)
+    mock_pool.close = mock.AsyncMock()
+
+    with (
+        mock.patch.object(
+            va_fs,
+            "_lookup_bucket_layout",
+            new=mock.AsyncMock(return_value=bucket_layout),
+        ),
+        mock.patch.object(
+            va_fs._mrd_pool_cache, "get", new=mock.AsyncMock(return_value=mock_pool)
+        ) as va_mock_get,
+        mock.patch.object(
+            va_fs, "_info", new=mock.AsyncMock(return_value={"size": 20})
+        ) as va_mock_info,
+    ):
+        with pytest.raises(ValueError, match="Cannot coalesce generations"):
+            await va_fs._fetch_range_split(
+                f"{path}#222",
+                start=0,
+                chunk_lengths=[2, 4],
+                concurrency=2,
+                generation="111",
+            )
+        va_mock_info.assert_not_awaited()
+        va_mock_get.assert_not_awaited()
+
+    with (
+        mock.patch.object(
+            fs, "_lookup_bucket_layout", new=mock.AsyncMock(return_value=bucket_layout)
+        ),
+        mock.patch.object(
+            fs._mrd_pool_cache, "get", new=mock.AsyncMock(return_value=mock_pool)
+        ) as mock_get,
+        mock.patch.object(
+            fs, "_info", new=mock.AsyncMock(return_value={"size": 20})
+        ) as mock_info,
+        mock.patch.object(
+            fs, "_cat_file", new=mock.AsyncMock(side_effect=[b"aa", b"bbbb"])
+        ) as mock_cat,
+    ):
+        res = await fs._fetch_range_split(
+            path, start=0, chunk_lengths=[2, 4], concurrency=2, generation="111"
+        )
+        assert res == [b"aa", b"bbbb"]
+        mock_info.assert_awaited_once_with(path, generation="111")
+        assert mock_get.await_args.args[:3] == (TEST_ZONAL_BUCKET, "obj", "111")
+        assert all(c.kwargs["generation"] == "111" for c in mock_cat.await_args_list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+async def test_get_file_zonal_coalesces_generation_and_rejects_conflict(
+    tmp_path, bucket_layout
+):
+    """_get_file_request and _get_file_concurrent download pinned generation and reject conflicts."""
+    from gcsfs.zb_hns_utils import MRDPool
+
+    versions = {"111": b"v1-payload", "222": b"v2-longer-live-payload"}
+    fake_call, fake_create_mrd = _make_versioned_mrd_env(versions)
+
+    fs = ExtendedGcsFileSystem(
+        token="anon",
+        loop=asyncio.get_running_loop(),
+        skip_instance_cache=True,
+    )
+    assert fs.version_aware is False
+    fs._grpc_client = mock.MagicMock()
+
+    va_fs = ExtendedGcsFileSystem(
+        token="anon",
+        version_aware=True,
+        loop=asyncio.get_running_loop(),
+        skip_instance_cache=True,
+    )
+    path = f"{TEST_ZONAL_BUCKET}/obj"
+    rpath_conflict = f"{path}#222"
+    lpath_req = tmp_path / "req.bin"
+    lpath_conc = tmp_path / "conc.bin"
+
+    # 1. Positive path on default (version_aware=False) filesystem: both _get_file_request
+    #    and _get_file_concurrent download generation="111" even when 222 is live.
+    fs.MIN_CHUNK_SIZE_FOR_CONCURRENCY = 4
+    try:
+        with (
+            mock.patch.object(
+                fs,
+                "_lookup_bucket_layout",
+                new=mock.AsyncMock(return_value=bucket_layout),
+            ),
+            mock.patch.object(
+                fs,
+                "_get_threshold_for_disk_reads",
+                new=mock.AsyncMock(return_value=0),
+            ),
+            mock.patch.object(fs, "_call", new=mock.AsyncMock(side_effect=fake_call)),
+            mock.patch.object(fs, "_cat_file", wraps=fs._cat_file) as spy_cat_file,
+            mock.patch(
+                "gcsfs.zb_hns_utils.AsyncMultiRangeDownloader.create_mrd",
+                new=mock.AsyncMock(side_effect=fake_create_mrd),
+            ) as mock_create_mrd,
+        ):
+            await fs._get_file_request(path, str(lpath_req), generation="111")
+            assert lpath_req.read_bytes() == b"v1-payload"
+            assert mock_create_mrd.await_args.args[3] == "111"
+
+            await fs._get_file_concurrent(
+                path,
+                str(lpath_conc),
+                concurrency=2,
+                chunk_size=4,
+                max_prefetch_size=16,
+                generation="111",
+            )
+            assert lpath_conc.read_bytes() == b"v1-payload"
+            assert spy_cat_file.await_count >= 2
+            assert all(
+                c.kwargs.get("generation") == "111" and c.kwargs.get("mrd") is not None
+                for c in spy_cat_file.await_args_list
+            )
+    finally:
+        await fs._mrd_pool_cache.close()
+
+    # 2. Fallback _info in _get_file_request (when persisted_size is None on a non-unfinalized pool)
+    #    pins mrd_pool.generation when generation= is omitted.
+    mock_downloader = mock.Mock(spec=AsyncMultiRangeDownloader)
+    mock_downloader.persisted_size = None
+    mock_downloader.bucket_name = TEST_ZONAL_BUCKET
+    mock_downloader.object_name = "obj"
+
+    async def download_ranges(reqs, **kwargs):
+        for offset, length, buf in reqs:
+            buf.write(b"v1-payload"[offset : offset + length])
+
+    mock_downloader.download_ranges = mock.AsyncMock(side_effect=download_ranges)
+    fallback_pool = MRDPool(
+        fs, TEST_ZONAL_BUCKET, "obj", "456", finalized=True, pool_size=1
+    )
+    fallback_pool._initialized = True
+    fallback_pool._active_count = 1
+    fallback_pool._all_mrds.append(mock_downloader)
+    fallback_pool._free_mrds.put_nowait(mock_downloader)
+
+    lpath_fb = tmp_path / "fb.bin"
+    with (
+        mock.patch.object(
+            fs, "_lookup_bucket_layout", new=mock.AsyncMock(return_value=bucket_layout)
+        ),
+        mock.patch.object(
+            fs._mrd_pool_cache, "get", new=mock.AsyncMock(return_value=fallback_pool)
+        ),
+        mock.patch.object(fallback_pool, "close", new=mock.AsyncMock()),
+        mock.patch.object(
+            fs, "_info", new=mock.AsyncMock(return_value={"size": 10})
+        ) as mock_info,
+    ):
+        await fs._get_file_request(path, str(lpath_fb))
+        assert lpath_fb.read_bytes() == b"v1-payload"
+        mock_info.assert_awaited_once_with(path, generation="456")
+
+    # 3. Conflict path on version_aware=True filesystem fails before _mrd_pool_cache.get.
+    with (
+        mock.patch.object(
+            va_fs,
+            "_lookup_bucket_layout",
+            new=mock.AsyncMock(return_value=bucket_layout),
+        ),
+        mock.patch.object(
+            va_fs._mrd_pool_cache, "get", new=mock.AsyncMock()
+        ) as mock_get,
+    ):
+        with pytest.raises(ValueError, match="Cannot coalesce generations"):
+            await va_fs._get_file_request(
+                rpath_conflict, str(lpath_req), generation="111"
+            )
+        with pytest.raises(ValueError, match="Cannot coalesce generations"):
+            await va_fs._get_file_concurrent(
+                rpath_conflict,
+                str(lpath_conc),
+                concurrency=2,
+                chunk_size=1024,
+                max_prefetch_size=2048,
+                generation="111",
+            )
+        mock_get.assert_not_awaited()

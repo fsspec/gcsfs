@@ -79,6 +79,53 @@ from torch.distributed.tensor.parallel import (
 )
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+
+# TODO: Remove this workaround once a `datasets` release includes
+# https://github.com/huggingface/datasets/pull/9085.
+def _patch_datasets_worker_restore():
+    """Avoid premature worker state_dict load in datasets >= 5.1.
+
+    In datasets 5.1/5.2, ``IterableDataset._iter_pytorch()`` calls
+    ``_prepare_ex_iterable_for_iteration()`` before sharding by DataLoader
+    worker, then shards by worker and calls ``ex_iterable.load_state_dict()``
+    again. With ``max_buffer_input_shards > 1``, ``InterleavedShardsExamplesIterable``
+    sizes its state list to ``min(num_shards, max_buffer_input_shards)``: the
+    pre-worker-sharded iterable has a longer list than the saved worker state,
+    raising ``IndexError: list index out of range`` in ``_inner_load_state_dict``.
+    Skipping the redundant pre-sharding load inside DataLoader workers lets
+    ``_iter_pytorch()`` load the saved worker state after worker sharding.
+    Called at module import time so ``forkserver`` workers apply it before
+    iterating the dataset.
+    """
+    orig_prepare = getattr(
+        datasets.IterableDataset, "_prepare_ex_iterable_for_iteration", None
+    )
+    if orig_prepare is None or getattr(
+        orig_prepare, "_gcsfs_worker_restore_patched", False
+    ):
+        return
+
+    def _prepare_skip_worker_state_load(self, *args, **kwargs):
+        starting_state_dict = getattr(self, "_starting_state_dict", None)
+        if (
+            torch.utils.data.get_worker_info() is not None
+            and starting_state_dict is not None
+        ):
+            self._starting_state_dict = None
+            try:
+                return orig_prepare(self, *args, **kwargs)
+            finally:
+                self._starting_state_dict = starting_state_dict
+        return orig_prepare(self, *args, **kwargs)
+
+    _prepare_skip_worker_state_load._gcsfs_worker_restore_patched = True
+    datasets.IterableDataset._prepare_ex_iterable_for_iteration = (
+        _prepare_skip_worker_state_load
+    )
+
+
+_patch_datasets_worker_restore()
+
 # ---- Logging --------------------------------------------------------------
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 storage_log_level = os.getenv("GCSFS_LOG_LEVEL", "INFO").upper()

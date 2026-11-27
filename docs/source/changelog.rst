@@ -9,8 +9,69 @@ Unreleased
 
 * ``get()`` / ``get_file()`` on Zonal and RCU buckets now honours ``consistency``
   (``"size"``, ``"md5"`` or ``"crc32c"``, from the call or the filesystem default)
-  on single-stream gRPC downloads; a mismatch raises ``ChecksumError`` and the
-  local file is removed.
+  on single-stream gRPC downloads. A hash mismatch raises ``ChecksumError`` and
+  the local file is removed. If the object metadata has no such hash,
+  ``NotImplementedError`` is raised instead of skipping the check; this is always
+  the case for ``"md5"`` on Zonal buckets, whose objects have no MD5.
+* **gcsfs now requires** ``requests>=2.33.0`` (released 2026-03-25). Older
+  releases have known security advisories (CVE-2024-35195, CVE-2024-47081 and
+  CVE-2026-25645), and ``google-api-core>=2.31.0`` already requires this
+  version, so most installs are unaffected. If your environment pins an older
+  ``requests``, or ``urllib3<1.26`` or ``certifi<2023.5.7`` (which
+  ``requests`` 2.33.0 no longer accepts), upgrade them with
+  ``pip install -U "requests>=2.33.0"`` (the ``requests`` API is unchanged
+  across 2.x), or stay on gcsfs 2026.10.x until you can.
+* **The storage control gRPC channel (bucket-layout lookup and HNS folder
+  operations) now sends keepalive pings** (every 30 s while a call is open,
+  20 s to answer). A connection that dies silently in the middle of a call is
+  now replaced within that call, instead of every later call on it (the
+  bucket-layout lookup on the first operation on each bucket, and HNS ``mv``,
+  ``makedirs``, ``rm``, ``info``) timing out after its 60 s retry budget until
+  the operating system gives up on the socket, which can take about 15 minutes.
+* **HTTP requests no longer wait forever for a response.** ``requests_timeout``
+  now defaults to a 30 s connect and 60 s read timeout with no total limit, so
+  a request whose response never arrives fails and is retried instead of
+  hanging the call, while long uploads and downloads that keep receiving data
+  are unaffected. A ``timeout`` in ``session_kwargs`` is now honored when
+  ``requests_timeout`` is not given (#633). Pass
+  ``requests_timeout=aiohttp.ClientTimeout()`` to restore the old unbounded
+  behavior.
+* **Bucket layout lookup failures no longer change HNS results or slow down
+  emulators.** Previously any failed ``get_storage_layout`` lookup silently
+  fell back to flat-bucket behavior and was repeated on every operation:
+  against fake-gcs-server and other ``http://`` endpoints each operation
+  spent 30-100 s retrying a lookup that can never succeed there, and on HNS
+  buckets a transient failure made ``mv`` of a folder move nothing,
+  ``makedirs`` and ``rmdir`` do nothing, and ``rm -r`` leave folders behind.
+  Now ``http://`` endpoints skip the lookup; other non-default endpoints try
+  once until a lookup succeeds on that instance (after which they follow the
+  default endpoint's rules); on an endpoint known to serve Storage Control,
+  only an explicit list of non-retryable errors (``PermissionDenied``,
+  anonymous ``Unauthenticated``, ``InvalidArgument``, ``FailedPrecondition``,
+  and ``MethodNotImplemented``) falls back, plus ``Unauthenticated`` for a
+  caller with a client certificate (mTLS) until a lookup succeeds on the
+  instance, since the gRPC lookup presents no certificate and certificate-bound
+  tokens are accepted only over mTLS. Fallbacks are stored separately
+  from real answers and re-checked after 5 minutes (or immediately on
+  ``invalidate_storage_layout_cache()``); missing buckets are never remembered.
+  Any other error — transient failures after retries, rejected credentials for
+  a non-anonymous caller, or unexpected statuses such as ``Cancelled`` and
+  ``Aborted`` — raises instead of falling back: during a Storage Control
+  outage, the first operation on a bucket fails after about 60 s instead of
+  silently using flat semantics (#1110).
+* With ``token=None`` and no default credentials, the gRPC clients of
+  ``ExtendedGcsFileSystem`` now use anonymous credentials, as they already
+  did for ``token="anon"``, instead of looking for default credentials
+  themselves on every bucket-layout lookup (#1109).
+* An empty ``GOOGLE_CLOUD_UNIVERSE_DOMAIN`` is treated as unset
+  (``googleapis.com``), as in google-cloud-storage. Before, requests went to
+  ``https://storage.``, and the gRPC clients of ``ExtendedGcsFileSystem``
+  failed to start.
+* Creating or deleting a bucket through ``ExtendedGcsFileSystem`` now forgets
+  its cached layout. Before, a bucket deleted and created again with another
+  layout kept the old one on the same filesystem instance; for example, a
+  bucket recreated as HNS stayed cached as flat and ``makedirs`` created no
+  folder.
 * ``sign()`` now works with credentials that have no private key, such as
   Compute Engine and GKE Workload Identity credentials. When the credentials
   cannot sign, the URL is signed through the IAM Credentials ``signBlob`` API
@@ -33,8 +94,9 @@ Unreleased
   when ``cache_type`` is not set turns off the default ``adaptive`` cache and falls back
   to ``readahead``, as in 2026.8.x (#1172).
 * Framework telemetry now recognizes the Agent Development Kit (``google.adk``) and
-  sends ``fw/adk`` in the ``User-Agent`` header. Other ``google`` packages, such as
-  ``google-auth`` and ``google-cloud-storage``, are not reported as a framework.
+  reports ``adk`` in the ``x-goog-storage-gcsfs-features`` header. Other ``google``
+  packages, such as ``google-auth`` and ``google-cloud-storage``, are not reported as
+  a framework.
 * **Zero-copy gRPC reads for Rapid and Rapid Cache Ultra buckets.** When opening
   a gRPC read stream (``init_mrd``), ``gcsfs`` sets
   ``GCS_PYTHON_CLIENT_ZERO_COPY_BIDI_READ=1`` if unset (set ``=0`` to keep the

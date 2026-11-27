@@ -524,10 +524,8 @@ class ZonalFile(GCSFile):
 
     def discard(self):
         """Discard is not applicable for Zonal and RCU buckets. Log a warning instead."""
-        logger.warning(
-            "Discard is not applicable for Zonal and RCU buckets. \
-            Data is uploaded via streaming and cannot be cancelled."
-        )
+        logger.warning("Discard is not applicable for Zonal and RCU buckets. \
+            Data is uploaded via streaming and cannot be cancelled.")
 
     def _initiate_upload(self):
         """Initiates the upload for Zonal and RCU buckets using gRPC."""

@@ -13,6 +13,7 @@ test_zonal.py or test_zonal_file.py.
 
 import asyncio
 import contextlib
+import logging
 import os
 import sys
 import uuid
@@ -22,10 +23,13 @@ import fsspec
 import pytest
 from fsspec.asyn import FSTimeoutError
 from google.api_core import exceptions as api_exceptions
+from google.auth.credentials import AnonymousCredentials
 from google.cloud import storage_control_v2
+from google.oauth2.credentials import Credentials
 from google.rpc import code_pb2
 
 from gcsfs import core as gcsfs_core
+from gcsfs.credentials import GoogleCredentials
 from gcsfs.extended_gcsfs import (
     DEFAULT_HNS_RM_CONCURRENCY,
     BucketLayout,
@@ -33,6 +37,8 @@ from gcsfs.extended_gcsfs import (
     ExtendedGcsFileSystem,
     NamespaceLayout,
     StorageClass,
+    _classify_layout_error,
+    _LayoutLookupOutcome,
 )
 from gcsfs.poller import _BACKGROUND_TASKS
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, HttpError
@@ -43,8 +49,6 @@ from gcsfs.tests.settings import TEST_HNS_BUCKET
 from gcsfs.tests.utils import is_real_gcs
 
 pytestmark = [requires_hns]
-
-ORIGINAL_GET_BUCKET_LAYOUT = ExtendedGcsFileSystem._get_bucket_layout
 
 FIXED_UUID = uuid.UUID("00000000-0000-0000-0000-000000000000")
 FIXED_REQUEST_ID = str(FIXED_UUID)
@@ -135,6 +139,11 @@ def gcs_hns_mocks():
                 patch_target_super_rm, new_callable=mock.AsyncMock
             ) as mock_super_rm,
             mock.patch("gcsfs.extended_gcsfs.uuid.uuid4", return_value=FIXED_UUID),
+            # Listings cache the layout they look up; dircache updates after a
+            # move or delete read only that cached layout.
+            mock.patch.dict(
+                gcsfs._storage_layout_cache, {TEST_HNS_BUCKET: bucket_type_val}
+            ),
         ):
             mock_async_lookup_bucket_layout.return_value = bucket_type_val
             mock_sync_lookup_bucket_layout.return_value = bucket_type_val
@@ -1260,11 +1269,12 @@ class TestExtendedGcsFileSystemMvFile:
         fs.dircache[TEST_HNS_BUCKET] = [{"name": dest_grandparent, "type": "directory"}]
 
         response = {"bucket": TEST_HNS_BUCKET, "name": "destgp/p/a.txt", "size": 5}
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
-            await fs._mv_file_cache_update(src, dst, response)
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        await fs._mv_file_cache_update(src, dst, response)
 
         # The source entry is dropped in place (removal never affects ancestors).
-        assert src not in [e["name"] for e in fs.dircache.get(src_parent, [])]
+        assert src_parent in fs.dircache
+        assert src not in [e["name"] for e in fs.dircache[src_parent]]
         # The destination's ancestors are invalidated, since the move may have
         # created dest_parent.
         assert dest_grandparent not in fs.dircache
@@ -1289,8 +1299,8 @@ class TestExtendedGcsFileSystemMvFile:
         ]
 
         response = {"bucket": TEST_HNS_BUCKET, "name": "parent/dst.txt", "size": 1}
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
-            await fs._mv_file_cache_update(src, dst, response)
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        await fs._mv_file_cache_update(src, dst, response)
 
         entries = fs.dircache[parent]
         names = [e["name"] for e in entries]
@@ -1323,10 +1333,8 @@ class TestExtendedGcsFileSystemRmFile:
         fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
         fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
 
-        with (
-            mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True),
-            mock.patch.object(fs, "_call", new_callable=mock.AsyncMock),
-        ):
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        with mock.patch.object(fs, "_call", new_callable=mock.AsyncMock):
             await fs._rm_file(path)
 
         # The immediate parent's listing is updated, not cleared.
@@ -1354,8 +1362,8 @@ class TestExtendedGcsFileSystemRmFile:
         fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
         fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
 
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=False):
-            await fs._rm_file_cache_update(path)
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD
+        await fs._rm_file_cache_update(path)
 
         # The base behavior invalidates the parent and walks up to the root.
         assert parent not in fs.dircache
@@ -1380,8 +1388,8 @@ class TestExtendedGcsFileSystemRmFile:
         fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
         fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
 
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True):
-            await fs._rm_files_cache_update([path1, path2])
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        await fs._rm_files_cache_update([path1, path2])
 
         # The shared parent's listing keeps its surviving entry.
         assert parent in fs.dircache
@@ -1407,8 +1415,8 @@ class TestExtendedGcsFileSystemRmFile:
         fs.dircache[grandparent] = [{"name": parent, "type": "directory"}]
         fs.dircache[TEST_HNS_BUCKET] = [{"name": grandparent, "type": "directory"}]
 
-        with mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=False):
-            await fs._rm_files_cache_update([path])
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD
+        await fs._rm_files_cache_update([path])
 
         assert parent not in fs.dircache
         assert grandparent not in fs.dircache
@@ -1449,10 +1457,8 @@ class TestExtendedGcsFileSystemRmFile:
         ).encode()
         mock_headers = {"Content-Type": f"multipart/mixed; boundary={boundary}"}
 
-        with (
-            mock.patch.object(fs, "_is_bucket_hns_enabled", return_value=True),
-            mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as mock_call,
-        ):
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        with mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as mock_call:
             mock_call.return_value = (mock_headers, mock_response_content)
             out = await fs._rm_files([ok_path, bad_path])
 
@@ -1466,6 +1472,80 @@ class TestExtendedGcsFileSystemRmFile:
         names = [e["name"] for e in fs.dircache[parent]]
         assert ok_path not in names
         assert bad_path in names
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("op", ["mv_file", "rm_file", "rm_files"])
+    async def test_cache_update_never_looks_up_layout(self, op):
+        """The cache update after a move or delete never looks the layout up:
+        without a cached layout it invalidates broadly, which is correct for
+        every bucket. A lookup there would hold the completed move or delete
+        for the whole retry budget during a Storage Control outage."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        parent = f"{TEST_HNS_BUCKET}/parent"
+        src = f"{parent}/a.txt"
+        fs.dircache[parent] = [{"name": src, "type": "file"}]
+        fs.dircache[TEST_HNS_BUCKET] = [{"name": parent, "type": "directory"}]
+
+        with (
+            mock.patch.object(
+                fs, "_lookup_bucket_layout", new_callable=mock.AsyncMock
+            ) as lookup,
+            mock.patch.object(
+                fs, "_get_bucket_layout", new_callable=mock.AsyncMock
+            ) as get_layout,
+            mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as mock_call,
+        ):
+            if op == "mv_file":
+                mock_call.return_value = {
+                    "bucket": TEST_HNS_BUCKET,
+                    "name": "parent/b.txt",
+                    "size": 1,
+                }
+                await fs._mv_file(src, f"{parent}/b.txt")
+            elif op == "rm_file":
+                await fs._rm_file(src)
+            else:
+                boundary = "==========7330845974216740156=="
+                mock_call.return_value = (
+                    {"Content-Type": f"multipart/mixed; boundary={boundary}"},
+                    (
+                        f"\n--{boundary}\nContent-Type: application/http\n\n"
+                        f"HTTP/1.1 204 No Content\n\n--{boundary}--\n"
+                    ).encode(),
+                )
+                await fs._rm_files([src])
+
+        lookup.assert_not_awaited()
+        get_layout.assert_not_awaited()
+        assert parent not in fs.dircache
+        assert TEST_HNS_BUCKET not in fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_cache_update_uses_cached_layout_per_bucket(self):
+        """A batch delete across buckets updates the bucket cached as HNS in
+        place and invalidates the bucket without a cached layout broadly."""
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        hns_parent = f"{TEST_HNS_BUCKET}/parent"
+        other_parent = "other-bucket/parent"
+        fs._storage_layout_cache[TEST_HNS_BUCKET] = layouts.STANDARD_HIERARCHICAL
+        fs.dircache[hns_parent] = [
+            {"name": f"{hns_parent}/a.txt", "type": "file"},
+            {"name": f"{hns_parent}/keep.txt", "type": "file"},
+        ]
+        fs.dircache[other_parent] = [{"name": f"{other_parent}/b.txt", "type": "file"}]
+
+        with mock.patch.object(
+            fs, "_lookup_bucket_layout", new_callable=mock.AsyncMock
+        ) as lookup:
+            await fs._rm_files_cache_update(
+                [f"{hns_parent}/a.txt", f"{other_parent}/b.txt"]
+            )
+
+        lookup.assert_not_awaited()
+        assert [e["name"] for e in fs.dircache[hns_parent]] == [
+            f"{hns_parent}/keep.txt"
+        ]
+        assert other_parent not in fs.dircache
 
 
 class TestExtendedGcsFileSystemWriteFileCacheUpdate:
@@ -2540,24 +2620,16 @@ class TestExtendedGcsFileSystemInternal:
     @pytest.mark.asyncio
     async def test_is_bucket_hns_enabled_exception_handling(self):
         """
-        Verifies that if _lookup_bucket_layout fails, we log a warning and return False
-        (fail-open to non-HNS behavior).
+        Verifies that if _lookup_bucket_layout fails, the error propagates
+        instead of silently treating the bucket as non-HNS.
         """
         fs = ExtendedGcsFileSystem(token="anon")
 
-        with (
-            mock.patch.object(
-                fs, "_lookup_bucket_layout", side_effect=Exception("API Error")
-            ),
-            mock.patch("gcsfs.extended_gcsfs.logger") as mock_logger,
+        with mock.patch.object(
+            fs, "_lookup_bucket_layout", side_effect=Exception("API Error")
         ):
-            assert await fs._is_bucket_hns_enabled("error-bucket") is False
-
-            # Verify warning was logged
-            mock_logger.warning.assert_called_once()
-            assert (
-                "Could not determine if bucket" in mock_logger.warning.call_args[0][0]
-            )
+            with pytest.raises(Exception, match="API Error"):
+                await fs._is_bucket_hns_enabled("error-bucket")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -2590,16 +2662,22 @@ class TestExtendedGcsFileSystemInternal:
 
     @pytest.mark.asyncio
     async def test_uses_grpc_data_path_looks_up_layout_once(self):
-        """UNKNOWN layouts are not cached, so each extra lookup would be another RPC."""
+        """The data-path check resolves the layout with a single lookup."""
         fs = ExtendedGcsFileSystem(token="anon")
-        with mock.patch.object(
-            fs,
-            "_get_bucket_layout",
-            new_callable=mock.AsyncMock,
-            return_value=BucketLayout.UNKNOWN,
-        ) as mock_get_layout:
+        with (
+            mock.patch.object(
+                fs,
+                "_get_bucket_layout",
+                new_callable=mock.AsyncMock,
+                return_value=BucketLayout.UNKNOWN,
+            ) as mock_get_layout,
+            mock.patch.object(
+                fs, "_lookup_bucket_layout", wraps=fs._lookup_bucket_layout
+            ) as lookup,
+        ):
             assert await fs._uses_grpc_data_path("unknown-layout-bucket") is False
 
+        lookup.assert_awaited_once_with("unknown-layout-bucket")
         mock_get_layout.assert_awaited_once_with("unknown-layout-bucket")
 
     @pytest.mark.asyncio
@@ -4008,6 +4086,30 @@ async def test_get_control_plane_client_quota_project_id(
 
 
 @pytest.mark.asyncio
+async def test_get_control_plane_client_sends_keepalive_pings():
+    import grpc
+
+    from gcsfs import __version__
+    from gcsfs.extended_gcsfs import USER_AGENT
+
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    try:
+        with mock.patch(
+            "google.api_core.grpc_helpers_async.aio.secure_channel",
+            wraps=grpc.aio.secure_channel,
+        ) as secure_channel:
+            await fs._get_control_plane_client()
+        assert secure_channel.call_args.kwargs["options"] == [
+            ("grpc.primary_user_agent", f"{USER_AGENT}/{__version__}"),
+            ("grpc.keepalive_time_ms", 30000),
+            ("grpc.keepalive_timeout_ms", 20000),
+            ("grpc.http2.ping_timeout_ms", 20000),
+        ]
+    finally:
+        await fs._close_resources()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "endpoint_url, env_updates, expected_host",
     [
@@ -4189,18 +4291,102 @@ class TestExtendedGcsFileSystemBucketLayout:
     """Unit tests for ExtendedGcsFileSystem _get_bucket_layout and grpc_client."""
 
     @pytest.fixture(autouse=True)
-    def _mock_get_bucket_layout_on_emulator(self):
-        """Override the global session mock to allow testing the real _get_bucket_layout."""
-        with mock.patch(
-            "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_layout",
-            new=ORIGINAL_GET_BUCKET_LAYOUT,
-        ):
+    def _no_client_cert(self):
+        """Ignore any client certificate configured on the test machine."""
+        with mock.patch("gcsfs.core._use_client_cert", return_value=False):
             yield
 
     @pytest.fixture
     def extended_gcsfs(self):
         ExtendedGcsFileSystem.clear_instance_cache()
-        return ExtendedGcsFileSystem(token="anon")
+        # The default GCS endpoint, where the lookup is retried and its
+        # transient failures raise; emulator endpoints skip or try once.
+        return ExtendedGcsFileSystem(
+            token="anon",
+            endpoint_url="https://storage.googleapis.com",
+            skip_instance_cache=True,
+        )
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _layout_rpc(fs, **get_storage_layout):
+        """Mock the control client; yields (client getter, get_storage_layout)."""
+        with mock.patch.object(
+            fs, "_get_control_plane_client", new_callable=mock.AsyncMock
+        ) as getter:
+            rpc = mock.AsyncMock(**get_storage_layout)
+            getter.return_value.get_storage_layout = rpc
+            yield getter, rpc
+
+    @pytest.mark.parametrize("token", [None, "anon"])
+    def test_anonymous_access_uses_anonymous_credentials(self, token):
+        # With token=None, gcsfs falls back to anonymous access when no other
+        # method works (#1109). The gRPC clients must not then look for
+        # default credentials themselves.
+        with contextlib.ExitStack() as stack:
+            for method in (
+                "_connect_google_default",
+                "_connect_cache",
+                "_connect_cloud",
+            ):
+                stack.enter_context(
+                    mock.patch.object(
+                        GoogleCredentials, method, side_effect=ValueError("unavailable")
+                    )
+                )
+            fs = ExtendedGcsFileSystem(
+                token=token,
+                endpoint_url="https://storage.googleapis.com",
+                skip_instance_cache=True,
+            )
+        assert fs.credentials.credentials is None
+        assert isinstance(fs.credential, AnonymousCredentials)
+
+    def test_supplied_credentials_are_passed_to_grpc(self):
+        creds = Credentials(token="token")
+        fs = ExtendedGcsFileSystem(token=creds, skip_instance_cache=True)
+        assert fs.credential is creds
+
+    # An empty GOOGLE_CLOUD_UNIVERSE_DOMAIN means unset, as in google-cloud-storage.
+    # The gapic clients reject an empty universe unless it is passed explicitly.
+
+    def test_empty_universe_domain_keeps_default_endpoint(self, monkeypatch):
+        monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+        monkeypatch.setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "")
+        fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        assert fs._grpc_location == "https://storage.googleapis.com"
+        assert fs._serves_control_api() is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "endpoint_url", [None, "https://storage.us-central1.rep.googleapis.com"]
+    )
+    async def test_control_plane_client_with_empty_universe_domain(
+        self, monkeypatch, endpoint_url
+    ):
+        monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+        monkeypatch.setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "")
+        fs = ExtendedGcsFileSystem(
+            token="anon", endpoint_url=endpoint_url, skip_instance_cache=True
+        )
+        try:
+            client = await fs._get_control_plane_client()
+            assert client.universe_domain == "googleapis.com"
+        finally:
+            await fs._close_resources()
+
+    @pytest.mark.asyncio
+    async def test_grpc_client_with_empty_universe_domain(self, monkeypatch):
+        monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+        monkeypatch.setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "")
+        fs = ExtendedGcsFileSystem(
+            token=Credentials(token="token"), skip_instance_cache=True
+        )
+        try:
+            client = await fs._get_grpc_client()
+            assert client.grpc_client.universe_domain == "googleapis.com"
+        finally:
+            await fs._close_resources()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -4292,78 +4478,512 @@ class TestExtendedGcsFileSystemBucketLayout:
             )
 
     @pytest.mark.asyncio
-    async def test_get_bucket_layout_not_found(self, extended_gcsfs, caplog):
-        import logging
-
-        fs = extended_gcsfs
-
-        with mock.patch.object(
-            fs, "_get_control_plane_client", new_callable=mock.AsyncMock
-        ) as mock_client_getter:
-            mock_client = mock_client_getter.return_value
-            mock_client.get_storage_layout = mock.AsyncMock(
-                side_effect=api_exceptions.NotFound("Not Found")
+    @pytest.mark.parametrize("emulator_host", [None, "localhost:4443"])
+    async def test_layout_lookup_skips_plain_http_endpoint(
+        self, monkeypatch, emulator_host
+    ):
+        # The control channel always uses TLS, so it can never reach an
+        # http:// endpoint such as fake-gcs-server: no RPC, nothing to retry.
+        if emulator_host:
+            monkeypatch.setenv("STORAGE_EMULATOR_HOST", emulator_host)
+            fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+        else:
+            fs = ExtendedGcsFileSystem(
+                token="anon",
+                endpoint_url="http://localhost:4443",
+                skip_instance_cache=True,
             )
-
-            with caplog.at_level(logging.WARNING, logger="gcsfs"):
-                bucket_layout = await fs._get_bucket_layout("missing-bucket")
-                assert bucket_layout == BucketLayout.UNKNOWN
-                assert "detect bucket layout" in caplog.text
+        with self._layout_rpc(fs) as (getter, _):
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+        getter.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_get_bucket_layout_general_exception(self, extended_gcsfs, caplog):
-        import logging
-
+    @pytest.mark.parametrize(
+        "error",
+        [
+            api_exceptions.PermissionDenied("denied"),
+            # What an anonymous caller gets for a private bucket.
+            api_exceptions.Unauthenticated(
+                "Anonymous caller does not have storage.objects.list access"
+            ),
+            api_exceptions.InvalidArgument("bad request"),
+            api_exceptions.MethodNotImplemented("not implemented"),
+        ],
+    )
+    async def test_layout_lookup_caches_definitive_errors(
+        self, extended_gcsfs, error, caplog
+    ):
         fs = extended_gcsfs
-
-        with mock.patch.object(
-            fs, "_get_control_plane_client", new_callable=mock.AsyncMock
-        ) as mock_client_getter:
-            mock_client = mock_client_getter.return_value
-            mock_client.get_storage_layout = mock.AsyncMock(
-                side_effect=Exception("Error")
-            )
-
-            with caplog.at_level(logging.WARNING, logger="gcsfs"):
-                bucket_layout = await fs._get_bucket_layout("error-bucket")
-                assert bucket_layout == BucketLayout.UNKNOWN
-                assert "Could not determine bucket layout" in caplog.text
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            self._layout_rpc(fs, side_effect=error) as (_, rpc),
+        ):
+            for _ in range(3):
+                assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+        rpc.assert_awaited_once()
+        # One warning, carrying the server's own message (which names a
+        # missing permission when that is the cause).
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert str(error) in warnings[0].getMessage()
 
     @pytest.mark.asyncio
-    async def test_lookup_bucket_layout_caches_known_and_skips_unknown(
+    async def test_layout_lookup_ignores_empty_bucket(self, extended_gcsfs):
+        # Root and bucket-level glob paths split to bucket "": there is no
+        # bucket to look up.
+        fs = extended_gcsfs
+        with self._layout_rpc(fs) as (getter, _):
+            assert await fs._lookup_bucket_layout("") == BucketLayout.UNKNOWN
+        getter.assert_not_awaited()
+        assert "" not in fs._storage_layout_cache
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "endpoint_url",
+        [
+            "https://storage.googleapis.com",
+            # Only the Storage Control API answers NotFound, so a missing
+            # bucket is not cached on other endpoints either.
+            "https://storage.us-central1.rep.googleapis.com",
+        ],
+    )
+    async def test_layout_lookup_rechecks_missing_bucket(self, endpoint_url, caplog):
+        # A missing bucket is not remembered, so a bucket created later is
+        # detected on the next operation.
+        fs = ExtendedGcsFileSystem(
+            token="anon", endpoint_url=endpoint_url, skip_instance_cache=True
+        )
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            self._layout_rpc(fs, side_effect=api_exceptions.NotFound("nf")) as (
+                _,
+                rpc,
+            ),
+        ):
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+        assert rpc.await_count == 2
+        assert "b" not in fs._storage_layout_cache
+        # The caller's own request reports the missing bucket.
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "endpoint_url",
+        [
+            "https://storage.googleapis.com",
+            "https://storage.googleapis.com/",
+            "https://storage.googleapis.com:443",
+            "https://storage.googleapis.com:443/",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "error",
+        [
+            api_exceptions.RetryError("budget exhausted", cause=None),
+            api_exceptions.ServiceUnavailable("unavailable"),
+            api_exceptions.DeadlineExceeded("deadline"),
+            api_exceptions.Unauthenticated("Invalid Credentials"),
+            asyncio.TimeoutError(),
+        ],
+    )
+    async def test_layout_lookup_default_endpoint_retries_and_raises_transient(
+        self, endpoint_url, error, caplog
+    ):
+        fs = ExtendedGcsFileSystem(
+            token=Credentials(token="token"),
+            endpoint_url=endpoint_url,
+            skip_instance_cache=True,
+        )
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            self._layout_rpc(fs, side_effect=error) as (_, rpc),
+        ):
+            with pytest.raises(type(error)):
+                await fs._lookup_bucket_layout("b")
+        assert rpc.await_args.kwargs["retry"] is not None
+        assert "b" not in fs._storage_layout_cache
+        # The raised gapic error does not say why a plain read or write failed:
+        # the warning names the bucket, the lookup and the opt-out.
+        (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+        message = warning.getMessage()
+        assert "bucket b" in message
+        assert "Storage Control" in message
+        assert "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=false" in message
+
+    @pytest.mark.asyncio
+    async def test_layout_lookup_raises_rejected_credentials(self, caplog):
+        # gRPC rejects bad or expired credentials with this 401 message, which
+        # is_transient_exception does not match. Caching UNKNOWN would keep
+        # flat semantics after the credentials work again.
+        fs = ExtendedGcsFileSystem(
+            token=Credentials(token="token"),
+            endpoint_url="https://storage.googleapis.com",
+            skip_instance_cache=True,
+        )
+        error = api_exceptions.Unauthenticated(
+            "Request had invalid authentication credentials. Expected OAuth 2 "
+            "access token, login cookie or other valid authentication credential."
+        )
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            self._layout_rpc(fs, side_effect=error) as (_, rpc),
+        ):
+            for _ in range(2):
+                with pytest.raises(api_exceptions.Unauthenticated):
+                    await fs._lookup_bucket_layout("b")
+        assert rpc.await_count == 2
+        assert "b" not in fs._storage_layout_cache
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 2
+        assert all("Storage Control" in r.getMessage() for r in warnings)
+
+    @staticmethod
+    def _client_cert_fs(monkeypatch):
+        """A filesystem on the default endpoint whose HTTP path uses mTLS."""
+        monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+        monkeypatch.delenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", raising=False)
+        with mock.patch("gcsfs.core._use_client_cert", return_value=True):
+            return ExtendedGcsFileSystem(
+                token=Credentials(token="cert-bound"), skip_instance_cache=True
+            )
+
+    @pytest.mark.asyncio
+    async def test_layout_lookup_client_cert_unverified_401_falls_back(
+        self, monkeypatch
+    ):
+        # The gRPC clients present no client certificate, so GCS rejects a
+        # certificate-bound token there, while mTLS HTTP accepts it.
+        fs = self._client_cert_fs(monkeypatch)
+        error = api_exceptions.Unauthenticated(
+            "Request had invalid authentication credentials."
+        )
+        with self._layout_rpc(fs, side_effect=error):
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+        assert "b" in fs._storage_layout_fallbacks
+        assert "b" not in fs._storage_layout_cache
+
+    @pytest.mark.asyncio
+    async def test_layout_lookup_client_cert_learned_endpoint_raises(self, monkeypatch):
+        # Once a lookup succeeds, the token works over gRPC: a later 401 is a
+        # real credential failure and must not switch to flat semantics.
+        fs = self._client_cert_fs(monkeypatch)
+        hns = storage_control_v2.StorageLayout(
+            location_type="region", hierarchical_namespace={"enabled": True}
+        )
+        error = api_exceptions.Unauthenticated(
+            "Request had invalid authentication credentials."
+        )
+        with self._layout_rpc(fs, side_effect=[hns, error]):
+            assert await fs._lookup_bucket_layout("a") == layouts.STANDARD_HIERARCHICAL
+            with pytest.raises(api_exceptions.Unauthenticated):
+                await fs._lookup_bucket_layout("c")
+        assert "c" not in fs._storage_layout_fallbacks
+
+    @pytest.mark.asyncio
+    async def test_cat_ranges_returns_layout_errors_per_range(self, extended_gcsfs):
+        # A bucket whose layout lookup fails gets the error for each of its
+        # ranges (on_error="return" is the default); other buckets are read.
+        fs = extended_gcsfs
+        fs._storage_layout_cache["good"] = layouts.STANDARD
+        outage = api_exceptions.ServiceUnavailable("down")
+        with (
+            self._layout_rpc(fs, side_effect=outage) as (_, rpc),
+            mock.patch.object(
+                fs, "_cat_file", new_callable=mock.AsyncMock, return_value=b"G"
+            ),
+        ):
+            res = await fs._cat_ranges(
+                ["good/a", "bad/x", "bad/y"], [0, 0, 0], [1, 1, 1]
+            )
+        assert res == [b"G", outage, outage]
+        # One lookup for the failing bucket, not one per file.
+        assert rpc.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_cat_ranges_layout_error_with_zonal_bucket(self, extended_gcsfs):
+        fs = extended_gcsfs
+        fs._storage_layout_cache["good"] = layouts.ZONAL_HIERARCHICAL
+        outage = api_exceptions.ServiceUnavailable("down")
+
+        def zonal_streams(p, idxs, starts, ends, num_streams, results, limiter, **kw):
+            async def stream():
+                for i in idxs:
+                    results[i] = b"Z"
+
+            return [stream()]
+
+        with (
+            self._layout_rpc(fs, side_effect=outage),
+            mock.patch.object(
+                fs, "_zonal_file_stream_coros", side_effect=zonal_streams
+            ),
+        ):
+            res = await fs._cat_ranges(["good/a", "bad/x"], [0, 0], [1, 1])
+        assert res == [b"Z", outage]
+
+    @pytest.mark.asyncio
+    async def test_cat_ranges_every_layout_lookup_fails(self, extended_gcsfs):
+        fs = extended_gcsfs
+        outage = api_exceptions.ServiceUnavailable("down")
+        with self._layout_rpc(fs, side_effect=outage):
+            assert await fs._cat_ranges(["bad/x", "bad/y"], [0, 0], [1, 1]) == [
+                outage,
+                outage,
+            ]
+
+    @pytest.mark.asyncio
+    async def test_cat_ranges_layout_error_on_error_raise_first_in_order(
         self, extended_gcsfs
     ):
         fs = extended_gcsfs
-        fs.invalidate_storage_layout_cache()
+        fs._storage_layout_cache["good"] = layouts.STANDARD
+        with (
+            self._layout_rpc(fs, side_effect=api_exceptions.ServiceUnavailable("down")),
+            mock.patch.object(
+                fs,
+                "_cat_file",
+                new_callable=mock.AsyncMock,
+                side_effect=FileNotFoundError("good/a"),
+            ),
+        ):
+            with pytest.raises(FileNotFoundError):
+                await fs._cat_ranges(
+                    ["good/a", "bad/x"], [0, 0], [1, 1], on_error="raise"
+                )
 
-        with mock.patch.object(
-            fs,
-            "_get_bucket_layout",
-            new_callable=mock.AsyncMock,
-            side_effect=[
-                BucketLayout.UNKNOWN,
-                layouts.STANDARD_HIERARCHICAL,
-            ],
-        ) as mock_get_layout:
-            # First lookup returns UNKNOWN and should not cache
-            res1 = await fs._lookup_bucket_layout("transient-bucket")
-            assert res1 == BucketLayout.UNKNOWN
-            assert "transient-bucket" not in fs._storage_layout_cache
-            assert mock_get_layout.await_count == 1
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            api_exceptions.Cancelled("cancelled"),
+            api_exceptions.Aborted("aborted"),
+            api_exceptions.DataLoss("data loss"),
+        ],
+    )
+    async def test_layout_lookup_default_endpoint_raises_unexpected_status(self, error):
+        fs = ExtendedGcsFileSystem(
+            token=Credentials(token="t"),
+            endpoint_url="https://storage.googleapis.com",
+            skip_instance_cache=True,
+        )
+        with self._layout_rpc(fs, side_effect=error):
+            with pytest.raises(type(error)):
+                await fs._lookup_bucket_layout("b")
+        assert "b" not in fs._storage_layout_cache
 
-            # Second lookup retries _get_bucket_layout and caches the known layout
-            res2 = await fs._lookup_bucket_layout("transient-bucket")
-            assert res2 == layouts.STANDARD_HIERARCHICAL
-            assert (
-                fs._storage_layout_cache["transient-bucket"]
-                == layouts.STANDARD_HIERARCHICAL
-            )
-            assert mock_get_layout.await_count == 2
+    @pytest.mark.asyncio
+    async def test_layout_lookup_learns_endpoint_serves_control_api(self):
+        fs = ExtendedGcsFileSystem(
+            token=Credentials(token="t"),
+            endpoint_url="https://storage-myendpoint.p.googleapis.com",
+            skip_instance_cache=True,
+        )
+        response = storage_control_v2.StorageLayout(location_type="region")
+        with self._layout_rpc(
+            fs, side_effect=[response, api_exceptions.ServiceUnavailable("blip")]
+        ) as (_, rpc):
+            assert await fs._lookup_bucket_layout("a") == layouts.STANDARD
+            assert rpc.await_args.kwargs["retry"] is None
+            with pytest.raises(api_exceptions.ServiceUnavailable):
+                await fs._lookup_bucket_layout("c")
+            assert rpc.await_args.kwargs["retry"] is not None
+        assert "c" not in fs._storage_layout_cache
 
-            # Third lookup hits the cache without calling _get_bucket_layout again
-            res3 = await fs._lookup_bucket_layout("transient-bucket")
-            assert res3 == layouts.STANDARD_HIERARCHICAL
-            assert mock_get_layout.await_count == 2
+    @pytest.mark.asyncio
+    async def test_layout_lookup_unlearned_endpoint_falls_back(self):
+        fs = ExtendedGcsFileSystem(
+            token=Credentials(token="t"),
+            endpoint_url="https://storage-myendpoint.p.googleapis.com",
+            skip_instance_cache=True,
+        )
+        with self._layout_rpc(
+            fs, side_effect=api_exceptions.ServiceUnavailable("blip")
+        ) as (_, rpc):
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+        assert rpc.await_args.kwargs["retry"] is None
+
+    @pytest.mark.asyncio
+    async def test_endpoint_learning_is_per_instance(self):
+        psc = "https://storage-myendpoint.p.googleapis.com"
+        fs1 = ExtendedGcsFileSystem(
+            token=Credentials(token="t"), endpoint_url=psc, skip_instance_cache=True
+        )
+        with self._layout_rpc(
+            fs1, return_value=storage_control_v2.StorageLayout(location_type="region")
+        ):
+            await fs1._lookup_bucket_layout("a")
+        assert fs1._serves_control_api() is True
+        fs2 = ExtendedGcsFileSystem(
+            token=Credentials(token="t"), endpoint_url=psc, skip_instance_cache=True
+        )
+        assert fs2._serves_control_api() is None
+
+    @pytest.mark.asyncio
+    async def test_layout_lookup_custom_endpoint_single_attempt(self):
+        # A regional endpoint does not serve Storage Control and answers 500.
+        fs = ExtendedGcsFileSystem(
+            token="anon",
+            endpoint_url="https://storage.us-central1.rep.googleapis.com",
+            skip_instance_cache=True,
+        )
+        error = api_exceptions.InternalServerError("http2 header status: 400")
+        with self._layout_rpc(fs, side_effect=error) as (_, rpc):
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+        rpc.assert_awaited_once()
+        assert rpc.await_args.kwargs["retry"] is None
+
+    @pytest.mark.asyncio
+    async def test_get_bucket_layout_propagates_non_api_errors(self, extended_gcsfs):
+        fs = extended_gcsfs
+        with self._layout_rpc(fs, side_effect=ValueError("bug")):
+            with pytest.raises(ValueError):
+                await fs._lookup_bucket_layout("b")
+
+    @pytest.mark.asyncio
+    async def test_lookup_bucket_layout_caches_known_layout(self, extended_gcsfs):
+        fs = extended_gcsfs
+        response = storage_control_v2.StorageLayout(
+            location_type="region", hierarchical_namespace={"enabled": True}
+        )
+        with self._layout_rpc(fs, return_value=response) as (_, rpc):
+            assert await fs._lookup_bucket_layout("b") == layouts.STANDARD_HIERARCHICAL
+            assert await fs._lookup_bucket_layout("b") == layouts.STANDARD_HIERARCHICAL
+        rpc.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_hns_ops_raise_on_transient_layout_lookup(self, extended_gcsfs):
+        # During a Storage Control outage, HNS operations must fail rather
+        # than run with flat-bucket semantics (mv moving nothing, makedirs
+        # creating no folder, rm leaving folders behind).
+        fs = extended_gcsfs
+        outage = api_exceptions.RetryError("budget exhausted", cause=None)
+        with (
+            self._layout_rpc(fs, side_effect=outage),
+            mock.patch.object(
+                fs, "_exists", new_callable=mock.AsyncMock, return_value=True
+            ),
+            mock.patch.object(
+                gcsfs_core.GCSFileSystem, "_mv", new_callable=mock.AsyncMock
+            ) as flat_mv,
+            mock.patch.object(
+                gcsfs_core.GCSFileSystem, "_rm", new_callable=mock.AsyncMock
+            ) as flat_rm,
+        ):
+            with pytest.raises(api_exceptions.RetryError):
+                await fs._mv("b/d1", "b/d2")
+            with pytest.raises(api_exceptions.RetryError):
+                await fs._makedirs("b/x/y")
+            with pytest.raises(api_exceptions.RetryError):
+                await fs._rm("b/d1", recursive=True)
+        flat_mv.assert_not_awaited()
+        flat_rm.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_layout_fallback_is_not_an_answer(self, extended_gcsfs):
+        fs = extended_gcsfs
+        with self._layout_rpc(
+            fs, side_effect=api_exceptions.PermissionDenied("denied")
+        ):
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+        assert "b" not in fs._storage_layout_cache
+        assert "b" in fs._storage_layout_fallbacks
+
+    @pytest.mark.asyncio
+    async def test_layout_fallback_expires(self, extended_gcsfs):
+        fs = extended_gcsfs
+        now = 1000.0
+        with (
+            mock.patch("gcsfs.extended_gcsfs.time.monotonic", side_effect=lambda: now),
+            self._layout_rpc(
+                fs, side_effect=api_exceptions.PermissionDenied("denied")
+            ) as (_, rpc),
+        ):
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+            assert rpc.await_count == 1
+
+            now = 1299.0
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+            assert rpc.await_count == 1
+
+            now = 1300.1
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+            assert rpc.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_layout_fallback_renewed_not_stacked(self, extended_gcsfs):
+        fs = extended_gcsfs
+        now = 1000.0
+        with (
+            mock.patch("gcsfs.extended_gcsfs.time.monotonic", side_effect=lambda: now),
+            self._layout_rpc(fs, side_effect=api_exceptions.PermissionDenied("denied")),
+        ):
+            await fs._lookup_bucket_layout("b")
+            now = 1300.1
+            await fs._lookup_bucket_layout("b")
+        assert fs._storage_layout_fallbacks == {"b": 1600.1}
+
+    @pytest.mark.asyncio
+    async def test_expired_fallback_replaced_by_answer(self, extended_gcsfs):
+        fs = extended_gcsfs
+        now = 1000.0
+        hns_response = storage_control_v2.StorageLayout(
+            location_type="region", hierarchical_namespace={"enabled": True}
+        )
+        with (
+            mock.patch("gcsfs.extended_gcsfs.time.monotonic", side_effect=lambda: now),
+            self._layout_rpc(
+                fs,
+                side_effect=[api_exceptions.PermissionDenied("denied"), hns_response],
+            ),
+        ):
+            assert await fs._lookup_bucket_layout("b") == BucketLayout.UNKNOWN
+            now = 1300.1
+            assert await fs._lookup_bucket_layout("b") == layouts.STANDARD_HIERARCHICAL
+        assert fs._storage_layout_cache["b"] == layouts.STANDARD_HIERARCHICAL
+        assert "b" not in fs._storage_layout_fallbacks
+
+    @pytest.mark.asyncio
+    async def test_answer_wins_over_stale_fallback(self, extended_gcsfs):
+        fs = extended_gcsfs
+        with (
+            mock.patch("gcsfs.extended_gcsfs.time.monotonic", return_value=1000.0),
+            self._layout_rpc(fs) as (_, rpc),
+        ):
+            fs._storage_layout_cache["b"] = layouts.STANDARD
+            fs._remember_fallback("b")
+            assert await fs._lookup_bucket_layout("b") == layouts.STANDARD
+        rpc.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("target", [None, "b", "gs://b/key"])
+    async def test_invalidate_drops_fallback(self, extended_gcsfs, target):
+        fs = extended_gcsfs
+        with self._layout_rpc(
+            fs, side_effect=api_exceptions.PermissionDenied("denied")
+        ):
+            await fs._lookup_bucket_layout("b")
+        assert "b" in fs._storage_layout_fallbacks
+        fs.invalidate_storage_layout_cache(target)
+        assert "b" not in fs._storage_layout_fallbacks
+
+    @pytest.mark.asyncio
+    async def test_layout_fallback_uses_monotonic_clock(self, extended_gcsfs):
+        fs = extended_gcsfs
+        wall = 1_700_000_000.0
+        with (
+            mock.patch("gcsfs.extended_gcsfs.time.monotonic", return_value=1000.0),
+            mock.patch("gcsfs.extended_gcsfs.time.time", side_effect=lambda: wall),
+            self._layout_rpc(
+                fs, side_effect=api_exceptions.PermissionDenied("denied")
+            ) as (_, rpc),
+        ):
+            await fs._lookup_bucket_layout("b")
+            wall += 10**6
+            await fs._lookup_bucket_layout("b")
+        rpc.assert_awaited_once()
 
     def test_invalidate_storage_layout_cache_single_bucket(self, extended_gcsfs):
         fs = extended_gcsfs
@@ -4411,7 +5031,173 @@ class TestExtendedGcsFileSystemBucketLayout:
             assert await fs._lookup_bucket_layout("bucket") == layouts.STANDARD
             assert mock_get_layout.await_count == 2
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "op",
+        [
+            "rmdir_bucket",
+            "mkdir_bucket",
+            "mkdir_folder_creating_hns_bucket",
+            "mkdir_folder_creating_bucket",
+        ],
+    )
+    async def test_bucket_create_and_delete_drop_cached_layout(
+        self, extended_gcsfs, op
+    ):
+        # A bucket created again under the same name may have another layout;
+        # keeping the old one would pick the wrong data path (here RCU on a
+        # bucket created without it) or the wrong HNS semantics.
+        fs = extended_gcsfs
+        fs._storage_layout_cache["b"] = layouts.STANDARD_RCU
+        with (
+            mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as call,
+            mock.patch.object(
+                fs, "_exists", new_callable=mock.AsyncMock, return_value=False
+            ),
+            mock.patch.object(fs, "_create_hns_folder", new_callable=mock.AsyncMock),
+        ):
+            if op == "rmdir_bucket":
+                await fs._rmdir("b")
+            elif op == "mkdir_bucket":
+                await fs._mkdir("b")
+            elif op == "mkdir_folder_creating_hns_bucket":
+                await fs._mkdir(
+                    "b/dir", create_parents=True, enable_hierarchical_namespace=True
+                )
+            else:
+                await fs._mkdir("b/dir", create_parents=True)
+        call.assert_awaited_once()
+        assert "b" not in fs._storage_layout_cache
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "path, kwargs", [("b/", {}), ("b/dir", {"create_parents": True})]
+    )
+    async def test_mkdir_in_existing_bucket_keeps_cached_layout(
+        self, extended_gcsfs, path, kwargs
+    ):
+        # No bucket is created, so the cached layout is still right.
+        fs = extended_gcsfs
+        fs._storage_layout_cache["b"] = layouts.STANDARD
+        with (
+            mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as call,
+            mock.patch.object(
+                fs, "_exists", new_callable=mock.AsyncMock, return_value=True
+            ),
+        ):
+            await fs._mkdir(path, **kwargs)
+        call.assert_not_awaited()
+        assert fs._storage_layout_cache["b"] == layouts.STANDARD
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "op, error",
+        [
+            ("mkdir", FileExistsError("b")),
+            ("rmdir", HttpError({"code": 409, "message": "bucket is not empty"})),
+        ],
+    )
+    async def test_failed_bucket_create_or_delete_keeps_cached_layout(
+        self, extended_gcsfs, op, error
+    ):
+        fs = extended_gcsfs
+        fs._storage_layout_cache["b"] = layouts.STANDARD
+        with mock.patch.object(
+            fs, "_call", new_callable=mock.AsyncMock, side_effect=error
+        ):
+            with pytest.raises(type(error)):
+                if op == "mkdir":
+                    await fs._mkdir("b")
+                else:
+                    await fs._rmdir("b")
+        assert fs._storage_layout_cache["b"] == layouts.STANDARD
+
     def test_bucket_layout_presets(self):
         assert BucketLayout.UNKNOWN == BucketLayout(
             StorageClass.UNKNOWN, CachingTier.NONE, NamespaceLayout.UNKNOWN
         )
+
+
+@pytest.mark.parametrize(
+    "error, serves_control_api, anonymous, expected",
+    [
+        (api_exceptions.NotFound("nf"), True, False, "MISSING"),
+        (api_exceptions.NotFound("nf"), False, False, "MISSING"),
+        (api_exceptions.PermissionDenied("x"), True, False, "FALLBACK"),
+        (api_exceptions.InvalidArgument("x"), True, False, "FALLBACK"),
+        (api_exceptions.FailedPrecondition("x"), True, False, "FALLBACK"),
+        (api_exceptions.MethodNotImplemented("x"), True, False, "FALLBACK"),
+        (
+            api_exceptions.Unauthenticated(
+                "Anonymous caller does not have storage.objects.list"
+            ),
+            True,
+            True,
+            "FALLBACK",
+        ),
+        (
+            api_exceptions.Unauthenticated(
+                "Request had invalid authentication credentials"
+            ),
+            True,
+            False,
+            "RAISE",
+        ),
+        (api_exceptions.Cancelled("x"), True, False, "RAISE"),
+        (api_exceptions.Aborted("x"), True, False, "RAISE"),
+        (api_exceptions.DataLoss("x"), True, False, "RAISE"),
+        (api_exceptions.ServiceUnavailable("x"), True, False, "RAISE"),
+        (api_exceptions.RetryError("budget", cause=None), True, False, "RAISE"),
+        (asyncio.TimeoutError(), True, False, "RAISE"),
+        (
+            api_exceptions.InternalServerError("http2 header status: 400"),
+            False,
+            False,
+            "FALLBACK",
+        ),
+        (api_exceptions.ServiceUnavailable("x"), False, False, "FALLBACK"),
+        (asyncio.TimeoutError(), False, False, "FALLBACK"),
+        (
+            api_exceptions.Unauthenticated(
+                "Request had invalid authentication credentials"
+            ),
+            False,
+            False,
+            "FALLBACK",
+        ),
+    ],
+)
+def test_classify_layout_error(error, serves_control_api, anonymous, expected):
+    assert (
+        _classify_layout_error(
+            error, serves_control_api=serves_control_api, anonymous=anonymous
+        )
+        is _LayoutLookupOutcome[expected]
+    )
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (
+            api_exceptions.Unauthenticated(
+                "Request had invalid authentication credentials"
+            ),
+            "FALLBACK",
+        ),
+        (api_exceptions.ServiceUnavailable("x"), "RAISE"),
+        (api_exceptions.NotFound("nf"), "MISSING"),
+    ],
+)
+def test_classify_layout_error_unverified_client_cert(error, expected):
+    # Only a 401 is explained by a certificate-bound token; other errors keep
+    # the default endpoint's rules.
+    assert (
+        _classify_layout_error(
+            error,
+            serves_control_api=True,
+            anonymous=False,
+            unverified_client_cert=True,
+        )
+        is _LayoutLookupOutcome[expected]
+    )

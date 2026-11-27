@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import mimetypes
+import numbers
 import os
 import queue
 import re
@@ -94,6 +95,16 @@ DEFAULT_BLOCK_SIZE = 5 * 2**20
 # buckets that have scaled to higher rates.
 DEFAULT_RM_CONCURRENCY = 4
 
+# Default timeout of every HTTP request, used unless ``requests_timeout`` or a
+# ``timeout`` in ``session_kwargs`` is given. ``sock_read`` bounds the silence
+# between bytes of a response, not how long a transfer takes, so a response
+# that never arrives fails (and is retried) while a large upload or download
+# does not. No ``total``: it would cap long transfers, and is not retried.
+# 60 s matches google-cloud-storage's read timeout, 30 s aiohttp's connect one.
+DEFAULT_REQUESTS_TIMEOUT = aiohttp.ClientTimeout(
+    total=None, sock_connect=30, sock_read=60
+)
+
 
 def _validate_rm_concurrency(concurrency):
     """Check the ``concurrency`` argument of ``rm``: None or a positive int."""
@@ -171,7 +182,8 @@ class UnclosableBytesIO(io.BytesIO):
 
 
 def _gcp_universe_domain():
-    return os.getenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "googleapis.com")
+    # An empty value means unset, as in google-cloud-storage.
+    return os.getenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN") or "googleapis.com"
 
 
 _MTLS_HOST = "storage.mtls.googleapis.com"
@@ -281,18 +293,28 @@ def _chunks(lst, n):
 
 def _coalesce_generation(*args):
     """Helper to coalesce a list of object generations down to one."""
-    generations = set(args)
-    if None in generations:
-        generations.remove(None)
-    if len(generations) > 1:
+    defined = []
+    parsed_values = set()
+    for g in args:
+        if g is None:
+            continue
+        if isinstance(g, bool) or not isinstance(g, (numbers.Integral, str)):
+            raise ValueError(f"generation must be a non-negative integer, got {g!r}")
+        if isinstance(g, str) and not (g.isascii() and g.isdigit()):
+            raise ValueError(f"generation must be a non-negative integer, got {g!r}")
+        val = int(g)
+        if val < 0:
+            raise ValueError(f"generation must be a non-negative integer, got {g!r}")
+        defined.append(g)
+        parsed_values.add(val)
+    if not defined:
+        return None
+    if len(parsed_values) > 1:
         raise ValueError(
             "Cannot coalesce generations where more than one are defined,"
-            f" {generations}"
+            f" {set(defined)}"
         )
-    elif len(generations) == 0:
-        return None
-    else:
-        return generations.pop()
+    return defined[0]
 
 
 def _is_directory_marker(entry):
@@ -314,18 +336,11 @@ def _get_cache_type_header_value(cache_type, cache_source=None):
 _HTTP_HEADER_KEY_LOWER = HTTP_HEADER_KEY.lower()
 
 
-def _build_user_agent(cache_type=None, cache_source=None, telemetry_tokens=()):
+def _build_user_agent(cache_type=None, cache_source=None):
     """Build the standard User-Agent header string for HTTP requests."""
-    tokens = [f"python-gcsfs/{version}"]
-
+    base = f"python-gcsfs/{version}"
     cache_val = _get_cache_type_header_value(cache_type, cache_source)
-    if cache_val:
-        tokens.append(cache_val)
-
-    if telemetry_tokens:
-        tokens.extend(telemetry_tokens)
-
-    return " ".join(tokens)
+    return f"{base} {cache_val}" if cache_val else base
 
 
 class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
@@ -440,6 +455,20 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
     session_kwargs: dict
         passed on to ``aiohttp.ClientSession``; can contain, for example,
         proxy settings.
+    requests_timeout: float or aiohttp.ClientTimeout, optional
+        Timeout of each HTTP request. A number is aiohttp's total timeout
+        for the request, in seconds; an ``aiohttp.ClientTimeout`` is used
+        as-is (any field left ``None`` has no limit, so
+        ``aiohttp.ClientTimeout()`` disables all timeouts). If not given,
+        the ``timeout`` in ``session_kwargs`` is used, else a 30 s
+        ``sock_connect`` and 60 s ``sock_read`` timeout with no total limit
+        (``DEFAULT_REQUESTS_TIMEOUT``): a response that stops arriving
+        fails, while a long transfer that keeps receiving data does not.
+        Connect and read timeouts (``aiohttp.ServerTimeoutError``) are
+        retried like other transient errors; a total timeout, including a
+        numeric ``requests_timeout``, raises ``TimeoutError`` and is not
+        retried. Synchronous calls wrap an unrecovered timeout in
+        ``fsspec.FSTimeoutError`` (a ``TimeoutError`` subclass).
     endpoint_url: str
         If given, use this URL (format protocol://host:port , *without* any
         path part) for communication. If not given, defaults to the value
@@ -510,11 +539,15 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self.requester_pays = requester_pays
         self.consistency = consistency
         self.cache_timeout = cache_timeout or kwargs.pop("listings_expiry_time", None)
-        self.requests_timeout = requests_timeout
         self.timeout = timeout
         self._session = None
         self._endpoint = endpoint_url
         self.session_kwargs = session_kwargs or {}
+        if requests_timeout is None:
+            requests_timeout = self.session_kwargs.get("timeout")
+        if requests_timeout is None:
+            requests_timeout = DEFAULT_REQUESTS_TIMEOUT
+        self.requests_timeout = requests_timeout
         self.default_location = default_location
         self.version_aware = version_aware
         self._use_client_cert = _use_client_cert()
@@ -665,30 +698,27 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         return params
 
     def _get_headers(self, headers, cache_type=None, cache_source=None):
-        out = dict(headers) if headers else {}
-        need_ua = True
-        need_features = True
-        for k in out:
-            k_lower = k.lower()
-            if k_lower == "user-agent":
-                need_ua = False
-            elif k_lower == _HTTP_HEADER_KEY_LOWER:
-                need_features = False
-        if need_ua or need_features:
-            ua_tokens, encoded = (
-                telemetry_manager.default_usage_tracker.get_http_telemetry(
-                    include_tokens=need_ua,
-                    include_features=need_features,
-                )
+        # X-Goog-Storage-Gcsfs-Features is gcsfs-owned (strip/replace any incoming
+        # per-request value), while User-Agent remains caller-overridable.
+        out = {}
+        has_ua = False
+        if headers:
+            items = headers.items() if hasattr(headers, "items") else headers
+            for k, v in items:
+                k_lower = k.lower()
+                if k_lower == _HTTP_HEADER_KEY_LOWER:
+                    continue
+                if k_lower == "user-agent":
+                    has_ua = True
+                out[k] = v
+        if not has_ua:
+            out["User-Agent"] = _build_user_agent(
+                cache_type=cache_type,
+                cache_source=cache_source,
             )
-            if need_ua:
-                out["User-Agent"] = _build_user_agent(
-                    cache_type=cache_type,
-                    cache_source=cache_source,
-                    telemetry_tokens=ua_tokens,
-                )
-            if encoded:
-                out[HTTP_HEADER_KEY] = encoded
+        encoded = telemetry_manager.default_usage_tracker.encode_features()
+        if encoded:
+            out[HTTP_HEADER_KEY] = encoded
         self.credentials.apply(out)
         return out
 
@@ -792,23 +822,21 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     make_bucket_requester_pays = asyn.sync_wrapper(_make_bucket_requester_pays)
 
-    async def _get_object(self, path):
+    async def _get_object(self, path, generation=None):
         """Return object information at the given path."""
-        bucket, key, generation = self.split_path(path)
+        bucket, key, path_generation = self.split_path(path)
+        generation = _coalesce_generation(generation, path_generation)
 
         # Check if parent dir is in listing cache
-        listing = self._ls_from_cache(path)
-        if listing:
-            name = "/".join((bucket, key))
-            for file_details in listing:
-                if (
-                    file_details["type"] == "file"
-                    and file_details["name"] == name
-                    and (not generation or file_details.get("generation") == generation)
-                ):
-                    return file_details
-            else:
-                raise FileNotFoundError(path)
+        if generation is None:
+            listing = self._ls_from_cache(path)
+            if listing:
+                name = "/".join((bucket, key))
+                for file_details in listing:
+                    if file_details["type"] == "file" and file_details["name"] == name:
+                        return file_details
+                else:
+                    raise FileNotFoundError(path)
 
         if not key:
             # Attempt to "get" the bucket root, return error instead of
@@ -831,12 +859,16 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 bucket,
                 json_out=True,
                 prefix=key,
-                maxResults=1 if not generation else None,
-                versions="true" if generation else None,
+                maxResults=1 if generation is None else None,
+                versions="true" if generation is not None else None,
             )
             for item in resp.get("items", []):
                 if item["name"] == key and (
-                    not generation or item.get("generation") == generation
+                    generation is None
+                    or (
+                        item.get("generation") is not None
+                        and str(item.get("generation")) == str(generation)
+                    )
                 ):
                     res = item
                     break
@@ -1160,6 +1192,14 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 self.dircache.pop(path, None)
                 path = self._parent(path)
 
+    def invalidate_storage_layout_cache(self, bucket=None):
+        """Forget cached bucket layouts; a no-op here, since this class caches none.
+
+        ``ExtendedGcsFileSystem`` caches each bucket's layout (zonal,
+        hierarchical namespace, Rapid Cache Ultra) and overrides this method.
+        ``_mkdir`` and ``_rmdir`` call it after creating or deleting a bucket.
+        """
+
     async def _mkdir(
         self,
         path,
@@ -1250,6 +1290,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         )
         self.invalidate_cache(bucket)
         self.invalidate_cache("")
+        self.invalidate_storage_layout_cache(bucket)
 
     mkdir = asyn.sync_wrapper(_mkdir)
 
@@ -1268,6 +1309,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         await self._call("DELETE", "b/" + bucket, json_out=False)
         self.invalidate_cache(bucket)
         self.invalidate_cache("")
+        self.invalidate_storage_layout_cache(bucket)
 
     rmdir = asyn.sync_wrapper(_rmdir)
 
@@ -1298,18 +1340,29 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 else:
                     raise FileNotFoundError(path)
             return out
-        # Check directory cache for parent dir
-        parent_path = self._parent(path)
-        parent_cache = self._ls_from_cache(parent_path)
         bucket, key, path_generation = self.split_path(path)
         generation = _coalesce_generation(generation, path_generation)
+        # Check directory cache for parent dir
+        parent_path = self._parent(path)
+        try:
+            parent_cache = self._ls_from_cache(parent_path)
+        except FileNotFoundError:
+            if generation is None:
+                raise
+            parent_cache = None
         if parent_cache:
             name = "/".join((bucket, key))
             for o in parent_cache:
                 if o["name"].rstrip("/") == name and (
-                    not generation or o.get("generation") == generation
+                    generation is None
+                    or (
+                        o.get("generation") is not None
+                        and str(o.get("generation")) == str(generation)
+                    )
                 ):
                     return o
+        if generation is not None:
+            return await self._get_object(path, generation=generation)
         if self._ls_from_cache(path):
             # this is a directory
             return {
@@ -1410,17 +1463,50 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             self._location,
             bucket,
             object,
-            f"&generation={generation}" if generation else "",
+            f"&generation={generation}" if generation is not None else "",
         )
+
+    async def _process_limits(self, url, start, end, generation=None):
+        """Helper for "Range"-based _cat_file"""
+        size = None
+        suff = False
+        info_kwargs = {"generation": generation} if generation is not None else {}
+        if start is not None and start < 0:
+            # if start is negative and end None, end is the "suffix length"
+            if end is None:
+                end = -start
+                start = ""
+                suff = True
+            else:
+                size = (await self._info(url, **info_kwargs))["size"]
+                start = max(0, size + start)
+        elif start is None:
+            start = 0
+        if not suff:
+            if end is not None and end < 0:
+                if size is None:
+                    size = (await self._info(url, **info_kwargs))["size"]
+                end = max(0, size + end)
+            elif end is None:
+                end = ""
+            if isinstance(end, numbers.Integral):
+                end -= 1  # bytes range is inclusive
+        return f"bytes={start}-{end}"
 
     async def _cat_file_sequential(self, path, start=None, end=None, **kwargs):
         """Simple one-shot get of file data"""
         if is_empty_range(start, end):
             return b""
 
-        u2 = self.url(path, generation=kwargs.get("generation"))
+        generation = kwargs.get("generation")
+        u2 = self.url(path, generation=generation)
         if start is not None or end is not None:
-            head = {"Range": await self._process_limits(path, start, end)}
+            rng = await self._process_limits(path, start, end, generation=generation)
+            if not rng.startswith("bytes=-"):
+                first_s, last_s = rng.removeprefix("bytes=").split("-", 1)
+                if first_s and last_s and int(first_s) > int(last_s):
+                    return b""
+            head = {"Range": rng}
         else:
             head = {}
 
@@ -1435,10 +1521,18 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self, path, start=None, end=None, concurrency=DEFAULT_CONCURRENCY, **kwargs
     ):
         """Concurrent fetch of file data"""
+        if is_empty_range(start, end):
+            return b""
         if start is None:
             start = 0
-        if end is None:
-            end = (await self._info(path))["size"]
+        if start < 0 or end is None or end < 0:
+            info_kwargs = (
+                {"generation": kwargs["generation"]}
+                if kwargs.get("generation") is not None
+                else {}
+            )
+            size = (await self._info(path, **info_kwargs))["size"]
+            start, end, _ = slice(start, end).indices(size)
         if start >= end:
             return b""
 
@@ -1911,6 +2005,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         mode="overwrite",
         if_generation_match=None,
         kms_key_name=None,
+        **kwargs,
     ):
         # enforce blocksize should be a multiple of 2**18
         if content_type is None:
@@ -3140,6 +3235,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         """
         if is_empty_range(start, end, self.size):
             return b""
+        gen_kwargs = (
+            {"generation": self.generation} if self.generation is not None else {}
+        )
         try:
             return self.fs.cat_file(
                 self.path,
@@ -3148,6 +3246,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 concurrency=self.concurrency,
                 cache_type=self.cache_type,
                 cache_source=self.cache_source,
+                **gen_kwargs,
             )
         except (RuntimeError, HttpError) as e:
             if "not satisfiable" in str(e) or "InvalidRange" in str(e):
@@ -3156,6 +3255,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
 
     async def _async_fetch_range(self, start_offset, total_size, split_factor=1):
         """Async fetcher mapped to the Prefetcher engine for regional buckets."""
+        gen_kwargs = (
+            {"generation": self.generation} if self.generation is not None else {}
+        )
         return await self.gcsfs._cat_file_concurrent(
             self.path,
             start=start_offset,
@@ -3163,6 +3265,7 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             concurrency=split_factor,
             cache_type=self.cache_type,
             cache_source=self.cache_source,
+            **gen_kwargs,
         )
 
     def close(self):

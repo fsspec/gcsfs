@@ -19,7 +19,7 @@ For standard buckets, ``gcsfs`` uses a custom retry decorator (``retry_request``
     - ``mv`` / ``_mv_file``: Moving/renaming objects.
     - ``cp`` / ``_cp_file``: Copying objects.
 - **Number of Retries:** The default number of retries is **6**. This is defined as a class attribute ``retries = 6`` in ``GCSFileSystem``.
-- **Timeouts:** Individual requests use ``requests_timeout`` (if configured in ``GCSFileSystem.__init__``) as their timeout. There is no total deadline for the retry loop in ``retry_request``; it will attempt up to the specified number of retries (default 6) irrespective of the total time taken.
+- **Timeouts:** Each request uses ``requests_timeout`` from ``GCSFileSystem.__init__``. If it is not given, the ``timeout`` in ``session_kwargs`` is used, else a 30 s connect and 60 s read timeout with no total limit, so a response that never arrives fails instead of waiting forever, while a long transfer that keeps receiving data is not cut off. These timeouts are retried like other connection errors (``aiohttp.ClientError``); a ``total`` timeout raises ``TimeoutError``, which is not retried (synchronous calls wrap an unrecovered timeout in ``fsspec.FSTimeoutError``). There is no total deadline for the retry loop in ``retry_request``; it will attempt up to the specified number of retries (default 6) irrespective of the total time taken.
 - **Backoff Strategy:** Exponential backoff with jitter. The wait time between retries is calculated as ``min(random.random() + 2 ** (retry - 1), 32)``.
 - **Retriable Errors:**
     - ``requests.exceptions.ChunkedEncodingError``
@@ -42,7 +42,7 @@ For HNS buckets, ``ExtendedGcsFileSystem`` utilizes the specialized Storage Cont
 
 - These calls utilize retry configuration based on ``google.api_core.retry.AsyncRetry``.
 - **Applicable Methods:**
-    - ``get_storage_layout``: Used to determine bucket type.
+    - ``get_storage_layout``: Used to determine bucket type. Skipped on plain ``http://`` endpoints, and tried once without retries on other non-default endpoints until a lookup succeeds on the filesystem instance (see :ref:`bucket-type-detection-and-caching`).
     - ``create_folder``: Used for ``mkdir``.
     - ``get_folder``: Used for directory metadata and existence checks.
     - ``list_folders``: Used for directory listings (``ls``).

@@ -575,6 +575,34 @@ async def test_init_aaow_rcu_open_failure_lookup_unknown_reraises(rcu_fs, open_e
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "lookup_error, still_cached",
+    [
+        # A transient failure says nothing about the layout: keep it.
+        (api_exceptions.RetryError("budget exhausted", cause=None), True),
+        # The bucket is gone: like _lookup_bucket_layout, don't keep its layout.
+        (api_exceptions.NotFound("bucket gone"), False),
+    ],
+)
+async def test_init_aaow_rcu_refresh_lookup_error_keeps_open_error(
+    rcu_fs, open_error, lookup_error, still_cached
+):
+    """A re-check lookup that raises surfaces the original open error,
+    without the lookup error attached as its context."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+    init_aaow.side_effect = open_error
+    fs._get_bucket_layout.side_effect = lookup_error
+
+    with pytest.raises(type(open_error)) as excinfo:
+        await fs._init_aaow(BUCKET, "key")
+
+    assert excinfo.value is open_error
+    assert excinfo.value.__context__ is None
+    assert (BUCKET in fs._storage_layout_cache) is still_cached
+
+
+@pytest.mark.asyncio
 async def test_init_aaow_zonal_open_failure_skips_recheck(rcu_fs, open_error):
     """Open failures on zonal buckets surface without a layout re-check."""
     fs, init_aaow = rcu_fs
@@ -651,6 +679,42 @@ async def test_init_aaow_rcu_failure_reuses_layout_refreshed_by_another_writer(
 
     assert excinfo.value.__cause__ is open_error
     fs._get_bucket_layout.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fresh, raises_disabled",
+    [(layouts.STANDARD, True), (layouts.STANDARD_RCU, False)],
+)
+async def test_init_aaow_rcu_failure_rechecks_after_fallback(
+    rcu_fs, open_error, fresh, raises_disabled
+):
+    """A fallback recorded while an RCU open is in flight is not an answer:
+    re-check and store whatever real layout GCS reports, RCU included."""
+    fs, init_aaow = rcu_fs
+    fs._storage_layout_cache[BUCKET] = layouts.STANDARD_RCU
+    fs._get_bucket_layout.return_value = fresh
+
+    def fall_back_then_fail(*args, **kwargs):
+        # Another lookup fell back (e.g. after invalidate_storage_layout_cache())
+        # while this open was in flight.
+        fs._storage_layout_cache.pop(BUCKET, None)
+        fs._remember_fallback(BUCKET)
+        raise open_error
+
+    init_aaow.side_effect = fall_back_then_fail
+
+    if raises_disabled:
+        with pytest.raises(RapidCacheUltraDisabledError) as excinfo:
+            await fs._init_aaow(BUCKET, "key")
+        assert excinfo.value.__cause__ is open_error
+    else:
+        with pytest.raises(type(open_error)) as excinfo:
+            await fs._init_aaow(BUCKET, "key")
+        assert excinfo.value is open_error
+    assert fs._storage_layout_cache[BUCKET] == fresh
+    assert BUCKET not in fs._storage_layout_fallbacks
+    fs._get_bucket_layout.assert_awaited_once_with(BUCKET)
 
 
 @pytest.mark.asyncio

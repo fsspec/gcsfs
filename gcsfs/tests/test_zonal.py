@@ -1791,3 +1791,43 @@ def test_extended_gcsfs_garbage_collection():
     gc.collect()
 
     assert ref() is None
+
+
+def test_generation_pinned_reads_after_overwrite_zb(extended_gcsfs, tmp_path):
+    """Pinned generation= reads return live version and raise FileNotFoundError on overwritten version."""
+    if not extended_gcsfs.on_google:
+        pytest.skip("Generation overwrite test requires a live GCS backend.")
+
+    target = f"{TEST_ZONAL_BUCKET}/zonal/test/gen_overwrite_{uuid.uuid4().hex}"
+    v1 = b"v1-initial-payload"
+    v2 = b"v2-overwritten-longer-payload"
+    try:
+        extended_gcsfs.pipe_file(target, v1, finalize_on_close=True)
+        gen1 = extended_gcsfs.info(target)["generation"]
+        assert extended_gcsfs.cat_file(target, generation=gen1) == v1
+
+        extended_gcsfs.pipe_file(target, v2, finalize_on_close=True)
+        gen2 = extended_gcsfs.info(target)["generation"]
+        assert gen2 != gen1
+
+        assert extended_gcsfs.cat_file(target, generation=gen2) == v2
+        assert extended_gcsfs.cat_ranges([target], [0], [10], generation=gen2) == [
+            v2[:10]
+        ]
+        lpath = tmp_path / "gen2.bin"
+        extended_gcsfs.get_file(target, str(lpath), generation=gen2)
+        assert lpath.read_bytes() == v2
+
+        with pytest.raises(FileNotFoundError):
+            extended_gcsfs.cat_file(target, generation=gen1)
+        err_res = extended_gcsfs.cat_ranges([target], [0], [5], generation=gen1)
+        assert len(err_res) == 1 and isinstance(err_res[0], FileNotFoundError)
+        with pytest.raises(FileNotFoundError):
+            extended_gcsfs.cat_ranges(
+                [target], [0], [5], on_error="raise", generation=gen1
+            )
+        with pytest.raises(FileNotFoundError):
+            extended_gcsfs.get_file(target, str(tmp_path / "gen1.bin"), generation=gen1)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            extended_gcsfs.rm_file(target)

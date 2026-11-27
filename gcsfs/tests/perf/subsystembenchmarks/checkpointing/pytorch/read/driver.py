@@ -1,164 +1,126 @@
 import functools
-import json
-import math
-import os
-import tempfile
-import time
 
-import fsspec
-import torch
-import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint._fsspec_filesystem import FsspecReader, FsspecWriter
-from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
-from torch.distributed.checkpoint.planner import LoadItemType, LoadPlan
+from torch.distributed.checkpoint.fsspec_filesystem import FsspecReader, FsspecWriter
 
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
-    run_split,
-    setup_distributed_env,
-    spawn_split,
-)
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
-    CheckpointDriver,
-    CheckpointResult,
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import run_split
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import CheckpointResult
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.common import (
+    DCPDriver,
+    build_state,
+    rank_session,
+    spawn_with_stats,
+    timed,
+    warm_up,
+    write_stats,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.model import (
-    build_model,
-    build_optimizer,
-    materialize,
+    RUN_SEED,
+    SETUP_SEED,
 )
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parallelize import (
-    build_mesh,
-    parallelize,
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.planners import (
+    RecordingLoadPlanner,
+)
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import (
+    load_weights,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.state import (
+    assert_loaded_state,
     expected_bytes_requested,
-    get_fqn_state_dict,
-    state_checksum,
 )
 
-# Run seeds differently from setup so every tensor starts with known-wrong
-# bytes; a reader that skips items would otherwise pass the checksum.
-_SETUP_SEED = 0
-_RUN_SEED = 1
 
-
-class _RecordingLoadPlanner(DefaultLoadPlanner):
-    """Records how many items and tensor bytes this rank asks DCP to read."""
-
-    def __init__(self):
-        super().__init__()
-        self.read_items = 0
-        self.bytes_requested = 0
-
-    def create_local_plan(self) -> LoadPlan:
-        plan = super().create_local_plan()
-        md = self.metadata.state_dict_metadata
-        self.read_items = len(plan.items)
-        self.bytes_requested = sum(
-            math.prod(item.lengths) * md[item.dest_index.fqn].properties.dtype.itemsize
-            for item in plan.items
-            if item.type == LoadItemType.TENSOR
-        )
-        return plan
-
-
-def _build(params, mesh, seed):
-    model = parallelize(build_model(params), mesh, params)
-    materialize(model, seed)
-    return model, build_optimizer(model, seed)
-
-
-def _checksum_path(prefix: str, rank: int):
-    fs, root = fsspec.core.url_to_fs(prefix)
-    return fs, f"{root.rstrip('/')}/checksums/rank{rank}.json"
-
-
-def _rank_setup_checkpoint(rank, world_size, port, prefix, params, q):
-    setup_distributed_env(rank, world_size, port)
-    try:
-        torch.set_num_threads(max(1, (os.cpu_count() or 1) // world_size))
-        model, optim = _build(params, build_mesh(params), _SETUP_SEED)
-        state = get_fqn_state_dict(model, optim)
+def _rank_save_source(rank, world_size, port, prefix, params, q, *, weights):
+    with rank_session(rank, world_size, port) as device:
+        layout = params.source_layout()
+        state = build_state(params, layout, SETUP_SEED, weights, device)
         dcp.save(state, storage_writer=FsspecWriter(prefix))
-
-        fs, path = _checksum_path(prefix, rank)
-        fs.makedirs(os.path.dirname(path), exist_ok=True)
-        fs.pipe_file(path, json.dumps(state_checksum(state)).encode())
         q.put(None)
-    finally:
-        dist.destroy_process_group()
 
 
-def _rank_load(rank, world_size, port, prefix, params, q, *, stats_dir):
-    setup_distributed_env(rank, world_size, port)
-    try:
-        torch.set_num_threads(max(1, (os.cpu_count() or 1) // world_size))
-        model, optim = _build(params, build_mesh(params), _RUN_SEED)
-        state = get_fqn_state_dict(model, optim)
+def _rank_load(rank, world_size, port, prefix, params, q, *, weights, stats_dir):
+    with rank_session(rank, world_size, port) as device:
+        layout = params.target_layout()
+        state = build_state(params, layout, RUN_SEED, weights, device)
         bytes_expected = expected_bytes_requested(state)
-        # Also builds the gcsfs instance and fetches a token before the timed rounds.
-        fs, path = _checksum_path(prefix, rank)
-        saved = json.loads(fs.cat_file(path))
+        warm_up(prefix, device)
 
         durations = []
         for _ in range(params.rounds):
-            planner = _RecordingLoadPlanner()
-            dist.barrier()
-            begin = time.perf_counter()
-            dcp.load(state, storage_reader=FsspecReader(prefix), planner=planner)
-            dist.barrier()
-            durations.append((begin, time.perf_counter()))
+            planner = RecordingLoadPlanner()
+            reader = FsspecReader(prefix)
+            durations.append(
+                timed(device, dcp.load, state, storage_reader=reader, planner=planner)
+            )
 
-        with open(os.path.join(stats_dir, f"rank{rank}"), "w") as f:
-            f.write(str(planner.read_items))
+        write_stats(
+            stats_dir,
+            rank,
+            {"read_items": planner.read_items, "bytes_fetched": planner.bytes_fetched},
+        )
         # Report before the checks below so the parent can close its timed
         # and monitored window while the ranks verify the loaded bytes.
         q.put(durations)
-
-        # The planner check catches wrong shapes; the checksum catches wrong
-        # or missing bytes, which DCP does not verify (no CRC), so a bad
-        # reader would otherwise just look faster.
-        if planner.bytes_requested != bytes_expected:
-            raise RuntimeError(
-                f"rank {rank}: DCP requested {planner.bytes_requested} tensor bytes, "
-                f"expected {bytes_expected}"
-            )
-
-        loaded = state_checksum(get_fqn_state_dict(model, optim))
-        if loaded != saved:
-            bad = sorted(
-                k for k in saved.keys() | loaded.keys() if saved.get(k) != loaded.get(k)
-            )
-            raise RuntimeError(
-                f"rank {rank}: checksum mismatch in {len(bad)} tensors, e.g. {bad[0]}"
-            )
-    finally:
-        dist.destroy_process_group()
-
-
-class PyTorchCheckpointReadDriver(CheckpointDriver):
-    def setup(self, prefix, params):
-        run_split(prefix, params, _rank_setup_checkpoint)
-
-    def run(self, prefix, params):
-        with tempfile.TemporaryDirectory() as stats_dir:
-            ranks = spawn_split(
-                prefix, params, functools.partial(_rank_load, stats_dir=stats_dir)
-            )
-            read_items = []
-            for name in os.listdir(stats_dir):
-                with open(os.path.join(stats_dir, name)) as f:
-                    read_items.append(int(f.read()))
-
-        return CheckpointResult(
-            durations=ranks.durations,
-            extra_columns={"dcp_read_items_per_rank_max": max(read_items)},
-            verify=ranks.join,
+        assert_loaded_state(
+            rank,
+            state,
+            planner.bytes_requested,
+            bytes_expected,
+            SETUP_SEED,
+            weights,
+            device,
         )
 
-    def read_count(self, params) -> int:
-        return params.data_parallel_replicate_size
 
-    def is_checkpoint_file(self, path: str) -> bool:
-        return path.endswith((".distcp", ".metadata"))
+class PyTorchCheckpointReadDriver(DCPDriver):
+    def setup(self, prefix, params):
+        source = params.source_layout()
+        self.prepare(params, source, params.target_layout())
+        weights = load_weights(params.model_id)
+        try:
+            run_split(
+                prefix,
+                params,
+                functools.partial(_rank_save_source, weights=weights),
+                world_size_override=source.world_size,
+            )
+        finally:
+            weights.clear()
+
+    def run(self, prefix, params):
+        weights = load_weights(params.model_id)
+        ranks = None
+
+        def _close() -> None:
+            try:
+                if ranks is not None:
+                    ranks.close()
+            finally:
+                weights.clear()
+
+        def _verify() -> None:
+            try:
+                ranks.join()
+            finally:
+                _close()
+
+        try:
+            ranks, stats = spawn_with_stats(
+                prefix, params, _rank_load, params.target_layout().world_size, weights
+            )
+            fetched = [s["bytes_fetched"] for s in stats]
+            total_fetched = sum(fetched)
+            return CheckpointResult(
+                durations=ranks.durations,
+                extra_columns={
+                    "dcp_read_items_per_rank_max": max(s["read_items"] for s in stats),
+                    "dcp_read_bytes_fetched_total": total_fetched,
+                    "dcp_read_bytes_fetched_per_rank_max": max(fetched),
+                },
+                verify=_verify,
+                close=_close,
+                bytes_transferred=total_fetched,
+            )
+        except BaseException:
+            _close()
+            raise
