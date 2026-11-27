@@ -4,12 +4,8 @@ from __future__ import annotations
 
 import contextvars
 import os
-import re
 from collections.abc import Mapping
 from enum import StrEnum
-
-# Allowed characters in RFC 9110 product-version tokens: ASCII alphanumeric, '_', '.', '-'
-_TOKEN_SANITIZE_REGEX = re.compile(r"[^a-zA-Z0-9_.-]")
 
 
 class Dimension(StrEnum):
@@ -23,18 +19,6 @@ class Dimension(StrEnum):
 
 GRPC_METADATA_KEY = "x-goog-storage-gcsfs-features"
 HTTP_HEADER_KEY = "X-Goog-Storage-Gcsfs-Features"
-USER_AGENT_DIMENSIONS: frozenset[Dimension] = frozenset(
-    {Dimension.ENVIRONMENT, Dimension.FRAMEWORK}
-)
-
-
-def sanitize_token(token: str | None, max_len: int = 64) -> str | None:
-    """Sanitize a bare token value to comply with RFC 9110 product-version grammar."""
-    if not token or not isinstance(token, str):
-        return None
-
-    clean = _TOKEN_SANITIZE_REGEX.sub("_", token.strip())[:max_len]
-    return clean if clean.strip("_.-") else None
 
 
 # ContextVar for propagating multi-dimensional telemetry tokens across async event loop and thread boundaries

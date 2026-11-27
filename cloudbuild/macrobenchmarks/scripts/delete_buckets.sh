@@ -8,4 +8,6 @@ fi
 source "$(dirname "$0")/lib.sh"
 source "${BUILD_VARS_FILE}"
 delete_bucket_and_caches "$CHECKPOINT_BUCKET"
-delete_bucket_and_caches "$DATASET_BUCKET"
+if [[ -n "${DATASET_BUCKET:-}" ]]; then
+  delete_bucket_and_caches "$DATASET_BUCKET"
+fi
