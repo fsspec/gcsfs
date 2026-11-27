@@ -5,6 +5,9 @@ import os
 from datetime import datetime
 
 from gcsfs.tests.perf.subsystembenchmarks._common import cli, report
+from gcsfs.tests.perf.subsystembenchmarks.dataloading.amplification import (
+    DEFAULT_SCRAPE_WAIT_SECONDS,
+)
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.bucket import BUCKET_TYPES
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.rapid_cache import (
     RAPID_CACHE_BUCKET_TYPES,
@@ -98,7 +101,7 @@ def _build_parser():
     parser.add_argument(
         "--amplification-wait",
         type=int,
-        default=300,
+        default=DEFAULT_SCRAPE_WAIT_SECONDS,
         help="seconds to wait before the read-amplification scrape",
     )
     parser.add_argument(
@@ -110,7 +113,7 @@ def _build_parser():
     parser.add_argument(
         "--require-amplification",
         action="store_true",
-        help="fail when eligible rows still lack amplification metrics",
+        help="fail when no eligible row gets amplification metrics",
     )
     parser.add_argument(
         "--results-dir",
@@ -164,10 +167,16 @@ def enrich_amplification_with_retry(csv_path, project, client, *, retry_wait, sl
     return result
 
 
-def require_complete_amplification(result):
-    if result.missing_buckets:
+def require_any_amplification(result):
+    """Fail only when the scrape enriched nothing.
+
+    Cloud Monitoring occasionally drops a DELTA point, and a dropped point never
+    comes back on retry, so a few missing rows are expected. Those rows stay blank
+    and are logged. No enriched row at all means the scrape itself is broken.
+    """
+    if result.eligible and not result.enriched:
         raise RuntimeError(
-            "read-amplification metrics missing for buckets: "
+            "read-amplification metrics missing for every bucket: "
             + ", ".join(result.missing_buckets)
         )
 
@@ -204,7 +213,7 @@ def _scrape_amplification(csv_path, args):
                 ", ".join(result.missing_buckets),
             )
         if args.require_amplification:
-            require_complete_amplification(result)
+            require_any_amplification(result)
         return result
     except Exception as exc:
         if args.require_amplification:

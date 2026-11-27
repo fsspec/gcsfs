@@ -46,9 +46,21 @@ class EnrichmentResult:
         return not self.missing_buckets
 
 
-def align_interval(start_epoch, end_epoch, period=60):
+# GCS 60s DELTA counters and BidiReadObject stream-close counts can flush 1 to 2
+# minutes after window_end. Each case uses an isolated bucket with no post-window
+# object reads, so padding end_epoch captures trailing flushes cleanly.
+# 120s completes most rows. ray_data on zonal and RCU buckets can still come up
+# short (up to about 1% of bytes and 40% of request_count) because BidiReadObject
+# CANCELLED counts keep landing for up to about 13 minutes after window_end.
+_END_PAD_SECONDS = 120
+# The padded window can end up to 179s after window_end, and these metrics take up
+# to 210s to become visible in Cloud Monitoring.
+DEFAULT_SCRAPE_WAIT_SECONDS = 420
+
+
+def align_interval(start_epoch, end_epoch, period=60, end_pad=_END_PAD_SECONDS):
     start = (int(start_epoch) // period) * period
-    end = ((int(end_epoch) + period - 1) // period) * period
+    end = ((int(end_epoch) + end_pad + period - 1) // period) * period
     return start, end
 
 
@@ -74,13 +86,34 @@ def _list_series(client, project, filter_, start_epoch, end_epoch, period):
     )
 
 
-def _sum_series(client, project, filter_, start_epoch, end_epoch, period):
-    total, found = 0.0, False
+def _minute_series(client, project, filter_, start_epoch, end_epoch, period):
+    """Per-minute totals keyed by point end time, or None without any points."""
+    minutes = {}
     for ts in _list_series(client, project, filter_, start_epoch, end_epoch, period):
         for p in ts.points:
-            total += _point_value(p)
-            found = True
-    return total if found else None
+            minute = int(p.interval.end_time.timestamp())
+            minutes[minute] = minutes.get(minute, 0.0) + _point_value(p)
+    return minutes or None
+
+
+def _sum_series(client, project, filter_, start_epoch, end_epoch, period):
+    minutes = _minute_series(client, project, filter_, start_epoch, end_epoch, period)
+    return sum(minutes.values()) if minutes is not None else None
+
+
+def _minutes_consistent(egress_minutes, req_minutes):
+    """False if a minute with reads in one metric has no point in the other.
+
+    Cloud Monitoring omits a dropped DELTA point entirely, while a quiet minute
+    reports an explicit 0, so a missing minute means a truncated total.
+    """
+    for minutes, other in (
+        (egress_minutes, req_minutes),
+        (req_minutes, egress_minutes),
+    ):
+        if any(value > 0 and minute not in other for minute, value in minutes.items()):
+            return False
+    return True
 
 
 def _read_filter(metric, bucket):
@@ -204,17 +237,32 @@ def enrich_csv(csv_path, project, *, client):
             )
             # Normalize GCS bytes sent by stored bytes times measured rounds.
             rounds = int(float(row.get("measurement_round_count") or 1))
-            egress = bucket_egress_bytes(client, project, bucket, ws, we)
-            reqs = bucket_read_requests(client, project, bucket, ws, we)
-            if (
-                rapid_cache.is_rapid_cache_bucket_type(row.get("bucket_type"))
-                and egress in (None, 0.0)
-                and reqs in (None, 0.0)
-            ):
+            egress_minutes = _minute_series(
+                client, project, _read_filter(_SENT, bucket), ws, we, 60
+            )
+            req_minutes = _minute_series(
+                client, project, _read_filter(_REQ, bucket), ws, we, 60
+            )
+            egress = sum(egress_minutes.values()) if egress_minutes else None
+            reqs = sum(req_minutes.values()) if req_minutes else None
+            is_rapid_cache = rapid_cache.is_rapid_cache_bucket_type(
+                row.get("bucket_type")
+            )
+            if is_rapid_cache and egress in (None, 0.0) and reqs in (None, 0.0):
+                # The cache served every read, so the bucket saw no origin reads.
                 egress = 0.0
                 reqs = 0.0
+                ready = True
+            else:
+                # A read case always reads, so a zero sum means the real point was
+                # dropped and only trailing zero-valued DELTA points were found.
+                ready = (
+                    (egress or 0.0) > 0
+                    and (reqs or 0.0) > 0
+                    and _minutes_consistent(egress_minutes, req_minutes)
+                )
             ideal = physical_size * rounds
-            if egress is not None and reqs is not None and ideal > 0:
+            if ready and ideal > 0:
                 row[f"{prefix}_read_bytes"] = str(int(egress))
                 row[f"{prefix}_read_request_count"] = str(int(reqs))
                 row[f"{prefix}_read_amplification_ratio"] = str(egress / ideal)
@@ -255,7 +303,7 @@ def main(argv=None):
     parser.add_argument(
         "--wait-seconds",
         type=int,
-        default=300,
+        default=DEFAULT_SCRAPE_WAIT_SECONDS,
         help="sleep before scrape so Cloud Monitoring egress lands",
     )
     args = parser.parse_args(argv)

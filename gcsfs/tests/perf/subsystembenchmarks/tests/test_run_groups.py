@@ -70,14 +70,38 @@ def test_parse_args_rejects_negative_amplification_wait(capsys):
     assert "--amplification-wait must be >= 0" in capsys.readouterr().err
 
 
-def test_required_amplification_rejects_missing_buckets():
+def test_required_amplification_rejects_a_scrape_that_enriched_nothing():
     from gcsfs.tests.perf.subsystembenchmarks.dataloading.amplification import (
         EnrichmentResult,
     )
 
-    result = EnrichmentResult(eligible=2, enriched=1, missing_buckets=("bucket-b",))
-    with pytest.raises(RuntimeError, match="bucket-b"):
-        run.require_complete_amplification(result)
+    result = EnrichmentResult(
+        eligible=2, enriched=0, missing_buckets=("bucket-a", "bucket-b")
+    )
+    with pytest.raises(RuntimeError, match="bucket-a, bucket-b"):
+        run.require_any_amplification(result)
+
+
+@pytest.mark.parametrize(
+    "eligible,enriched,missing",
+    [(2, 1, ("bucket-b",)), (2, 2, ()), (0, 0, ())],
+    ids=["one-dropped", "all-enriched", "nothing-eligible"],
+)
+def test_required_amplification_allows_partial_or_no_eligible_rows(
+    eligible, enriched, missing
+):
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading.amplification import (
+        EnrichmentResult,
+    )
+
+    run.require_any_amplification(EnrichmentResult(eligible, enriched, missing))
+
+
+def test_amplification_wait_default_matches_the_scrape_module():
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import amplification
+
+    args = run.parse_args(["--group=dataloading/huggingface_datasets"] + _REQUIRED)
+    assert args.amplification_wait == amplification.DEFAULT_SCRAPE_WAIT_SECONDS
 
 
 def test_amplification_retry_waits_once_for_missing_buckets(monkeypatch):

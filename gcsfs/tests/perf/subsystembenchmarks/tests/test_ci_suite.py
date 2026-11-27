@@ -197,6 +197,14 @@ def test_run_ci_tests_against_upstream_fsspec_and_storage_main():
     assert 'env "${GCSFS_BUILD_ENV[@]}"' in text
 
 
+def test_run_ci_skips_the_monitoring_waits():
+    # The default scrape waits (420s + 60s retry) would nearly fill
+    # CASE_TIMEOUT_SECONDS, so CI cases must keep both waits at 0.
+    text = _run_ci_text()
+    assert '"--amplification-wait=0"' in text
+    assert '"--amplification-retry-wait=0"' in text
+
+
 def test_run_ci_gives_each_case_its_own_port_block():
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing import _dist
 

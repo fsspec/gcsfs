@@ -64,7 +64,7 @@ else:
 
 ### Run Command
 
-Use `--sweep-axes=baseline` and `--amplification-wait=0 --amplification-retry-wait=0` inside the loop to avoid the 300s Cloud Monitoring sleep unless optimizing amplification metrics:
+Use `--sweep-axes=baseline` and `--amplification-wait=0 --amplification-retry-wait=0` inside the loop to avoid the 420s Cloud Monitoring sleep unless optimizing amplification metrics:
 
 ```bash
 python -m gcsfs.tests.perf.subsystembenchmarks.run \
