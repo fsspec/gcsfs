@@ -13,7 +13,7 @@ What is Collected
 
 When an operation is executed, ``gcsfs`` identifies the name of the top-level calling framework, the public method name, and the compute environment, and sends them in the ``x-goog-storage-gcsfs-features`` header as a web-safe base64-encoded ``GcsfsFeatures`` protobuf payload.
 
-``x-goog-storage-gcsfs-features`` is omitted when no recognized attribution dimensions are active.
+``x-goog-storage-gcsfs-features`` is an internal header managed by ``gcsfs``: any caller-supplied per-request value is stripped or replaced, and the header is omitted when no recognized attribution dimensions are active.
 
 Example Header
 ~~~~~~~~~~~~~~
