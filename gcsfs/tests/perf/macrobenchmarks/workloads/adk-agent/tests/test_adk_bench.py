@@ -464,3 +464,103 @@ def test_run_resume_process_reports_nonzero_exit_and_corrupt_json(monkeypatch):
     resume_corrupt = asyncio.run(adk_bench.run_resume_process(args, bench))
     assert any("unreadable result" in f for f in resume_corrupt["failures"])
     bench.close()
+
+
+def test_duplicate_and_gapped_save_versions_fail_validation(in_memory, capsys):
+    class DuplicateUserVersionService(InMemoryArtifactService):
+        async def save_artifact(self, **kwargs):
+            version = await super().save_artifact(**kwargs)
+            if kwargs["filename"].startswith("user:") and version > 0:
+                key = self._artifact_path(
+                    kwargs["app_name"],
+                    kwargs["user_id"],
+                    kwargs["filename"],
+                    kwargs.get("session_id"),
+                )
+                self.artifacts[key] = [self.artifacts[key][-1]]
+                return 0
+            return version
+
+    in_memory["service"] = DuplicateUserVersionService()
+    code, lines = _run("hitl-handoff", capsys)
+    assert code == 1
+    (workload,) = [line for line in lines if line.startswith("Artifact Workload")]
+    assert not workload.endswith("Failures: 0")
+
+    class GappedSessionVersionService(InMemoryArtifactService):
+        async def save_artifact(self, **kwargs):
+            version = await super().save_artifact(**kwargs)
+            if not kwargs["filename"].startswith("user:") and version == 1:
+                return 2
+            return version
+
+    in_memory["service"] = GappedSessionVersionService()
+    code_gap, lines_gap = _run("iterative-workspace", capsys)
+    assert code_gap == 1
+    (workload_gap,) = [
+        line for line in lines_gap if line.startswith("Artifact Workload")
+    ]
+    assert not workload_gap.endswith("Failures: 0")
+
+
+def test_hitl_resume_does_not_serialize_other_sessions_behind_session0_think(
+    tmp_path, monkeypatch
+):
+    events = []
+    service = InMemoryArtifactService()
+    scenario = adk_bench.Scenario(
+        sessions=2, turns=1, think_time_s=0.05, users=1, files_min=1, files_max=1
+    )
+    monkeypatch.setattr(adk_bench, "build_service", lambda base_url: service)
+    monkeypatch.setattr(adk_bench, "KIB", 16)
+    monkeypatch.setattr(adk_bench, "MIB", 16 * 1024)
+
+    upload = adk_bench.Bench(service, scenario, seed="42", uri_scheme="memory")
+    states = [upload.new_session(0, index) for index in range(2)]
+
+    async def seed_uploads():
+        await asyncio.gather(*(upload.hitl_upload_session(s) for s in states))
+
+    asyncio.run(seed_uploads())
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps(adk_bench.state_to_json(upload)))
+    upload.close()
+
+    orig_list_keys = adk_bench.Bench.list_keys
+
+    async def tracked_list_keys(self, state):
+        events.append(("list_keys", state.session_id))
+        return await orig_list_keys(self, state)
+
+    async def tracked_think(self, rng):
+        events.append(("think_start", len(events)))
+        await asyncio.sleep(0.05)
+        events.append(("think_end", len(events)))
+
+    monkeypatch.setattr(adk_bench.Bench, "list_keys", tracked_list_keys)
+    monkeypatch.setattr(adk_bench.Bench, "think", tracked_think)
+
+    resume_args = adk_bench.parse_args(
+        [
+            "--scenario",
+            "hitl-handoff",
+            "--base-url",
+            "memory://bench",
+            "--run-tag",
+            "t1",
+            "--phase",
+            "resume",
+            "--manifest",
+            str(manifest),
+        ]
+    )
+    resume = asyncio.run(adk_bench.run_scenario(resume_args, scenario))
+
+    assert resume["failures"] == []
+    assert resume["cold_first_op_ms"] is not None
+    assert events[0] == ("list_keys", "s0000")
+    s1_list_idx = events.index(("list_keys", "s0001"))
+    first_think_end_idx = next(
+        idx for idx, item in enumerate(events) if item[0] == "think_end"
+    )
+    assert s1_list_idx < first_think_end_idx

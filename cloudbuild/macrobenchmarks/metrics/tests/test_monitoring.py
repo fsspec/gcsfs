@@ -483,3 +483,64 @@ def test_assemble_rows_isolates_du_failure():
         end_epoch=600,
     )
     assert {r.metric for r in rows} == {"cpu"}
+
+
+def test_assemble_rows_uses_bucket_window_for_node_capacity():
+    client = _FakeClient(
+        {
+            "kubernetes.io/container/cpu/core_usage_time": [
+                _series("run-workload-0-a", [2.0])
+            ],
+            "kubernetes.io/node/cpu/allocatable_cores": [_bucket_series([47.8])],
+            "storage.googleapis.com/network/sent_bytes_count": [_bucket_series([10.0])],
+        }
+    )
+
+    monitoring.assemble_rows(
+        client,
+        None,
+        project="p",
+        run_id="run",
+        cluster="my-cluster",
+        checkpoint_bucket="ckpt",
+        dataset_bucket=None,
+        restore_rows=[],
+        start_epoch=130,
+        end_epoch=190,
+        bucket_start_epoch=0,
+        bucket_end_epoch=420,
+    )
+
+    pod_reqs = [
+        r for r in client.requests if 'resource.type = "k8s_container"' in r["filter"]
+    ]
+    node_reqs = [
+        r for r in client.requests if 'resource.type = "k8s_node"' in r["filter"]
+    ]
+    bucket_reqs = [
+        r for r in client.requests if 'resource.type = "gcs_bucket"' in r["filter"]
+    ]
+    assert pod_reqs and all(
+        (
+            r["interval"]["start_time"]["seconds"],
+            r["interval"]["end_time"]["seconds"],
+        )
+        == (130, 190)
+        for r in pod_reqs
+    )
+    assert node_reqs and all(
+        (
+            r["interval"]["start_time"]["seconds"],
+            r["interval"]["end_time"]["seconds"],
+        )
+        == (0, 420)
+        for r in node_reqs
+    )
+    assert bucket_reqs and all(
+        (
+            r["interval"]["start_time"]["seconds"],
+            r["interval"]["end_time"]["seconds"],
+        )
+        == (0, 420)
+        for r in bucket_reqs
+    )

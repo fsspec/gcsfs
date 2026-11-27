@@ -186,8 +186,24 @@ class Scope:
         default_factory=dict
     )
 
-    def record(self, filename: str, version: int, spec: PayloadSpec) -> None:
-        self.versions.setdefault(filename, {})[version] = spec
+    def record(
+        self,
+        filename: str,
+        version: int,
+        spec: PayloadSpec,
+        checks: Optional["Checks"] = None,
+        context: str = "",
+    ) -> None:
+        saved = self.versions.setdefault(filename, {})
+        if checks is not None:
+            expected = 0 if not saved else max(saved) + 1
+            error = None
+            if version in saved:
+                error = f"duplicate version {version} in {sorted(saved)}"
+            elif not filename.startswith("user:") and version != expected:
+                error = f"version {version} != expected {expected}"
+            checks.expect(error, context or f"{filename} save v{version}")
+        saved[version] = spec
 
     def latest_version(self, filename: str) -> Optional[int]:
         saved = self.versions.get(filename)
@@ -338,7 +354,9 @@ class Bench:
             ),
             sent_bytes=part_size(part),
         )
-        state.scope_for(filename).record(filename, version, spec)
+        state.scope_for(filename).record(
+            filename, version, spec, self.checks, f"{state.session_id}/{filename} save"
+        )
         return version
 
     async def load_latest(self, state: SessionState, filename: str):
@@ -487,7 +505,13 @@ class Bench:
                     scope.versions[filename][target], verified=False
                 )
             )
-            scope.record(filename, version, rewound_spec)
+            scope.record(
+                filename,
+                version,
+                rewound_spec,
+                self.checks,
+                f"{state.session_id}/{filename} rewind save",
+            )
 
     # -- scenarios -----------------------------------------------------------
     def spec(
@@ -700,10 +724,13 @@ class Bench:
             ),
         )
 
-    async def hitl_resume_session(self, state: SessionState) -> None:
+    async def hitl_resume_session(
+        self, state: SessionState, *, skip_list_keys: bool = False
+    ) -> None:
         """Phase 2, in a fresh process: list, read the summary, save a decision."""
         rng = self.rng(state.session_id, "resume")
-        await self.list_keys(state)
+        if not skip_list_keys:
+            await self.list_keys(state)
         await self.load_latest(state, "summary.json")
         await self.think(rng)
         await self.save(
@@ -989,10 +1016,14 @@ async def run_scenario(args, scenario: Scenario) -> Dict[str, Any]:
             with open(args.manifest) as fh:
                 state_from_json(bench, json.load(fh))
             sessions = list(bench.sessions)
-            # The first call of a fresh process and service instance is the cold op.
-            await bench.hitl_resume_session(sessions[0])
-            result["cold_first_op_ms"] = bench.first_latency_ms
-            await asyncio.gather(*(bench.hitl_resume_session(s) for s in sessions[1:]))
+            if sessions:
+                # The first call of a fresh process and service instance is the cold op.
+                await bench.list_keys(sessions[0])
+                result["cold_first_op_ms"] = bench.first_latency_ms
+                await asyncio.gather(
+                    bench.hitl_resume_session(sessions[0], skip_list_keys=True),
+                    *(bench.hitl_resume_session(s) for s in sessions[1:]),
+                )
             result["state"] = state_to_json(bench)
             result["checks"], result["failures"] = (
                 bench.checks.count,

@@ -340,8 +340,8 @@ def assemble_rows(
             client,
             project=project,
             cluster=cluster,
-            start_epoch=start_epoch,
-            end_epoch=end_epoch,
+            start_epoch=bucket_start_epoch,
+            end_epoch=bucket_end_epoch,
             period=period,
         )
     if checkpoint_bucket:
