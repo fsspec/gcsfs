@@ -5,7 +5,7 @@ These wrappers capture and propagate call-scoped telemetry tokens across sync/as
 and thread boundaries via Python `contextvars` (`collect_tokens_map(call_scoped_only=True)`).
 Process-wide detectors (`call_scoped = False`) are skipped when capturing per-call `ContextVar`
 snapshots (so background probes are never frozen mid-flight) and are read per request via
-`get_tokens()` (`call_scoped_only=False`) unless a value is already set in the context.
+`encode_features()` (`call_scoped_only=False`) unless a value is already set in the context.
 
 Overview of the 6 Execution Flows
 ---------------------------------
@@ -16,7 +16,7 @@ Overview of the 6 Execution Flows
        -> fsspec.asyn.sync(): copies ContextVar to the loop thread (fsspecIO by default)
    [Event Loop Thread]
      fs._ls() -> _gcs_async_wrapper (sees ContextVar already set -> fast-path O(1))
-       -> _get_headers(): reads active telemetry tokens for outgoing request headers
+       -> _get_headers(): encodes active telemetry dimensions into `X-Goog-Storage-Gcsfs-Features`
 
 2. Synchronous FileSystem Generator (e.g. `for x in fs.walk(...)`):
    [Caller Thread]
@@ -33,7 +33,7 @@ Overview of the 6 Execution Flows
      await fs._cat() -> _gcs_async_wrapper
        -> _telemetry_context(): captures call-scoped tokens ONCE & sets ContextVar
        -> inner `await fs._cat_file()` sees ContextVar already set -> fast-path O(1)
-       -> _get_headers(): reads active telemetry tokens for outgoing request headers
+       -> _get_headers(): encodes active telemetry dimensions into `X-Goog-Storage-Gcsfs-Features`
 
 4. Native Asynchronous FileSystem Generator (e.g. `async for x in fs._walk(...)`):
    [Event Loop Thread]

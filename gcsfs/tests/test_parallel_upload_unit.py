@@ -449,10 +449,7 @@ def _mocked(layout, **fs_kwargs):
         mock.patch.object(
             fs, "_get_grpc_client", autospec=True, return_value=fs._grpc_client
         ),
-        # Already a mock for the whole session (conftest), so it has no spec.
-        mock.patch.object(
-            fs, "_get_bucket_layout", new_callable=mock.AsyncMock
-        ) as lookup,
+        mock.patch.object(fs, "_get_bucket_layout", autospec=True) as lookup,
         mock.patch.object(
             fs,
             "_write_file_cache_update",
@@ -772,6 +769,30 @@ async def test_pipe_file_other_errors_surface_unchanged(
             await m.fs._pipe_file(PATH, BIG)
     assert excinfo.value is error
     assert (m.upload_bytes.await_count, m.lookup.await_count) == (1, expected_lookups)
+    m.cache_update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "lookup_error, still_cached",
+    [
+        (api_exceptions.RetryError("budget exhausted", cause=None), True),
+        (api_exceptions.NotFound("bucket gone"), False),
+    ],
+)
+async def test_pipe_file_rcu_recheck_lookup_error_surfaces_upload_error(
+    lookup_error, still_cached
+):
+    upload_error = api_exceptions.InvalidArgument("rejected")
+    with _mocked(layouts.STANDARD_RCU, rcu_rapid_write=True) as m:
+        m.upload_bytes.side_effect = upload_error
+        m.lookup.side_effect = lookup_error
+        with pytest.raises(api_exceptions.InvalidArgument) as excinfo:
+            await m.fs._pipe_file(PATH, BIG)
+    assert excinfo.value is upload_error
+    assert excinfo.value.__context__ is None
+    assert (BUCKET in m.fs._storage_layout_cache) is still_cached
+    assert m.upload_bytes.await_count == 1
     m.cache_update.assert_not_awaited()
 
 

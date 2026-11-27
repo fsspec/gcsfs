@@ -159,15 +159,6 @@ def _write_file(gcs, path, file_size, chunk_size):
         )
 
 
-def _init_pool_worker():
-    """Initializer for spawned pool workers to bypass _get_bucket_layout calls on emulator."""
-    from gcsfs.tests.utils import _patch_get_bucket_layout_for_emulator
-
-    patch = _patch_get_bucket_layout_for_emulator()
-    if patch:
-        patch.start()
-
-
 def _prepare_files_gcloud(file_paths, file_size):
     """Fast parallel upload using gcloud storage cp if available."""
     if not shutil.which("gcloud"):
@@ -246,7 +237,7 @@ def _prepare_files(gcs, file_paths, file_size=0, bucket_type=None):
 
     args = [(gcs, path, file_size, chunk_size) for path in file_paths]
     ctx = multiprocessing.get_context("forkserver")
-    with ctx.Pool(pool_size, initializer=_init_pool_worker) as pool:
+    with ctx.Pool(pool_size) as pool:
         try:
             pool.starmap(_write_file, args)
         except RuntimeError as e:
