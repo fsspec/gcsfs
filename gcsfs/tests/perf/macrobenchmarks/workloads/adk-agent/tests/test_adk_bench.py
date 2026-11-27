@@ -7,16 +7,19 @@ integration against ``FsspecArtifactService`` on ``gcsfs`` and
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
+import fsspec
 import pytest
 
 pytest.importorskip("google.adk")
 
 HELM_CHART_DIR = Path(__file__).resolve().parents[1] / "helm_chart"
 MICROBENCH_DIR = Path(__file__).resolve().parents[4] / "microbenchmarks"
-METRICS_DIR = Path(__file__).resolve().parents[7] / "cloudbuild" / "macrobenchmarks"
+REPO_ROOT = Path(__file__).resolve().parents[7]
+METRICS_DIR = REPO_ROOT / "cloudbuild" / "macrobenchmarks"
 for _extra_path in (HELM_CHART_DIR, MICROBENCH_DIR, METRICS_DIR):
     if str(_extra_path) not in sys.path:
         sys.path.insert(0, str(_extra_path))
@@ -50,6 +53,7 @@ def in_memory(monkeypatch, tmp_path):
     store = {"service": InMemoryArtifactService()}
     monkeypatch.setattr(adk_bench, "build_service", lambda base_url: store["service"])
     monkeypatch.setattr(adk_bench, "KIB", 16)
+    monkeypatch.setattr(adk_bench, "CONCURRENT_SAVES", 3)
     monkeypatch.setattr(adk_bench, "MIB", 16 * 1024)
     monkeypatch.setattr(
         adk_bench,
@@ -260,12 +264,13 @@ def test_rewind_handles_missing_historical_version_without_aborting():
             state, "doc.txt", adk_bench.PayloadSpec(seed="v1", size=8, kind="text")
         )
         await bench.rewind(state, snapshot)
+        await bench.validate_final_state([state])
 
     asyncio.run(calls())
     bench.close()
 
-    assert bench.checks.failures
-    assert any("load returned None" in failure for failure in bench.checks.failures)
+    assert len(bench.checks.failures) == 1
+    assert "load returned None" in bench.checks.failures[0]
 
 
 def test_corrupted_user_artifact_fails_final_validation(in_memory, capsys):
@@ -304,13 +309,14 @@ def test_driver_runs_against_fsspec_artifact_service_and_gcsfs(
         ),
     )
     monkeypatch.setattr(adk_bench, "KIB", 16)
+    monkeypatch.setattr(adk_bench, "CONCURRENT_SAVES", 3)
     monkeypatch.setattr(
         adk_bench,
         "SCENARIOS",
         {
             **adk_bench.SCENARIOS,
             "iterative-workspace": adk_bench.Scenario(
-                sessions=2, turns=6, think_time_s=0.0
+                sessions=2, turns=10, think_time_s=0.0
             ),
         },
     )
@@ -331,8 +337,130 @@ def test_driver_runs_against_fsspec_artifact_service_and_gcsfs(
     parsed = adk_parser.parse_entries(
         LogEntry(timestamp=0.0, message=line) for line in lines
     )
+    assert any(m.op == "list_versions" for m in parsed.artifact_op_metrics)
+    assert any(m.op == "save" and m.bytes == 0 for m in parsed.artifact_op_metrics)
     probes = {p.op: p.requests_per_op for p in parsed.artifact_probe_metrics}
     assert all(count > 0 for count in probes.values()), probes
     assert probes["list_keys"] == 2.0
     (workload,) = parsed.artifact_workload_metrics
     assert workload.validation_failures == 0
+
+
+def test_hitl_handoff_runs_real_resume_subprocess(
+    docker_gcs, gcs_factory, flat_bucket, monkeypatch
+):
+    emulator_opts = {"token": "anon", "endpoint_url": docker_gcs}
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.setenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "false")
+    monkeypatch.setenv("STORAGE_EMULATOR_HOST", docker_gcs)
+    monkeypatch.setenv("FSSPEC_GCS", json.dumps(emulator_opts))
+    monkeypatch.setenv("FSSPEC_GS", json.dumps(emulator_opts))
+    monkeypatch.setitem(fsspec.config.conf, "gcs", emulator_opts)
+    monkeypatch.setitem(fsspec.config.conf, "gs", emulator_opts)
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(
+            [
+                str(REPO_ROOT),
+                str(HELM_CHART_DIR),
+                str(MICROBENCH_DIR),
+                os.environ.get("PYTHONPATH", ""),
+            ]
+        ),
+    )
+    args = adk_bench.parse_args(
+        [
+            "--scenario",
+            "hitl-handoff",
+            "--base-url",
+            f"gs://{flat_bucket}/adk",
+            "--run-tag",
+            "subproc",
+        ]
+    )
+    base_url = f"{args.base_url.rstrip('/')}/{args.scenario}-{args.run_tag}"
+    scenario = adk_bench.Scenario(
+        sessions=1, turns=1, think_time_s=0.0, users=1, files_min=1, files_max=1
+    )
+    bench = adk_bench.Bench(
+        FsspecArtifactService(base_url, fs=gcs_factory(use_listings_cache=False)),
+        scenario,
+        seed=args.seed,
+        uri_scheme="gs",
+    )
+    state = bench.new_session(0, 0)
+
+    async def handoff():
+        await bench.save(
+            state,
+            "user:profile.json",
+            adk_bench.PayloadSpec(
+                seed="profile",
+                size=32,
+                kind="inline",
+                mime_type="application/json",
+            ),
+        )
+        await bench.save(
+            state,
+            "summary.json",
+            adk_bench.PayloadSpec(
+                seed="summary",
+                size=32,
+                kind="inline",
+                mime_type="application/json",
+            ),
+        )
+        resume = await adk_bench.run_resume_process(args, bench)
+        assert resume["failures"] == [], resume
+        adk_bench.state_from_json(bench, resume["state"])
+        await bench.validate_final_state(bench.sessions)
+        return resume
+
+    try:
+        resume = asyncio.run(handoff())
+    finally:
+        bench.close()
+
+    assert resume["cold_first_op_ms"] is not None
+    assert resume["ops"] == 3
+    assert bench.checks.failures == []
+
+
+def test_run_resume_process_reports_nonzero_exit_and_corrupt_json(monkeypatch):
+    bench = adk_bench.Bench(
+        InMemoryArtifactService(),
+        adk_bench.SCENARIOS["hitl-handoff"],
+        seed="42",
+        uri_scheme="memory",
+    )
+    args = adk_bench.parse_args(
+        ["--scenario", "hitl-handoff", "--base-url", "memory://b", "--run-tag", "t"]
+    )
+
+    class StubProc:
+        def __init__(self, returncode):
+            self.returncode = returncode
+
+        async def wait(self):
+            return self.returncode
+
+    async def nonzero_with_result(*command):
+        result_file = command[command.index("--result-file") + 1]
+        Path(result_file).write_text(json.dumps({"failures": []}))
+        return StubProc(2)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", nonzero_with_result)
+    resume = asyncio.run(adk_bench.run_resume_process(args, bench))
+    assert any("exited 2" in f for f in resume["failures"])
+    assert any("omitted session state" in f for f in resume["failures"])
+
+    async def corrupt_result(*command):
+        result_file = command[command.index("--result-file") + 1]
+        Path(result_file).write_text("{truncated")
+        return StubProc(0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", corrupt_result)
+    resume_corrupt = asyncio.run(adk_bench.run_resume_process(args, bench))
+    assert any("unreadable result" in f for f in resume_corrupt["failures"])
+    bench.close()

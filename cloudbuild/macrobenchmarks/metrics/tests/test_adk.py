@@ -302,3 +302,31 @@ def test_calculate_rejects_duplicated_workload_lines(tmp_path):
 
     with pytest.raises(SystemExit):
         _run_calculate(tmp_path, raw_dir)
+
+
+def test_calculate_writes_na_for_missing_cold_op_and_rejects_unknown_ops_or_null_failures(
+    tmp_path,
+):
+    entries = _entries()
+    entries[-1] = _workload(cold="N/A", ops=10, failures=0)
+    raw_dir = _write_raw(tmp_path, entries)
+    _, (row,) = _run_calculate(tmp_path, raw_dir)
+    assert row["artifact_cold_first_op_ms"] == "N/A"
+
+    with pytest.raises(SystemExit):
+        calculate.validate_required_artifact_metrics(
+            op_rows=[
+                vars(m) for m in adk.parse_entries(_entries()).artifact_op_metrics
+            ],
+            probe_rows=[
+                vars(m) for m in adk.parse_entries(_entries()).artifact_probe_metrics
+            ],
+            workload_rows=[{"validation_failures": None, "ops": 10}],
+        )
+
+    bad_entries = [_op("main:1", "renamed_save", 10.0, size=2000)]
+    bad_entries += [_probe(op, requests) for op, requests in PROBES.items()]
+    bad_entries.append(_workload(ops=1))
+    bad_dir = _write_raw(tmp_path / "bad", bad_entries)
+    with pytest.raises(SystemExit):
+        _run_calculate(tmp_path / "bad", bad_dir)

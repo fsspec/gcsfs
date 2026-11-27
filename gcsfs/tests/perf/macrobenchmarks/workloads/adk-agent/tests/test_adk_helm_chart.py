@@ -26,7 +26,7 @@ def _render(*sets: str) -> list:
         str(HELM_CHART_DIR / "values_base.yaml"),
     ]
     for value in sets:
-        command += ["--set-string", value]
+        command += ["--set-literal", value]
     rendered = subprocess.run(
         command, check=True, capture_output=True, text=True
     ).stdout
@@ -46,7 +46,7 @@ def test_launcher_is_valid_bash():
 def test_chart_ships_the_driver_and_passes_the_scenario():
     resources = _render(
         "workload.scenario=hitl-handoff",
-        "workload.requirements=google-adk[fsspec]==9.9.9 gcsfs==9.9.9",
+        "workload.requirements=google-adk[fsspec,eval]==9.9.9 gcsfs>=2026.9.0,<2027",
         "gcsfs.ckptWritePath=gs://ckpt-bucket/checkpoints",
     )
 
@@ -73,7 +73,7 @@ def test_chart_ships_the_driver_and_passes_the_scenario():
     (container,) = job["template"]["spec"]["containers"]
     env = {item["name"]: item.get("value") for item in container["env"]}
     assert env["SCENARIO"] == "hitl-handoff"
-    assert env["REQUIREMENTS"] == "google-adk[fsspec]==9.9.9 gcsfs==9.9.9"
+    assert env["REQUIREMENTS"] == "google-adk[fsspec,eval]==9.9.9 gcsfs>=2026.9.0,<2027"
     assert "ADK_REQUIREMENTS" not in env
     assert env["CKPT_WRITE_PATH"] == "gs://ckpt-bucket/checkpoints"
     assert container["image"] == "python:3.12"

@@ -96,11 +96,6 @@ jobs:
             --log-date-format="%H:%M:%S" \
             -n auto \
             gcsfs/
-      - name: Run ADK Macrobenchmark Driver Unit Tests
-        run: |
-          export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-service-account-credentials.json
-          pip install "google-adk[fsspec]==2.15.1"
-          pytest -vv gcsfs/tests/perf/macrobenchmarks/workloads/adk-agent/tests --run-benchmarks-infra
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
@@ -140,6 +135,41 @@ jobs:
             -r gcsfs/tests/perf/subsystembenchmarks/checkpointing/pytorch/requirements.txt
       - name: Run subsystem benchmark unit tests
         run: pytest gcsfs/tests/perf/subsystembenchmarks --run-benchmarks-infra
+
+  adk-macrobenchmark-unit-tests:
+    name: ADK macrobenchmark unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      STORAGE_EMULATOR_HOST: http://localhost:4443
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            gcsfs/tests/perf/macrobenchmarks/workloads/adk-agent/helm_chart/requirements.txt
+            cloudbuild/macrobenchmarks/metrics/requirements.txt
+      - name: Install ADK macrobenchmark dependencies
+        run: |
+          python -m pip install \
+            -r gcsfs/tests/perf/macrobenchmarks/workloads/adk-agent/helm_chart/requirements.txt \
+            -r cloudbuild/macrobenchmarks/metrics/requirements.txt
+          python -m pip install -e ".[dev]"
+      - name: Start GCS Emulator
+        run: |
+          docker run -d -p 4443:4443 --name gcsfs_test fsouza/fake-gcs-server:latest -scheme http -public-host 0.0.0.0:4443 -external-url http://localhost:4443 -backend memory
+          timeout 30s bash -c 'until curl -s http://localhost:4443/storage/v1/b; do sleep 1; done'
+      - name: Run ADK macrobenchmark driver unit tests
+        run: |
+          export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcsfs/tests/fake-service-account-credentials.json
+          pytest -vv gcsfs/tests/perf/macrobenchmarks/workloads/adk-agent/tests/test_adk_bench.py --run-benchmarks-infra
 
   lint:
     name: lint

@@ -12,14 +12,15 @@ export ADK_ENABLE_FSSPEC_ARTIFACT_SERVICE=1
 
 pip3 install --no-cache-dir -r /workload/configs/requirements.txt
 if [[ -n "${REQUIREMENTS:-}" ]]; then
-  # Word splitting is intentional: REQUIREMENTS holds whitespace-separated pip
-  # specs (the gcsfs build under test and any custom google-adk build).
-  # shellcheck disable=SC2086
-  pip3 install --no-cache-dir $REQUIREMENTS
-  # Reinstall only the explicitly listed packages so one override's dependency
-  # pass cannot replace another's.
-  # shellcheck disable=SC2086
-  pip3 install --no-cache-dir --no-deps --force-reinstall $REQUIREMENTS
+  # REQUIREMENTS holds whitespace-separated pip specs (the gcsfs build under
+  # test and any custom google-adk build). Split into an array without globbing.
+  read -r -a REQUIREMENT_SPECS <<< "${REQUIREMENTS}"
+  if (( ${#REQUIREMENT_SPECS[@]} > 0 )); then
+    pip3 install --no-cache-dir -- "${REQUIREMENT_SPECS[@]}"
+    # Reinstall only the explicitly listed packages so one override's dependency
+    # pass cannot replace another's.
+    pip3 install --no-cache-dir --no-deps --force-reinstall -- "${REQUIREMENT_SPECS[@]}"
+  fi
 fi
 
 python3 - <<'PY'

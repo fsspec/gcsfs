@@ -480,8 +480,12 @@ class Bench:
                 ),
                 sent_bytes=part_size(save_part),
             )
-            rewound_spec = dataclasses.replace(
-                scope.versions[filename][target], verified=False
+            rewound_spec = (
+                PayloadSpec(seed="", size=0, kind="tombstone")
+                if part is None
+                else dataclasses.replace(
+                    scope.versions[filename][target], verified=False
+                )
             )
             scope.record(filename, version, rewound_spec)
 
@@ -1004,6 +1008,7 @@ async def run_scenario(args, scenario: Scenario) -> Dict[str, Any]:
             "%Y-%m-%dT%H:%M:%SZ"
         )
         start = time.perf_counter()
+        validate_sessions = True
         if args.scenario == "iterative-workspace":
             states = [bench.new_session(i, i) for i in range(scenario.sessions)]
             await asyncio.gather(
@@ -1022,6 +1027,8 @@ async def run_scenario(args, scenario: Scenario) -> Dict[str, Any]:
             resume = await run_resume_process(args, bench)
             if "state" in resume:
                 state_from_json(bench, resume["state"])
+            else:
+                validate_sessions = False
             result["cold_first_op_ms"] = resume.get("cold_first_op_ms")
             result["resume_ops"] = resume.get("ops", 0)
             bench.untimed_read_bytes += resume.get("untimed_read_bytes", 0)
@@ -1031,7 +1038,8 @@ async def run_scenario(args, scenario: Scenario) -> Dict[str, Any]:
         result["window_end"] = datetime.datetime.now(datetime.timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
-        await bench.validate_final_state(bench.sessions)
+        if validate_sessions:
+            await bench.validate_final_state(bench.sessions)
         await bench.validate_metadata_and_concurrency()
         result["checks"], result["failures"] = (
             bench.checks.count,
@@ -1075,8 +1083,18 @@ async def run_resume_process(args, bench: Bench) -> Dict[str, Any]:
             return {
                 "failures": [f"resume process exited {returncode} without a result"]
             }
-        with open(output) as fh:
-            return json.load(fh)
+        try:
+            with open(output) as fh:
+                resume = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"failures": [f"resume process wrote unreadable result ({exc})"]}
+        failures = list(resume.get("failures", []))
+        if returncode != 0:
+            failures.append(f"resume process exited {returncode}")
+        if "state" not in resume:
+            failures.append("resume process omitted session state")
+        resume["failures"] = failures
+        return resume
 
 
 def parse_args(argv=None):
@@ -1096,8 +1114,10 @@ def main(argv=None) -> int:
     scenario = SCENARIOS[args.scenario]
     result = asyncio.run(run_scenario(args, scenario))
     if args.phase == "resume":
-        with open(args.result_file, "w") as fh:
+        tmp_file = f"{args.result_file}.tmp"
+        with open(tmp_file, "w") as fh:
             json.dump(result, fh)
+        os.replace(tmp_file, args.result_file)
         return 0
     sessions = scenario.sessions * max(scenario.users, 1)
     cold = result["cold_first_op_ms"]

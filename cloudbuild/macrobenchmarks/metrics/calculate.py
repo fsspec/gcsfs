@@ -956,13 +956,21 @@ def validate_required_artifact_metrics(
             f"found {len(workload_rows)}"
         )
     workload = workload_rows[0]
-    if workload.get("validation_failures"):
+    if workload.get("validation_failures") != 0:
         _fail_validation(
-            f"artifact run reported {workload['validation_failures']} "
+            f"artifact run reported {workload.get('validation_failures')} "
             "validation failures"
         )
     if not op_rows:
         _fail_validation("artifact op rows are missing")
+    unknown_ops = sorted(
+        {str(row.get("op")) for row in op_rows if row.get("op") not in ARTIFACT_OPS}
+    )
+    if unknown_ops:
+        _fail_validation(
+            f"artifact op rows contain unknown ops {unknown_ops}, "
+            f"expected a subset of {ARTIFACT_OPS}"
+        )
     # Cloud Logging does not deliver lines in order, so the Workload line can
     # arrive before the last op lines. Fail (and let scrape-metrics retry)
     # until every op sequence ID the driver printed has been scraped.
@@ -1035,7 +1043,7 @@ def calc_artifact_metrics(op_rows: list, probe_rows: list, workload_rows: list) 
                 "artifact_untimed_read_bytes": workload.get("untimed_read_bytes"),
             }
         )
-    return out
+    return {k: v for k, v in out.items() if v is not None}
 
 
 def build_artifact_summary_row(
