@@ -1,4 +1,5 @@
 import csv
+import datetime
 import logging
 import types
 
@@ -7,9 +8,16 @@ import pytest
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import amplification
 
 
-def _point(value):
+def _point(value, end=1020, int64=False):
+    """A Monitoring point. Real GCS read metrics are INT64, so int64=True is closest."""
     return types.SimpleNamespace(
-        value=types.SimpleNamespace(double_value=value, int64_value=0)
+        value=types.SimpleNamespace(
+            double_value=0.0 if int64 else value,
+            int64_value=int(value) if int64 else 0,
+        ),
+        interval=types.SimpleNamespace(
+            end_time=datetime.datetime.fromtimestamp(end, tz=datetime.timezone.utc)
+        ),
     )
 
 
@@ -74,6 +82,32 @@ def test_bucket_egress_bytes_filters_to_object_reads():
     filter_ = client.requests[0]["filter"]
     assert 'metric.labels.method = "ReadObject"' in filter_
     assert 'metric.labels.method = "BidiReadObject"' in filter_
+
+
+def test_align_interval_pads_end_window_for_late_delta_flushes():
+    assert amplification.align_interval(1010, 1054, period=60) == (960, 1200)
+    assert amplification.align_interval(1010, 1054, period=60, end_pad=0) == (960, 1080)
+
+
+def test_align_interval_rounds_a_minute_boundary_end_strictly_up():
+    # window_end is truncated to whole seconds, so 1020 still read during
+    # (1020, 1080] and needs two trailing minutes after that one.
+    assert amplification.align_interval(1000, 1020, period=60) == (960, 1200)
+
+
+def test_bucket_queries_include_padded_trailing_minutes():
+    client = _RecordingClient()
+
+    amplification.bucket_egress_bytes(client, "proj", "bucket", 1010, 1054)
+    amplification.bucket_read_requests(client, "proj", "bucket", 1010, 1054)
+    amplification.bucket_cache_hit_ratio(client, "proj", "bucket", 1010, 1054)
+
+    assert len(client.requests) == 3
+    for req in client.requests:
+        assert req["interval"] == {
+            "start_time": {"seconds": 960},
+            "end_time": {"seconds": 1200},
+        }
 
 
 def test_enrich_csv_does_not_count_a_row_with_no_monitoring_data(tmp_path):
@@ -152,6 +186,7 @@ def test_enrich_csv_logs_instead_of_printing_on_row_failure(tmp_path, caplog):
         )
     assert result.enriched == 0
     assert result.missing_buckets == ("b1",)
+    assert result.failed_buckets == ("b1",)
     assert any("amplification scrape failed" in rec.message for rec in caplog.records)
 
 
@@ -247,6 +282,7 @@ def test_enrich_csv_checkpoint_read_and_write(tmp_path, missing):
         ([], []),
         ([_TimeSeries([_point(0.0)])], []),
         ([], [_TimeSeries([_point(0.0)])]),
+        ([_TimeSeries([_point(0.0)])], [_TimeSeries([_point(0.0)])]),
     ],
 )
 def test_enrich_csv_rapid_cache_treats_empty_or_zero_series_as_zero_origin_egress(
@@ -332,6 +368,174 @@ def test_enrich_csv_rapid_cache_asymmetric_none_triggers_retry_without_torn_row(
     assert row["dataset_read_bytes"] == "1500"
     assert row["dataset_read_request_count"] == "10"
     assert float(row["dataset_read_amplification_ratio"]) == 1.0
+
+
+@pytest.mark.parametrize("bucket_type", ["zonal", "regional", "standard_rcu_cold"])
+@pytest.mark.parametrize(
+    "egress_value,req_value",
+    [(0.0, 1447.0), (1000.0, 0.0), (0.0, 0.0)],
+    ids=["zero-bytes", "zero-requests", "both-zero"],
+)
+def test_enrich_csv_keeps_zero_sums_missing_outside_rapid_cache(
+    tmp_path, bucket_type, egress_value, req_value
+):
+    """Trailing zero-valued DELTA points after a dropped point must not pass as data."""
+    csv_path = tmp_path / "results.csv"
+    _write_csv(
+        csv_path,
+        [
+            {
+                "benchmark_case_id": f"case-{bucket_type}",
+                "gcs_bucket_name": f"b-{bucket_type}",
+                "bucket_type": bucket_type,
+                "measurement_window_start_unix_seconds": "1000",
+                "measurement_window_end_unix_seconds": "1060",
+                "dataset_size_bytes": "500",
+                "measurement_round_count": "1",
+            }
+        ],
+        _FIELDS + ["bucket_type"],
+    )
+    client = _SequencedClient(
+        [[_TimeSeries([_point(egress_value)])], [_TimeSeries([_point(req_value)])]]
+    )
+
+    result = amplification.enrich_csv(str(csv_path), "proj", client=client)
+
+    assert result.enriched == 0
+    assert result.missing_buckets == (f"b-{bucket_type}",)
+    with open(csv_path, newline="") as f:
+        row = next(csv.DictReader(f))
+    assert row["dataset_read_bytes"] == ""
+    assert row["dataset_read_request_count"] == ""
+    assert row["dataset_read_amplification_ratio"] == ""
+
+
+def _dataset_row(bucket_type, bucket="b1"):
+    return {
+        "benchmark_case_id": f"case-{bucket_type}",
+        "gcs_bucket_name": bucket,
+        "bucket_type": bucket_type,
+        "measurement_window_start_unix_seconds": "1000",
+        "measurement_window_end_unix_seconds": "1060",
+        "dataset_size_bytes": "500",
+        "measurement_round_count": "1",
+    }
+
+
+def _read_row(csv_path):
+    with open(csv_path, newline="") as f:
+        return next(csv.DictReader(f))
+
+
+@pytest.mark.parametrize(
+    "egress_value,req_value",
+    [(0.0, 10.0), (1500.0, 0.0)],
+    ids=["zero-bytes", "zero-requests"],
+)
+def test_enrich_csv_rapid_cache_keeps_one_sided_zero_missing(
+    tmp_path, egress_value, req_value
+):
+    csv_path = tmp_path / "results.csv"
+    _write_csv(csv_path, [_dataset_row("rapid_cache_cold")], _FIELDS + ["bucket_type"])
+    # Egress, requests, then the (empty) Rapid Cache hit-ratio query.
+    client = _SequencedClient(
+        [
+            [_TimeSeries([_point(egress_value)])],
+            [_TimeSeries([_point(req_value)])],
+            [],
+        ]
+    )
+
+    result = amplification.enrich_csv(str(csv_path), "proj", client=client)
+
+    assert result.missing_buckets == ("b1",)
+    assert _read_row(csv_path)["dataset_read_bytes"] == ""
+
+
+def test_enrich_csv_keeps_a_row_with_a_dropped_minute_missing(tmp_path):
+    """Requests at 1020 with no egress point there means the egress point was dropped."""
+    csv_path = tmp_path / "results.csv"
+    _write_csv(csv_path, [_dataset_row("zonal")], _FIELDS + ["bucket_type"])
+    egress = [_TimeSeries([_point(200.0, end=1080, int64=True)])]
+    reqs = [
+        _TimeSeries(
+            [_point(7.0, end=1020, int64=True), _point(3.0, end=1080, int64=True)]
+        )
+    ]
+
+    result = amplification.enrich_csv(
+        str(csv_path), "proj", client=_SequencedClient([egress, reqs])
+    )
+
+    assert result.missing_buckets == ("b1",)
+    # A dropped point is missing data, not a scrape error.
+    assert result.failed_buckets == ()
+    row = _read_row(csv_path)
+    assert row["dataset_read_bytes"] == ""
+    assert row["dataset_read_request_count"] == ""
+
+
+def _minute_points(values):
+    return [_TimeSeries([_point(value, end=end, int64=True) for end, value in values])]
+
+
+def test_enrich_csv_keeps_a_minute_dropped_from_both_metrics_missing(tmp_path):
+    """Reads at 1020 and 1140 with no point at all for 1080 means 1080 was dropped."""
+    csv_path = tmp_path / "results.csv"
+    _write_csv(csv_path, [_dataset_row("zonal")], _FIELDS + ["bucket_type"])
+    egress = _minute_points([(1020, 500.0), (1140, 500.0)])
+    reqs = _minute_points([(1020, 5.0), (1140, 5.0)])
+
+    result = amplification.enrich_csv(
+        str(csv_path), "proj", client=_SequencedClient([egress, reqs])
+    )
+
+    assert result.missing_buckets == ("b1",)
+    assert _read_row(csv_path)["dataset_read_bytes"] == ""
+
+
+def test_enrich_csv_accepts_an_idle_pause_with_explicit_zeros(tmp_path):
+    """An idle minute reports explicit 0s, so reads resuming after it are complete."""
+    csv_path = tmp_path / "results.csv"
+    _write_csv(csv_path, [_dataset_row("zonal")], _FIELDS + ["bucket_type"])
+    egress = _minute_points([(1020, 500.0), (1080, 0.0), (1140, 500.0)])
+    reqs = _minute_points([(1020, 5.0), (1080, 0.0), (1140, 5.0)])
+
+    result = amplification.enrich_csv(
+        str(csv_path), "proj", client=_SequencedClient([egress, reqs])
+    )
+
+    assert result.missing_buckets == ()
+    row = _read_row(csv_path)
+    assert row["dataset_read_bytes"] == "1000"
+    assert row["dataset_read_request_count"] == "10"
+
+
+def test_enrich_csv_accepts_explicit_zero_minutes(tmp_path):
+    """A quiet minute reports an explicit 0, unlike a dropped one."""
+    csv_path = tmp_path / "results.csv"
+    _write_csv(csv_path, [_dataset_row("zonal")], _FIELDS + ["bucket_type"])
+    egress = [
+        _TimeSeries(
+            [_point(800.0, end=1020, int64=True), _point(200.0, end=1080, int64=True)]
+        )
+    ]
+    reqs = [
+        _TimeSeries(
+            [_point(9.0, end=1020, int64=True), _point(0.0, end=1080, int64=True)]
+        )
+    ]
+
+    result = amplification.enrich_csv(
+        str(csv_path), "proj", client=_SequencedClient([egress, reqs])
+    )
+
+    assert result.missing_buckets == ()
+    row = _read_row(csv_path)
+    assert row["dataset_read_bytes"] == "1000"
+    assert row["dataset_read_request_count"] == "9"
+    assert float(row["dataset_read_amplification_ratio"]) == 2.0
 
 
 class _CacheSeries(_TimeSeries):

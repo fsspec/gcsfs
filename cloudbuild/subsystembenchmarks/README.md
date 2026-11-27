@@ -194,8 +194,10 @@ records the failure and still attempts the upload before propagating the
 original status. Cleanup steps run afterward. Upload or infrastructure failures
 are also recorded and reported by `check-failure`.
 
-The Cloud Build execution path passes `--require-amplification`, so eligible
-rows that still lack GCS read metrics after the wait and retry fail the run. A
+The Cloud Build execution path passes `--require-amplification`, so the run
+fails when the GCS read-metric scrape errors for any bucket, or when no eligible
+row gets metrics after the wait and retry. Rows whose Cloud Monitoring points
+were dropped stay blank and are logged without failing the run. A
 nonzero build therefore indicates execution, correctness, infrastructure,
 upload, or required-metric failure. A historical performance change by itself
 never fails the build.
