@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import heapq
 import logging
+import mimetypes
 import os
 import uuid
 import weakref
@@ -313,9 +314,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             Has no effect on Zonal buckets, which always use the appendable
             writer.
         parallel_upload : bool, default False
-            Upload large ``pipe_file`` writes with parallel uploads. ``False``
-            keeps every write on its current upload path. Can also be set with
-            ``FSSPEC_GCS_PARALLEL_UPLOAD=true`` or
+            Upload large ``pipe_file`` and ``put_file`` writes with parallel
+            uploads. ``False`` keeps every write on its current upload path. Can
+            also be set with ``FSSPEC_GCS_PARALLEL_UPLOAD=true`` or
             ``fsspec.config.conf.setdefault("gcs", {})["parallel_upload"] = True``.
         parallel_upload_threshold : int, default 128 MiB
             Smallest write, in bytes, that uses a parallel upload.
@@ -2679,6 +2680,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         place, unfinalized.
         For other buckets, it delegates to the parent class's implementation.
 
+        On a filesystem created with ``parallel_upload=True``, a write of at
+        least its ``parallel_upload_threshold`` bytes that ends finalized and
+        has no precondition uses a parallel upload.
+
         Parameters
         ----------
         lpath: str
@@ -2686,17 +2691,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         rpath: str
             Path on GCS to upload the file to.
         metadata: dict, optional
-            Ignored by gRPC uploads.
+            Ignored by appendable uploads.
         consistency: str, optional
-            Ignored by gRPC uploads.
+            Ignored by appendable and parallel uploads.
         content_type: str, optional
-            Ignored by gRPC uploads, except for the default.
+            Ignored by appendable uploads, except for the default.
         chunksize: int, optional
             The size of chunks to upload data in.
         callback: fsspec.callbacks.Callback, optional
             Callback to monitor the upload progress.
         fixed_key_metadata: dict, optional
-            Ignored by gRPC uploads.
+            Ignored by appendable uploads.
         mode: str, optional
             The write mode, either 'overwrite' or 'create'.
         if_generation_match: int, optional
@@ -2710,6 +2715,58 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         bucket, key, generation = self.split_path(rpath)
         layout = await self._lookup_bucket_layout(bucket)
+        if self.parallel_upload:
+            segment_size, max_workers = self._parallel_upload_call_options(kwargs)
+        if (
+            self.parallel_upload
+            and key
+            and not generation
+            and self._may_use_parallel_upload(
+                layout,
+                if_generation_match=_resolve_generation_match(
+                    mode, if_generation_match
+                ),
+                finalize_on_close=kwargs.get("finalize_on_close"),
+                metadata=metadata,
+            )
+            and os.path.isfile(lpath)
+            and (size := os.path.getsize(lpath)) >= self.parallel_upload_threshold
+        ):
+            if content_type is None:
+                content_type = (
+                    mimetypes.guess_type(lpath)[0] or "application/octet-stream"
+                )
+            callback = callback or NoOpCallback()
+            size_reported = False
+
+            async def upload_file(*args, **upload_kwargs):
+                nonlocal size_reported
+                # Called once the arguments have been validated.
+                if not size_reported:
+                    callback.set_size(size)
+                    size_reported = True
+                return await parallel_upload.parallel_upload_file(
+                    *args, **upload_kwargs
+                )
+
+            await self._perform_parallel_upload(
+                upload_file,
+                lpath,
+                bucket,
+                key,
+                rpath,
+                layout,
+                content_type=content_type,
+                metadata=metadata,
+                fixed_key_metadata=fixed_key_metadata,
+                consistency=consistency,
+                kms_key_name=kms_key_name,
+                segment_size=segment_size,
+                max_workers=max_workers,
+            )
+            callback.absolute_update(size)
+            return
+
         if self._uses_grpc_write_path(layout):
             if os.path.isdir(lpath):
                 return
