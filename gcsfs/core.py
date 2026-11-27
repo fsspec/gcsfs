@@ -54,7 +54,12 @@ from .telemetry.wrapper import (
     wrap_file_methods,
 )
 from .utils import as_byte_buffer, is_empty_range
-from .zb_hns_utils import DEFAULT_CONCURRENCY, MAX_PREFETCH_SIZE, _on_loop_thread
+from .zb_hns_utils import (
+    DEFAULT_CONCURRENCY,
+    MAX_PREFETCH_SIZE,
+    _defer_task,
+    _on_loop_thread,
+)
 
 logger = logging.getLogger("gcsfs")
 
@@ -611,7 +616,37 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             current_loop = asyncio.get_running_loop()
         except RuntimeError:
             current_loop = None
-        if loop:
+        # The connector's futures belong to the session loop, which can be
+        # supplied by the caller's connector. ClientSession.loop is deprecated.
+        owner_loop = getattr(session, "_loop", None)
+        if owner_loop is not None:
+            if owner_loop.is_running():
+
+                def schedule_close():
+                    if not session.closed:
+                        _defer_task(
+                            owner_loop,
+                            session.close(),
+                            description="GCS HTTP session close",
+                        )
+
+                try:
+                    if current_loop is owner_loop:
+                        schedule_close()
+                    elif asynchronous or loop is not None:
+                        owner_loop.call_soon_threadsafe(schedule_close)
+                    else:
+                        asyn.sync(owner_loop, session.close, timeout=0.1)
+                except fsspec.FSTimeoutError:
+                    force_close = True
+                except RuntimeError:
+                    # The loop can close after the is_running() check.
+                    if not owner_loop.is_closed():
+                        raise
+                    force_close = True
+            else:
+                force_close = True
+        elif loop:
             # an explicit loop was set
             if loop.is_running():
                 loop.create_task(session.close())
