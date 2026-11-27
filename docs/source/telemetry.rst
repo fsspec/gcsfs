@@ -37,7 +37,7 @@ If no recognized framework is present on the call stack (e.g. pure Python script
 Method Names
 ~~~~~~~~~~~~
 
-``gcsfs`` also records the top-level public filesystem or file operation name (such as ``ls``, ``cat_file``, ``find``, ``open``, or subsequent file reads and writes), never file paths, arguments, or payloads.
+``gcsfs`` also records the top-level public filesystem or file operation name (such as ``ls``, ``cat_file``, ``find``, ``open``, or subsequent file reads and writes), never file paths, argument values, or payloads. For methods that accept ``recursive``, ``detail``, ``withdirs``, ``prefix``, or ``cache_options``, ``gcsfs`` also records only boolean flag presence for the outermost call (ignoring default ``"adaptive"`` cache settings on ``GCSFile`` and scoping explicit ``open()`` ``cache_options`` to ``open``).
 
 Compute Environments
 ~~~~~~~~~~~~~~~~~~~~
@@ -98,11 +98,11 @@ The header is omitted when no recognized attribution dimensions are active.
 Privacy & Security Guarantees
 -----------------------------
 
-Telemetry collection is strictly limited to open-source library names, public method names, and environment categories (``gce``, ``gke``, ``oth``), and respects user privacy and security:
+Telemetry collection is strictly limited to open-source library names, public method names, boolean presence of five allowlisted method flags (``recursive``, ``detail``, ``withdirs``, ``prefix``, ``cache_options``), and environment categories (``gce``, ``gke``, ``oth``), and respects user privacy and security:
 
 - **No User Data or Payloads:** Object contents read or written are never inspected or recorded.
 - **No File Paths or Bucket Names:** Bucket names, object keys, folder hierarchies, and URIs are never collected.
-- **No User Code or Logic:** Variable names, function arguments, and script logic are never accessed.
+- **No Argument Values or User Logic:** Variable names, script logic, and raw argument values (such as prefix strings, paths, or ``cache_options`` contents) are never collected; parameter tracking checks only boolean truthiness on the five allowlisted flags.
 - **No Credentials or Identifiers:** API keys, service account credentials, IAM identities, project IDs, and IP addresses are never collected.
 - **Header Injection Safety:** Only predefined protobuf enum values and boolean flags are ever serialized into the URL-safe base64 ``GcsfsFeatures`` header; arbitrary or unrecognized strings are ignored and never emitted on the wire.
 - **No Cluster or Instance Names:** The metadata query checks only whether ``cluster-name`` is set and never sends cluster names, instance names, or zones to GCS.
@@ -145,6 +145,6 @@ The setting is read on every call, so it can be set (or changed) at any time bef
 
 When disabled:
 
-- All stack frame inspections and detector evaluations are skipped immediately.
+- All stack frame inspections, parameter flag checks, and detector evaluations are skipped immediately.
 - Outgoing HTTP and gRPC requests omit ``x-goog-storage-gcsfs-features``.
 - ``gcsfs`` sends no requests to the metadata server.

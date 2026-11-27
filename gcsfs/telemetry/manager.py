@@ -73,10 +73,9 @@ class UsageMetricsTracker:
             return {}
 
         tokens = get_telemetry_context()
-        if method is not None and (
-            dimensions is None or Dimension.METHOD in dimensions
-        ):
-            tokens.setdefault(Dimension.METHOD.value, method)
+        if method is not None and Dimension.METHOD.value not in tokens:
+            tokens[Dimension.METHOD.value] = method
+            tokens.pop(Dimension.METHOD_PARAMS.value, None)
 
         # Run registered detectors for any requested dimensions not already set
         for detector in self.detectors:
