@@ -77,7 +77,7 @@ def _expert_placement_fn(model: nn.Module, strategy: str):
     return lambda p: Shard(1) if p in expert_params else None
 
 
-def parallelize(model: nn.Module, mesh: DeviceMesh, layout: Layout) -> nn.Module:
+def check_model_layout(model: nn.Module, layout: Layout) -> None:
     if model.config.tie_word_embeddings:
         raise ValueError("parallelize does not support tie_word_embeddings")
     if layout.strategy not in STRATEGY_MESH_DIMS:
@@ -88,6 +88,18 @@ def parallelize(model: nn.Module, mesh: DeviceMesh, layout: Layout) -> nn.Module
             f"Strategy {layout.strategy!r} uses tensor parallelism, "
             "which does not support MoE models"
         )
+    if "pp" in dims and len(model.model.layers) % layout.pipeline_parallel_size:
+        raise ValueError(
+            f"{len(model.model.layers)} layers do not split into "
+            f"{layout.pipeline_parallel_size} stages"
+        )
+    if layout.strategy == "ep":
+        check_experts_split(model, layout.data_parallel_size)
+
+
+def parallelize(model: nn.Module, mesh: DeviceMesh, layout: Layout) -> nn.Module:
+    check_model_layout(model, layout)
+    dims = STRATEGY_MESH_DIMS[layout.strategy]
     if "pp" in dims:
         split_stage(model, mesh["pp"].get_local_rank(), mesh["pp"].size())
     if "tp" in dims:

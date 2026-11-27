@@ -70,7 +70,8 @@ class BaseBenchmarkConfigurator:
             )
             all_cases.extend(cases)
 
-        all_cases = filter_cases_by_sweep_axis(all_cases)
+        if all_cases:
+            all_cases = filter_cases_by_sweep_axis(all_cases)
         if all_cases:
             logging.info(
                 "Benchmark cases to be triggered: %s",

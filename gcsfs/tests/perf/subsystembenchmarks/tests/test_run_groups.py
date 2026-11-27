@@ -1,6 +1,9 @@
+import json
 import os
+import re
 import subprocess
 import sys
+import time
 from unittest import mock
 
 import pytest
@@ -97,16 +100,52 @@ def test_amplification_retry_waits_once_for_missing_buckets(monkeypatch):
     assert sleeps == [30]
 
 
-def test_csv_with_renamed_amplification_columns_is_eligible(tmp_path):
-    csv_path = tmp_path / "results.csv"
-    csv_path.write_text(
-        "benchmark_case_id,gcs_bucket_name,"
-        "measurement_window_start_unix_seconds,"
-        "measurement_window_end_unix_seconds,dataset_size_bytes\n"
-        "case-a,bucket-a,1000,1060,500\n"
+def test_scrape_amplification_skips_write_only_csv(tmp_path, monkeypatch):
+    json_path = tmp_path / "results.json"
+    with open(json_path, "w") as f:
+        json.dump(
+            {
+                "benchmarks": [
+                    {
+                        "name": "checkpoint_write-x",
+                        "group": "checkpoint_write",
+                        "stats": {
+                            "min": 1.0,
+                            "max": 1.0,
+                            "mean": 1.0,
+                            "median": 1.0,
+                            "stddev": 0.0,
+                            "data": [1.0],
+                        },
+                        "extra_info": {
+                            "gcs_bucket_name": "bucket-a",
+                            "measurement_window_start_unix_seconds": 1000,
+                            "measurement_window_end_unix_seconds": 1060,
+                            "checkpoint_physical_size_bytes": 500,
+                            "workload_scenario": "checkpoint_write",
+                            "checkpoint_write_throughput_mean_bytes_per_second": 250.0,
+                        },
+                    }
+                ]
+            },
+            f,
+        )
+    csv_path = run.report.generate_csv(str(json_path), str(tmp_path))
+    args = run.parse_args(
+        [
+            "--group=checkpointing/pytorch_save",
+            "--amplification-wait=600",
+            "--require-amplification",
+        ]
+        + _REQUIRED
+    )
+    monkeypatch.setattr(
+        time,
+        "sleep",
+        lambda s: (_ for _ in ()).throw(AssertionError(f"unexpected sleep({s})")),
     )
 
-    assert run._csv_has_amplification_inputs(csv_path)
+    assert run._scrape_amplification(csv_path, args) is None
 
 
 def test_build_pytest_args_includes_run_benchmarks():
@@ -142,9 +181,13 @@ def test_ray_checkpointing_group_is_discoverable():
     assert "checkpointing/ray_pytorch" in run.discover_groups()
 
 
-def test_pytorch_checkpointing_group_is_discoverable():
-    """Verifies checkpointing/pytorch is discovered from its requirements.txt."""
-    assert "checkpointing/pytorch" in run.discover_groups()
+def test_pytorch_checkpointing_groups_are_discoverable():
+    """Verifies pytorch_{save,load,reshard} are discovered and pytorch is not."""
+    groups = run.discover_groups()
+    assert "checkpointing/pytorch_save" in groups
+    assert "checkpointing/pytorch_load" in groups
+    assert "checkpointing/pytorch_reshard" in groups
+    assert "checkpointing/pytorch" not in groups
 
 
 @pytest.mark.parametrize("bucket_type", ["rapid_cache_cold", "rapid_cache_warm"])
@@ -324,20 +367,22 @@ def test_parse_args_device_sets_env(monkeypatch, capsys):
     for key in (*_RUN_ENV_KEYS, "FSSPEC_GCS_RCU_RAPID_WRITE"):
         monkeypatch.delenv(key, raising=False)
 
-    default_args = run.parse_args(["--group=checkpointing/pytorch"] + _REQUIRED)
+    default_args = run.parse_args(["--group=checkpointing/pytorch_load"] + _REQUIRED)
     assert default_args.device == "cpu"
     run._setup_environment(default_args)
     assert os.environ["GCSFS_SUBSYSTEM_DEVICE"] == "cpu"
 
     cuda_args = run.parse_args(
-        ["--group=checkpointing/pytorch", "--device=cuda"] + _REQUIRED
+        ["--group=checkpointing/pytorch_load", "--device=cuda"] + _REQUIRED
     )
     assert cuda_args.device == "cuda"
     run._setup_environment(cuda_args)
     assert os.environ["GCSFS_SUBSYSTEM_DEVICE"] == "cuda"
 
     with pytest.raises(SystemExit):
-        run.parse_args(["--group=checkpointing/pytorch", "--device=tpu"] + _REQUIRED)
+        run.parse_args(
+            ["--group=checkpointing/pytorch_load", "--device=tpu"] + _REQUIRED
+        )
     assert "--device" in capsys.readouterr().err
 
 
@@ -375,3 +420,80 @@ def test_main_defaults_to_timestamped_run_dir(monkeypatch):
         )
     finally:
         os.rmdir(results_dir)
+
+
+def test_ci_workflow_subsystembenchmark_requirements_exist():
+    repo_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..")
+    )
+    ci_path = os.path.join(repo_root, ".github", "workflows", "ci.yml")
+    with open(ci_path) as f:
+        ci_yaml = f.read()
+
+    req_paths = re.findall(
+        r"gcsfs/tests/perf/subsystembenchmarks/\S*requirements\S*\.txt", ci_yaml
+    )
+    assert req_paths
+    missing = [
+        rel_path
+        for rel_path in req_paths
+        if not os.path.isfile(os.path.join(repo_root, rel_path))
+    ]
+    assert missing == []
+
+
+@pytest.mark.parametrize(
+    "bucket_type",
+    ["standard_rcu_warm", "standard_rcu_cold", "hns_rcu_warm", "hns_rcu_cold"],
+)
+def test_parse_args_rejects_write_only_group_on_rcu_warm_and_cold(capsys, bucket_type):
+    with pytest.raises(SystemExit):
+        run.parse_args(
+            [
+                "--group=checkpointing/pytorch_save",
+                f"--bucket-type={bucket_type}",
+                "--zone=us-central1-a",
+            ]
+            + _REQUIRED
+        )
+    err = capsys.readouterr().err
+    assert "only write scenarios" in err
+    assert "*_rcu_z" in err
+
+
+@pytest.mark.parametrize("bucket_type", ["standard_rcu_z", "hns_rcu_z"])
+def test_parse_args_allows_write_only_group_on_rcu_z(bucket_type):
+    args = run.parse_args(
+        [
+            "--group=checkpointing/pytorch_save",
+            f"--bucket-type={bucket_type}",
+            "--zone=us-central1-a",
+        ]
+        + _REQUIRED
+    )
+    assert args.bucket_type == bucket_type
+
+
+@pytest.mark.parametrize(
+    "group",
+    [
+        "checkpointing/pytorch_lightning",
+        "checkpointing/ray_pytorch",
+        "checkpointing/pytorch_load",
+        "checkpointing/pytorch_reshard",
+        "dataloading/webdataset",
+    ],
+)
+@pytest.mark.parametrize("bucket_type", ["standard_rcu_warm", "hns_rcu_cold"])
+def test_parse_args_allows_read_and_mixed_groups_on_rcu_warm_and_cold(
+    group, bucket_type
+):
+    args = run.parse_args(
+        [
+            f"--group={group}",
+            f"--bucket-type={bucket_type}",
+            "--zone=us-central1-a",
+        ]
+        + _REQUIRED
+    )
+    assert args.group == group

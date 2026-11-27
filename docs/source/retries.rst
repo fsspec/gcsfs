@@ -42,7 +42,7 @@ For HNS buckets, ``ExtendedGcsFileSystem`` utilizes the specialized Storage Cont
 
 - These calls utilize retry configuration based on ``google.api_core.retry.AsyncRetry``.
 - **Applicable Methods:**
-    - ``get_storage_layout``: Used to determine bucket type.
+    - ``get_storage_layout``: Used to determine bucket type. Skipped on plain ``http://`` endpoints, and tried once without retries on other non-default endpoints until a lookup succeeds on the filesystem instance (see :ref:`bucket-type-detection-and-caching`).
     - ``create_folder``: Used for ``mkdir``.
     - ``get_folder``: Used for directory metadata and existence checks.
     - ``list_folders``: Used for directory listings (``ls``).

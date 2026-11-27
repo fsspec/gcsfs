@@ -2,7 +2,9 @@ import asyncio
 import contextlib
 import heapq
 import logging
+import mimetypes
 import os
+import time
 import uuid
 import weakref
 from collections.abc import Iterable
@@ -11,6 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 from glob import has_magic
 from typing import ClassVar
+from urllib.parse import urlsplit
 
 import aiohttp
 import fsspec
@@ -30,13 +33,14 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 )
 
 from gcsfs import __version__ as version
-from gcsfs import zb_hns_utils
+from gcsfs import parallel_upload, zb_hns_utils
 from gcsfs._dircache import HnsDirCacheUpdater
 from gcsfs.concurrency import split_range
 from gcsfs.core import (
     GCSFile,
     GCSFileSystem,
     _coalesce_generation,
+    _gcp_universe_domain,
     _get_prefetcher_and_cache_config,
     _location,
     _resolve_generation_match,
@@ -58,6 +62,7 @@ logger = logging.getLogger("gcsfs")
 
 USER_AGENT = "python-gcsfs"
 STORAGE_CONTROL_RPC_TIMEOUT = 30.0
+_LAYOUT_FALLBACK_TTL = 300.0
 # Detect a storage control connection that dies silently in the middle of a
 # call (no FIN/RST), so the call reconnects instead of failing every later call
 # until the kernel gives up on the socket. GCS frontends answer 10 s pings with
@@ -73,6 +78,7 @@ _CONTROL_PLANE_KEEPALIVE_OPTIONS = (
     ("grpc.http2.ping_timeout_ms", 20000),
 )
 _HNS_RENAME_FOLDER_LRO_TIMEOUT = 300.0
+DEFAULT_PARALLEL_UPLOAD_THRESHOLD = 128 * 2**20
 
 # Default maximum number of batch delete requests that a recursive ``rm`` keeps
 # in flight on HNS buckets (including zonal buckets, which are hierarchical).
@@ -136,6 +142,92 @@ BucketLayout.UNKNOWN = BucketLayout(
 )
 
 
+def _layout_from_response(response):
+    """The ``BucketLayout`` described by a ``get_storage_layout`` response."""
+    if response.location_type == "zone":
+        storage_class = StorageClass.RAPID
+    else:
+        storage_class = StorageClass.STANDARD
+
+    if response.location_type == "zone" or (
+        response.hierarchical_namespace and response.hierarchical_namespace.enabled
+    ):
+        namespace_layout = NamespaceLayout.HIERARCHICAL
+    else:
+        namespace_layout = NamespaceLayout.NON_HIERARCHICAL
+
+    rapid_cache_info = getattr(response, "rapid_cache_info", None)
+    cache_type = getattr(rapid_cache_info, "cache_type", "") if rapid_cache_info else ""
+    if cache_type == "rapid-cache-ultra":
+        caching_tier = CachingTier.RAPID_CACHE_ULTRA
+    elif cache_type == "rapid-cache":
+        caching_tier = CachingTier.RAPID_CACHE
+    else:
+        caching_tier = CachingTier.NONE
+
+    return BucketLayout(
+        storage_class=storage_class,
+        caching_tier=caching_tier,
+        namespace_layout=namespace_layout,
+    )
+
+
+def _is_default_storage_endpoint(location):
+    """Whether ``location`` is the default GCS endpoint, ``https://storage.{universe}``
+    (an explicit port 443 or a trailing slash included)."""
+    url = urlsplit(location)
+    return (
+        url.scheme == "https"
+        and url.hostname == f"storage.{_gcp_universe_domain()}"
+        and url.port in (None, 443)
+        and url.path in ("", "/")
+    )
+
+
+class _LayoutLookupOutcome(Enum):
+    MISSING = "missing"
+    FALLBACK = "fallback"
+    RAISE = "raise"
+
+
+_FALLBACK_LAYOUT_ERRORS = (
+    api_exceptions.PermissionDenied,
+    api_exceptions.InvalidArgument,
+    api_exceptions.FailedPrecondition,
+    api_exceptions.MethodNotImplemented,
+)
+
+
+def _classify_layout_error(
+    error: BaseException,
+    *,
+    serves_control_api: bool,
+    anonymous: bool,
+    unverified_client_cert: bool = False,
+) -> _LayoutLookupOutcome:
+    """Classify a ``get_storage_layout`` failure.
+
+    Decides what is safe to remember as a flat-bucket fallback rather than what
+    to retry: retrying is governed separately by ``is_transient_exception``.
+
+    ``Unauthenticated`` falls back for an anonymous caller (a missing
+    permission), and for a caller with a client certificate before any lookup
+    has succeeded: the gRPC clients present no certificate, so GCS rejects a
+    certificate-bound token there even though mTLS HTTP accepts it.
+    """
+    if isinstance(error, api_exceptions.NotFound):
+        return _LayoutLookupOutcome.MISSING
+    if isinstance(error, _FALLBACK_LAYOUT_ERRORS):
+        return _LayoutLookupOutcome.FALLBACK
+    if (anonymous or unverified_client_cert) and isinstance(
+        error, api_exceptions.Unauthenticated
+    ):
+        return _LayoutLookupOutcome.FALLBACK
+    if serves_control_api:
+        return _LayoutLookupOutcome.RAISE
+    return _LayoutLookupOutcome.FALLBACK
+
+
 class RapidCacheUltraDisabledError(OSError):
     """Rapid Cache Ultra was disabled on a bucket cached as using it.
 
@@ -153,25 +245,29 @@ def _rapid_cache_ultra_disabled_error(bucket):
     )
 
 
+_RCU_RAPID_KMS_ERROR = (
+    "kms_key_name is not supported for gRPC RAPID uploads to RCU buckets; "
+    "use rcu_rapid_write=False to write with kms_key_name over HTTP."
+)
+_KMS_KEY_VERSION_ERROR = (
+    "kms_key_name must not include /cryptoKeyVersions/: GCS encrypts "
+    "new objects with the key's primary version."
+)
+
+
 def _validate_grpc_write_kms_key_name(layout, kms_key_name):
     """Validate ``kms_key_name`` before opening a gRPC appendable writer."""
     if not kms_key_name:
         return
     if layout is not None and layout.is_rcu:
-        raise NotImplementedError(
-            "kms_key_name is not supported for gRPC RAPID uploads to RCU buckets; "
-            "use rcu_rapid_write=False to write with kms_key_name over HTTP."
-        )
+        raise NotImplementedError(_RCU_RAPID_KMS_ERROR)
     if zb_hns_utils.Preconditions is None:
         raise NotImplementedError(
             "kms_key_name on Zonal buckets requires a google-cloud-storage "
             "release whose AsyncAppendableObjectWriter.from_blob accepts Preconditions."
         )
     if "/cryptoKeyVersions/" in kms_key_name:
-        raise ValueError(
-            "kms_key_name must not include /cryptoKeyVersions/: GCS encrypts "
-            "new objects with the key's primary version."
-        )
+        raise ValueError(_KMS_KEY_VERSION_ERROR)
 
 
 @contextlib.asynccontextmanager
@@ -225,8 +321,27 @@ def _parse_bool_flag(value, name):
             return True
         if normalized in ("false", "0", "no", "off", ""):
             return False
-        raise ValueError(f"{name} must be a boolean, got {value!r}")
-    return bool(value)
+    elif value is None or (isinstance(value, int) and value in (0, 1)):
+        return bool(value)
+    raise ValueError(f"{name} must be a boolean, got {value!r}")
+
+
+def _parse_int_flag(value, name, *, default=None, minimum=0):
+    """Normalize an integer option that may arrive as a string from config or env."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
+    if isinstance(value, str):
+        try:
+            value = int(value.strip())
+        except ValueError:
+            raise ValueError(
+                f"{name} must be an integer >= {minimum}, got {value!r}"
+            ) from None
+    if not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
+    return value
 
 
 class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
@@ -250,6 +365,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         max_mrd_pool_cache_queue_size=16,
         fast_lro_polling=True,
         rcu_rapid_write=False,
+        parallel_upload=False,
+        parallel_upload_threshold=DEFAULT_PARALLEL_UPLOAD_THRESHOLD,
+        parallel_upload_segment_size=None,
         **kwargs,
     ):
         """
@@ -285,6 +403,16 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             ``fsspec.config.conf.setdefault("gcs", {})["rcu_rapid_write"] = True``.
             Has no effect on Zonal buckets, which always use the appendable
             writer.
+        parallel_upload : bool, default False
+            Upload large ``pipe_file`` and ``put_file`` writes with parallel
+            uploads. ``False`` keeps every write on its current upload path. Can
+            also be set with ``FSSPEC_GCS_PARALLEL_UPLOAD=true`` or
+            ``fsspec.config.conf.setdefault("gcs", {})["parallel_upload"] = True``.
+        parallel_upload_threshold : int, default 128 MiB
+            Smallest write, in bytes, that uses a parallel upload.
+        parallel_upload_segment_size : int, optional
+            Preferred segment size, in bytes, for parallel uploads. ``None`` (the
+            default) leaves the size to the SDK.
         **kwargs : dict
             Additional arguments passed to GCSFileSystem.
             Supports retry configuration overrides for Storage Control API:
@@ -296,6 +424,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         self.fast_lro_polling = fast_lro_polling
         self.rcu_rapid_write = _parse_bool_flag(rcu_rapid_write, "rcu_rapid_write")
+        self.parallel_upload = _parse_bool_flag(parallel_upload, "parallel_upload")
+        self.parallel_upload_threshold = _parse_int_flag(
+            parallel_upload_threshold,
+            "parallel_upload_threshold",
+            default=DEFAULT_PARALLEL_UPLOAD_THRESHOLD,
+        )
+        self.parallel_upload_segment_size = _parse_int_flag(
+            parallel_upload_segment_size,
+            "parallel_upload_segment_size",
+            minimum=1,
+        )
         valid_keys = DEFAULT_RETRY_CONFIG.keys()
         self.retry_config = {
             k[6:]: v
@@ -312,13 +451,16 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # We unwrap the nested credentials here because self.credentials is a GCSFS wrapper,
         # but the clients expect the underlying google.auth credentials object.
         self.credential = self.credentials.credentials
-        # When token="anon", self.credentials.credentials is None. This is
-        # often used for testing with emulators. However, the gRPC and storage
-        # control clients require a credentials object for initialization.
-        # We explicitly use AnonymousCredentials() to allow unauthenticated access.
-        if self.credentials.token == "anon":
+        # GoogleCredentials holds None whenever it resolved to anonymous access:
+        # token="anon", or token=None when no other method works. The HTTP path
+        # then sends no credentials (GoogleCredentials.maybe_refresh), so give the
+        # gRPC and storage control clients AnonymousCredentials(); with None they
+        # would look for default credentials themselves and fail without them.
+        if self.credential is None:
             self.credential = AnonymousCredentials()
         self._storage_layout_cache = {}
+        self._storage_layout_fallbacks = {}
+        self._control_api_learned = False
         self._memmove_executor = ThreadPoolExecutor(
             max_workers=kwargs.get("memmove_max_workers", 8)
         )
@@ -395,7 +537,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
     async def _get_grpc_client(self):
         if self._grpc_client is None:
-            client_options = ClientOptions(quota_project_id=self._user_project)
+            client_options = ClientOptions(
+                quota_project_id=self._user_project,
+                universe_domain=_gcp_universe_domain(),
+            )
             if self._grpc_location:
                 # client_options expects only the host:port, without any protocol or path components.
                 endpoint = self._grpc_location.split("://")[-1].split("/")[0]
@@ -435,8 +580,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             channel = transport_cls.create_channel(**channel_kwargs)
 
             transport = transport_cls(channel=channel)
+            # Pass the universe explicitly: the client would otherwise read
+            # GOOGLE_CLOUD_UNIVERSE_DOMAIN itself and reject an empty value.
             self._storage_control_client = storage_control_v2.StorageControlAsyncClient(
-                transport=transport
+                transport=transport,
+                client_options=ClientOptions(universe_domain=_gcp_universe_domain()),
             )
         return self._storage_control_client
 
@@ -466,17 +614,40 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 logger.warning(f"Failed to close grpc_client: {e}")
             self._grpc_client = None
 
+    def _remember_layout(self, bucket: str, layout: BucketLayout) -> None:
+        self._storage_layout_cache[bucket] = layout
+        self._storage_layout_fallbacks.pop(bucket, None)
+
+    def _remember_fallback(self, bucket: str) -> None:
+        self._storage_layout_fallbacks[bucket] = time.monotonic() + _LAYOUT_FALLBACK_TTL
+
+    def _has_live_fallback(self, bucket: str) -> bool:
+        deadline = self._storage_layout_fallbacks.get(bucket)
+        if deadline is None:
+            return False
+        if time.monotonic() < deadline:
+            return True
+        self._storage_layout_fallbacks.pop(bucket, None)
+        return False
+
     async def _lookup_bucket_layout(self, bucket):
+        if not bucket:
+            # Root and bucket-level glob paths have no bucket to look up.
+            return BucketLayout.UNKNOWN
         if bucket in self._storage_layout_cache:
             return self._storage_layout_cache[bucket]
-        bucket_layout = await self._get_bucket_layout(bucket)
-        # Don't cache UNKNOWN storage class.
-        # This ensures that subsequent operations will retry the lookup,
-        # allowing it to recover when the transient error resolves.
-        if bucket_layout.storage_class == StorageClass.UNKNOWN:
-            return bucket_layout
-        self._storage_layout_cache[bucket] = bucket_layout
-        return self._storage_layout_cache[bucket]
+        if self._has_live_fallback(bucket):
+            return BucketLayout.UNKNOWN
+        try:
+            bucket_layout = await self._get_bucket_layout(bucket)
+        except api_exceptions.NotFound:
+            # Not cached: a bucket created later must still be detected. The
+            # caller's own request reports the missing bucket.
+            logger.debug(f"Bucket {bucket} not found; using standard bucket behavior.")
+            return BucketLayout.UNKNOWN
+        if bucket_layout.storage_class != StorageClass.UNKNOWN:
+            self._remember_layout(bucket, bucket_layout)
+        return bucket_layout
 
     # Not covered by mirror_gcs_methods (name doesn't follow the `_x` -> `x` convention).
     _sync_lookup_bucket_layout = _gcs_sync_wrapper(_lookup_bucket_layout)
@@ -486,13 +657,18 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
         The layout of each bucket (zonal, hierarchical namespace, Rapid Cache
         Ultra) is looked up the first time this filesystem instance uses the
-        bucket. It stays cached until it is invalidated here, or until an
-        appendable write to a Rapid Cache Ultra bucket fails to open and the
-        re-checked layout no longer reports Rapid Cache Ultra. Call this method
+        bucket. A real answer stays cached until it is invalidated here, until
+        this instance creates or deletes the bucket, or until a gRPC write to
+        a Rapid Cache Ultra bucket fails and the re-checked layout no longer
+        reports Rapid Cache Ultra (or finds the bucket missing). Fallbacks to
+        standard bucket behavior are stored separately and checked again after
+        5 minutes, or immediately after calling this method. Call this method
         after enabling or disabling Rapid Cache Ultra on a bucket that this
-        instance already used, so that later reads and writes pick the
-        matching data path. It only clears in-memory state and sends no
-        request.
+        instance already used, so that later reads and writes pick the matching
+        data path. It only clears in-memory state and sends no request. Until
+        the next lookup, ``mv_file`` and ``rm_file`` update the listing cache
+        by invalidating the affected directories instead of editing them in
+        place.
 
         Parameters
         ----------
@@ -503,62 +679,98 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         if bucket is None:
             self._storage_layout_cache.clear()
+            self._storage_layout_fallbacks.clear()
             return
         bucket_name, _, _ = self.split_path(bucket)
         self._storage_layout_cache.pop(bucket_name, None)
+        self._storage_layout_fallbacks.pop(bucket_name, None)
+
+    def _serves_control_api(self) -> bool | None:
+        """Whether this instance's endpoint serves the Storage Control API.
+
+        Returns ``False`` for plain ``http://`` endpoints (the control channel
+        always uses TLS), ``True`` for the default GCS endpoint or after a
+        lookup succeeded on this instance, and ``None`` when unknown.
+        """
+        location = self._grpc_location
+        if location.startswith("http://"):
+            return False
+        if _is_default_storage_endpoint(location) or self._control_api_learned:
+            return True
+        return None
 
     async def _get_bucket_layout(self, bucket):
+        """Look up the layout of ``bucket`` with the Storage Control API.
+
+        Errors are classified by :func:`_classify_layout_error`, separately
+        from the retry predicate:
+
+        * a plain ``http://`` endpoint (e.g. an emulator): the control channel
+          always uses TLS, so the lookup cannot work and is not attempted;
+        * ``NotFound`` is raised on every endpoint: only the Storage Control
+          API answers it, so the bucket does not exist;
+        * ``PermissionDenied``, ``InvalidArgument``, ``FailedPrecondition``,
+          ``MethodNotImplemented``, and ``Unauthenticated`` for an anonymous
+          caller (or for a caller with a client certificate, until a lookup
+          succeeds on this instance) fall back to ``BucketLayout.UNKNOWN``;
+        * any other API error or timeout falls back only while the endpoint is
+          not yet known to serve Storage Control (a non-default ``https://``
+          endpoint before any lookup has succeeded on this instance, tried once
+          without retries). On the default endpoint, or once a non-default
+          endpoint has answered a lookup, it raises: falling back there would
+          silently change the semantics of HNS and zonal operations.
+        """
+        serves = self._serves_control_api()
+        if serves is False:
+            logger.debug(
+                f"Endpoint {self._grpc_location} is plain http; skipping the bucket layout lookup."
+            )
+            return BucketLayout.UNKNOWN
+
+        client = await self._get_control_plane_client()
+        bucket_name_value = f"projects/_/buckets/{bucket}/storageLayout"
+        logger.debug(f"get_storage_layout request for name: {bucket_name_value}")
         try:
-            client = await self._get_control_plane_client()
-            bucket_name_value = f"projects/_/buckets/{bucket}/storageLayout"
-            logger.debug(f"get_storage_layout request for name: {bucket_name_value}")
             response = await client.get_storage_layout(
                 name=bucket_name_value,
-                retry=self._get_retry_config(),
+                retry=self._get_retry_config() if serves else None,
                 timeout=STORAGE_CONTROL_RPC_TIMEOUT,
             )
-
-            if response.location_type == "zone":
-                storage_class = StorageClass.RAPID
-            else:
-                storage_class = StorageClass.STANDARD
-
-            if response.location_type == "zone" or (
-                response.hierarchical_namespace
-                and response.hierarchical_namespace.enabled
-            ):
-                namespace_layout = NamespaceLayout.HIERARCHICAL
-            else:
-                namespace_layout = NamespaceLayout.NON_HIERARCHICAL
-
-            rapid_cache_info = getattr(response, "rapid_cache_info", None)
-            cache_type = (
-                getattr(rapid_cache_info, "cache_type", "") if rapid_cache_info else ""
+        except (api_exceptions.GoogleAPIError, asyncio.TimeoutError) as e:
+            outcome = _classify_layout_error(
+                e,
+                serves_control_api=bool(serves),
+                anonymous=isinstance(self.credential, AnonymousCredentials),
+                unverified_client_cert=(
+                    self._use_client_cert and not self._control_api_learned
+                ),
             )
-            if cache_type == "rapid-cache-ultra":
-                caching_tier = CachingTier.RAPID_CACHE_ULTRA
-            elif cache_type == "rapid-cache":
-                caching_tier = CachingTier.RAPID_CACHE
-            else:
-                caching_tier = CachingTier.NONE
-
-            return BucketLayout(
-                storage_class=storage_class,
-                caching_tier=caching_tier,
-                namespace_layout=namespace_layout,
-            )
-        except api_exceptions.NotFound:
+            if outcome is _LayoutLookupOutcome.MISSING:
+                raise
+            if outcome is _LayoutLookupOutcome.RAISE:
+                # The raised gapic error does not say why a plain read or
+                # write failed, so name the lookup and the opt-out here.
+                logger.warning(
+                    f"Looking up the layout of bucket {bucket} with the Storage "
+                    f"Control API failed: {e!r}. The operation fails instead of "
+                    "using standard bucket behavior, which would be wrong on "
+                    "HNS and zonal buckets. To skip layout lookups (and HNS, "
+                    "zonal and Rapid Cache support), set "
+                    "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=false before importing "
+                    "gcsfs."
+                )
+                raise
+            # The server's message names a missing permission when that is
+            # the cause, e.g. "... does not have storage.objects.list access".
             logger.warning(
-                f"Error: Bucket {bucket} not found or you lack permissions for "
-                f"storage layout api used to detect bucket layout. Falling back to GCSFileSystem."
+                f"Could not determine the layout of bucket {bucket}: {e}. "
+                "Using standard bucket behavior; checking again in 5 minutes "
+                "or after invalidate_storage_layout_cache()."
             )
+            self._remember_fallback(bucket)
             return BucketLayout.UNKNOWN
-        except Exception as e:
-            logger.warning(
-                f"Could not determine bucket layout for bucket name {bucket}: {e}, falling back to GCSFileSystem"
-            )
-            # Default to UNKNOWN in case bucket layout is not obtained
-            return BucketLayout.UNKNOWN
+        self._control_api_learned = True
+        return _layout_from_response(response)
 
     # Plain sync method (not covered by mirror_gcs_methods). The bucket-layout lookup and, for Rapid
     # (zonal) reads, the MRD pool's `_info` request in ZonalFile.__init__ run before GCSFile.__init__
@@ -704,6 +916,145 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
             return fs_default
         return bucket_layout.is_rcu
 
+    async def _rcu_disabled_after_error(self, bucket):
+        """Whether a failed write to ``bucket`` found Rapid Cache Ultra disabled.
+
+        Reuses a layout without RCU that another write already cached, and
+        otherwise looks the layout up once. A real layout returned by the
+        re-check is stored (dropping any fallback). Returns ``True`` only when
+        the bucket is known not to have RCU; otherwise returns ``False``, and
+        if the re-check found the bucket missing its cached layout and fallback
+        are dropped.
+        """
+        cached_layout = self._storage_layout_cache.get(bucket)
+        if cached_layout is None or cached_layout.is_rcu:
+            # No other write has refreshed the layout yet: look it up once.
+            # If the lookup fails, the layout stays unknown and returning
+            # False lets the caller re-raise the write error unchanged.
+            fresh_layout = BucketLayout.UNKNOWN
+            try:
+                fresh_layout = await self._get_bucket_layout(bucket)
+            except api_exceptions.NotFound:
+                # The bucket is gone: as in _lookup_bucket_layout, a missing
+                # bucket's layout is not kept.
+                self._storage_layout_cache.pop(bucket, None)
+                self._storage_layout_fallbacks.pop(bucket, None)
+            except Exception as lookup_error:
+                # Deliberately broad: whatever made the re-check fail, the
+                # write error is the one to report.
+                logger.debug(
+                    f"Re-checking the layout of bucket {bucket} failed: "
+                    f"{lookup_error!r}"
+                )
+            if fresh_layout.storage_class == StorageClass.UNKNOWN:
+                return False
+            self._remember_layout(bucket, fresh_layout)
+            if fresh_layout.is_rcu:
+                return False
+        return True
+
+    def _may_use_parallel_upload(
+        self,
+        layout,
+        *,
+        if_generation_match=None,
+        finalize_on_close=None,
+        metadata=None,
+    ):
+        """Whether a write to a bucket with this layout may use a parallel upload.
+
+        Only a write that ends finalized and has no precondition may. A write to
+        a bucket whose layout lookup failed keeps its current path.
+        """
+        if if_generation_match is not None:
+            # parallel uploads don't support preconditions
+            return False
+        if layout.storage_class == StorageClass.UNKNOWN:
+            return False
+        if self._uses_grpc_write_path(layout):
+            return bool(self._resolve_finalize_on_close(layout, finalize_on_close))
+        return not any(
+            str(k) == "" or v in (None, "") for k, v in (metadata or {}).items()
+        )
+
+    def _parallel_upload_call_options(self, kwargs):
+        """The segment size and concurrency for one call, from its keyword arguments.
+
+        ``parallel_upload_segment_size`` falls back to the filesystem option.
+        """
+        return (
+            _parse_int_flag(
+                kwargs.get("parallel_upload_segment_size"),
+                "parallel_upload_segment_size",
+                default=self.parallel_upload_segment_size,
+                minimum=1,
+            ),
+            _parse_int_flag(kwargs.get("concurrency"), "concurrency", minimum=1),
+        )
+
+    async def _perform_parallel_upload(
+        self,
+        upload_func,
+        source,
+        bucket,
+        key,
+        path,
+        layout,
+        *,
+        content_type,
+        metadata,
+        fixed_key_metadata,
+        consistency,
+        kms_key_name,
+        segment_size,
+        max_workers,
+    ):
+        """Upload ``source`` to ``bucket/key`` with a parallel upload.
+
+        Retries once without ``RAPID`` if Rapid Cache Ultra was disabled on the
+        bucket, and updates the cache for ``path``.
+        """
+        rcu_rapid = layout.is_rcu and self.rcu_rapid_write
+        if kms_key_name:
+            if rcu_rapid:
+                raise NotImplementedError(_RCU_RAPID_KMS_ERROR)
+            if "/cryptoKeyVersions/" in kms_key_name:
+                raise ValueError(_KMS_KEY_VERSION_ERROR)
+        if (consistency or self.consistency) not in (None, "none"):
+            logger.warning(
+                "Parallel uploads do not apply the consistency setting. "
+                "It will be ignored."
+            )
+        client = await self._get_grpc_client()
+
+        async def upload(storage_class):
+            await upload_func(
+                client,
+                bucket,
+                key,
+                source,
+                content_type=content_type,
+                metadata=metadata,
+                fixed_key_metadata=fixed_key_metadata,
+                storage_class=storage_class,
+                kms_key_name=kms_key_name,
+                segment_size=segment_size,
+                max_workers=max_workers,
+            )
+
+        try:
+            await upload("RAPID" if rcu_rapid else None)
+        except api_exceptions.GoogleAPICallError:
+            if not (rcu_rapid and await self._rcu_disabled_after_error(bucket)):
+                raise
+            logger.warning(
+                "Rapid Cache Ultra is no longer enabled on bucket '%s'. "
+                "Retrying the upload without the RAPID storage class.",
+                bucket,
+            )
+            await upload(None)
+        await self._write_file_cache_update(path)
+
     async def _init_aaow(
         self,
         bucket,
@@ -733,10 +1084,12 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         ``google.api_core`` ``GoogleAPICallError`` re-checks the layout;
         precondition errors such as ``FileExistsError`` are not re-checked.
         The re-check reuses a layout without RCU that another write already
-        cached, and otherwise looks the layout up once. If the layout no
-        longer reports RCU, it is cached and ``RapidCacheUltraDisabledError``
-        is raised from the original error; otherwise the original error is
-        re-raised and the cached layout is kept.
+        cached, and otherwise looks the layout up once. A real layout returned
+        by the re-check is stored (dropping any fallback); if it no longer
+        reports RCU, ``RapidCacheUltraDisabledError`` is raised from the
+        original error. Otherwise the original error is re-raised, and if the
+        re-check found the bucket missing its cached layout and fallback are
+        dropped.
         """
         await self._get_grpc_client()
         layout = await self._lookup_bucket_layout(bucket)
@@ -767,18 +1120,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # ("Project ... may not create storageClass RAPID buckets ...") and
         # FailedPrecondition for appends ("Cannot write rapid object to zone ...").
         except api_exceptions.GoogleAPICallError as e:
-            if not is_rcu:
+            if not (is_rcu and await self._rcu_disabled_after_error(bucket)):
                 raise
-            cached_layout = self._storage_layout_cache.get(bucket)
-            if cached_layout is None or cached_layout.is_rcu:
-                # No other write has refreshed the layout yet: look it up once.
-                fresh_layout = await self._get_bucket_layout(bucket)
-                if (
-                    fresh_layout.storage_class == StorageClass.UNKNOWN
-                    or fresh_layout.is_rcu
-                ):
-                    raise
-                self._storage_layout_cache[bucket] = fresh_layout
             raise _rapid_cache_ultra_disabled_error(bucket) from e
 
     @staticmethod
@@ -1312,8 +1655,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 the fsspec path for files in other buckets.
 
         With ``on_error="return"``, a failure while downloading a group of
-        ranges is returned for every range in that group, and a failure to
-        open an object is returned for all of that object's ranges.
+        ranges is returned for every range in that group, a failure to
+        open an object is returned for all of that object's ranges, and a
+        failure to look up a bucket's layout is returned for all of that
+        bucket's ranges.
         """
         if max_gap is not None:
             return await super()._cat_ranges(
@@ -1341,15 +1686,25 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         for i, p in enumerate(paths):
             by_path.setdefault(p, []).append(i)
 
+        # Look each bucket's layout up once. A failed lookup is returned for
+        # each of that bucket's ranges, like any other per-range error.
+        uses_grpc, lookup_errors = {}, {}
         zonal, other = {}, []
         for p, idxs in by_path.items():
             bucket, _, _ = self.split_path(p)
-            if await self._uses_grpc_data_path(bucket):
+            if bucket not in uses_grpc:
+                try:
+                    uses_grpc[bucket] = await self._uses_grpc_data_path(bucket)
+                except Exception as e:
+                    uses_grpc[bucket] = e
+            if isinstance(uses_grpc[bucket], Exception):
+                lookup_errors.update(dict.fromkeys(idxs, uses_grpc[bucket]))
+            elif uses_grpc[bucket]:
                 zonal[p] = idxs
             else:
                 other.extend(idxs)
 
-        if not zonal:
+        if not zonal and not lookup_errors:
             return await super()._cat_ranges(
                 paths,
                 starts,
@@ -1378,6 +1733,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         total_streams = max(1, stream_budget)
 
         results = [None] * len(paths)
+        for i, e in lookup_errors.items():
+            results[i] = e
         zonal_items = list(zonal.items())
         allocs = self._allocate_streams(
             [len(idxs) for _, idxs in zonal_items],
@@ -1427,7 +1784,9 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         # call is cancelled again while waiting) no task outlives this call.
         tasks = [asyncio.create_task(c) for c in coros]
         try:
-            await asyncio.wait(tasks)
+            # No tasks when every bucket's layout lookup failed.
+            if tasks:
+                await asyncio.wait(tasks)
         except BaseException:
             for t in tasks:
                 t.cancel()
@@ -1447,16 +1806,18 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 
     async def _is_bucket_hns_enabled(self, bucket):
         """Checks if a bucket has Hierarchical Namespace enabled."""
-        try:
-            bucket_layout = await self._lookup_bucket_layout(bucket)
-        except Exception as e:
-            logger.warning(
-                f"Could not determine if bucket '{bucket}' is HNS-enabled, falling back to default non-HNS: {e}",
-                stack_info=True,
-            )
-            return False
+        return (await self._lookup_bucket_layout(bucket)).is_hierarchical
 
-        return bucket_layout.is_hierarchical
+    def _is_bucket_hns_cached(self, bucket):
+        """Whether the cached layout of ``bucket`` is HNS. Never sends a request.
+
+        False when no layout is cached. Listings look the layout up before they
+        cache entries, so a bucket with cached listings has a cached layout,
+        unless it was dropped since (by ``invalidate_storage_layout_cache()``,
+        or because this instance created or deleted the bucket).
+        """
+        layout = self._storage_layout_cache.get(bucket)
+        return layout is not None and layout.is_hierarchical
 
     async def _wait_for_folder_rename(
         self, operation, path1, path2, request_id, timeout
@@ -2519,6 +2880,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         place, unfinalized.
         For other buckets, it delegates to the parent class's implementation.
 
+        On a filesystem created with ``parallel_upload=True``, a write of at
+        least its ``parallel_upload_threshold`` bytes that ends finalized and
+        has no precondition uses a parallel upload.
+
         Parameters
         ----------
         lpath: str
@@ -2526,17 +2891,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         rpath: str
             Path on GCS to upload the file to.
         metadata: dict, optional
-            Ignored by gRPC uploads.
+            Ignored by appendable uploads.
         consistency: str, optional
-            Ignored by gRPC uploads.
+            Ignored by appendable and parallel uploads.
         content_type: str, optional
-            Ignored by gRPC uploads, except for the default.
+            Ignored by appendable uploads, except for the default.
         chunksize: int, optional
             The size of chunks to upload data in.
         callback: fsspec.callbacks.Callback, optional
             Callback to monitor the upload progress.
         fixed_key_metadata: dict, optional
-            Ignored by gRPC uploads.
+            Ignored by appendable uploads.
         mode: str, optional
             The write mode, either 'overwrite' or 'create'.
         if_generation_match: int, optional
@@ -2550,6 +2915,58 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         bucket, key, generation = self.split_path(rpath)
         layout = await self._lookup_bucket_layout(bucket)
+        if self.parallel_upload:
+            segment_size, max_workers = self._parallel_upload_call_options(kwargs)
+        if (
+            self.parallel_upload
+            and key
+            and not generation
+            and self._may_use_parallel_upload(
+                layout,
+                if_generation_match=_resolve_generation_match(
+                    mode, if_generation_match
+                ),
+                finalize_on_close=kwargs.get("finalize_on_close"),
+                metadata=metadata,
+            )
+            and os.path.isfile(lpath)
+            and (size := os.path.getsize(lpath)) >= self.parallel_upload_threshold
+        ):
+            if content_type is None:
+                content_type = (
+                    mimetypes.guess_type(lpath)[0] or "application/octet-stream"
+                )
+            callback = callback or NoOpCallback()
+            size_reported = False
+
+            async def upload_file(*args, **upload_kwargs):
+                nonlocal size_reported
+                # Called once the arguments have been validated.
+                if not size_reported:
+                    callback.set_size(size)
+                    size_reported = True
+                return await parallel_upload.parallel_upload_file(
+                    *args, **upload_kwargs
+                )
+
+            await self._perform_parallel_upload(
+                upload_file,
+                lpath,
+                bucket,
+                key,
+                rpath,
+                layout,
+                content_type=content_type,
+                metadata=metadata,
+                fixed_key_metadata=fixed_key_metadata,
+                consistency=consistency,
+                kms_key_name=kms_key_name,
+                segment_size=segment_size,
+                max_workers=max_workers,
+            )
+            callback.absolute_update(size)
+            return
+
         if self._uses_grpc_write_path(layout):
             if os.path.isdir(lpath):
                 return
@@ -2647,6 +3064,10 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         place, unfinalized.
         For other buckets, it delegates to the parent class's implementation.
 
+        On a filesystem created with ``parallel_upload=True``, a write of at
+        least its ``parallel_upload_threshold`` bytes that ends finalized and
+        has no precondition uses a parallel upload.
+
         Parameters
         ----------
         path: str
@@ -2654,13 +3075,13 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         data: bytes-like
             The content to write to the file.
         metadata: dict, optional
-            Ignored by gRPC uploads.
+            Ignored by appendable uploads.
         consistency: str, optional
-            Ignored by gRPC uploads.
+            Ignored by appendable and parallel uploads.
         content_type: str, optional
-            Ignored by gRPC uploads, except for the default.
+            Ignored by appendable uploads, except for the default.
         fixed_key_metadata: dict, optional
-            Ignored by gRPC uploads.
+            Ignored by appendable uploads.
         chunksize: int, optional
             The size of chunks to upload data in.
         mode: str, optional
@@ -2679,6 +3100,40 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         data = as_byte_buffer(data)
         bucket, key, generation = self.split_path(path)
         layout = await self._lookup_bucket_layout(bucket)
+        if self.parallel_upload:
+            segment_size, max_workers = self._parallel_upload_call_options(kwargs)
+        if (
+            self.parallel_upload
+            and key
+            and len(data) >= self.parallel_upload_threshold
+            and self._may_use_parallel_upload(
+                layout,
+                if_generation_match=_resolve_generation_match(
+                    mode, if_generation_match
+                ),
+                finalize_on_close=kwargs.get("finalize_on_close"),
+                metadata=metadata,
+            )
+        ):
+            if content_type is None:
+                content_type = "application/octet-stream"
+            await self._perform_parallel_upload(
+                parallel_upload.parallel_upload_bytes,
+                data,
+                bucket,
+                key,
+                path,
+                layout,
+                content_type=content_type,
+                metadata=metadata,
+                fixed_key_metadata=fixed_key_metadata,
+                consistency=consistency,
+                kms_key_name=kms_key_name,
+                segment_size=segment_size,
+                max_workers=max_workers,
+            )
+            return
+
         if self._uses_grpc_write_path(layout):
             _validate_grpc_write_kms_key_name(layout, kms_key_name)
             finalize_on_close = self._resolve_finalize_on_close(

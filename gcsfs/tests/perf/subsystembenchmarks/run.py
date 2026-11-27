@@ -134,32 +134,23 @@ def parse_args(argv=None):
     groups = discover_groups()
     if args.group not in groups:
         parser.error(f"unknown --group {args.group!r}; available: {', '.join(groups)}")
-    return args
+    if rcu_state(args.bucket_type) in ("warm", "cold"):
+        import yaml
 
-
-_AMPLIFICATION_COLS = (
-    "gcs_bucket_name",
-    "measurement_window_start_unix_seconds",
-    "measurement_window_end_unix_seconds",
-)
-
-_AMPLIFICATION_COLS_DATASET = ("dataset_size_bytes",)
-_AMPLIFICATION_COLS_CHECKPOINT = ("checkpoint_physical_size_bytes",)
-
-
-def _csv_has_amplification_inputs(csv_path):
-    import csv
-
-    try:
-        with open(csv_path, newline="") as file:
-            header = next(csv.reader(file), [])
-        if not all(column in header for column in _AMPLIFICATION_COLS):
-            return False
-        return any(column in header for column in _AMPLIFICATION_COLS_DATASET) or any(
-            column in header for column in _AMPLIFICATION_COLS_CHECKPOINT
+        config_name = os.environ.get("GCSFS_SUBSYSTEM_CONFIG") or "configs.yaml"
+        config_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), args.group, config_name
         )
-    except Exception:
-        return False
+        if os.path.isfile(config_path):
+            with open(config_path) as f:
+                scenarios = (yaml.safe_load(f) or {}).get("scenarios") or []
+            if scenarios and all("write" in s.get("scenario", "") for s in scenarios):
+                parser.error(
+                    f"--group={args.group} has only write scenarios, which are "
+                    f"skipped on --bucket-type={args.bucket_type} "
+                    "(use *_rcu_z for RCU checkpoint saves)"
+                )
+    return args
 
 
 def enrich_amplification_with_retry(csv_path, project, client, *, retry_wait, sleep):
@@ -182,7 +173,9 @@ def require_complete_amplification(result):
 
 
 def _scrape_amplification(csv_path, args):
-    if not _csv_has_amplification_inputs(csv_path):
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import amplification
+
+    if not amplification.has_eligible_rows(csv_path):
         return None
     try:
         import time
