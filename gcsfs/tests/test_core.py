@@ -3422,6 +3422,16 @@ def test_default_gcp_universe(monkeypatch, mtls_env):
     assert fs.batch_url_base == "https://storage.googleapis.com/batch/storage/v1"
 
 
+def test_empty_gcp_universe_is_default(monkeypatch, mtls_env):
+    # An empty GOOGLE_CLOUD_UNIVERSE_DOMAIN means unset, as in google-cloud-storage.
+    monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "")
+
+    fs = fsspec.filesystem("gcs", token="anon")
+    assert fs.base == "https://storage.googleapis.com/storage/v1/"
+
+
 def _write_test_pki(directory):
     """Write a throwaway CA plus server and client certs signed by it."""
     import datetime as dt

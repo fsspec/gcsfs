@@ -150,19 +150,6 @@ def _stub_environment_detection(request):
         yield
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _mock_get_bucket_layout_on_emulator():
-    """Mock _get_bucket_layout to return UNKNOWN instantly on emulator."""
-    from gcsfs.tests.utils import _patch_get_bucket_layout_for_emulator
-
-    patch = _patch_get_bucket_layout_for_emulator()
-    if patch:
-        with patch:
-            yield
-    else:
-        yield
-
-
 def stop_docker(container):
     if not shutil.which("docker"):
         return
@@ -663,6 +650,14 @@ def zonal_write_mocks(request):
         return
 
     rapid_write_filesystems = _rapid_write_filesystems(request, layout)
+    # Layouts are cached per filesystem, so drop what setup (e.g. bucket
+    # cleanup on the emulator) already looked up; otherwise the mocked
+    # _get_bucket_layout below is never consulted.
+    test_filesystems = [
+        request.getfixturevalue(name)
+        for name in ("extended_gcsfs", "async_gcs")
+        if name in getattr(request, "fixturenames", ())
+    ]
 
     patch_target_get_bucket_layout = (
         "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_layout"
@@ -709,6 +704,9 @@ def zonal_write_mocks(request):
         mock.patch(patch_target_init_aaow, mock_init_aaow),
         contextlib.ExitStack() as stack,
     ):
+        for fs in test_filesystems:
+            fs.invalidate_storage_layout_cache()
+            stack.callback(fs.invalidate_storage_layout_cache)
         for fs in rapid_write_filesystems:
             stack.enter_context(mock.patch.object(fs, "rcu_rapid_write", True))
         mocks = {

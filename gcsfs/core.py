@@ -182,7 +182,8 @@ class UnclosableBytesIO(io.BytesIO):
 
 
 def _gcp_universe_domain():
-    return os.getenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "googleapis.com")
+    # An empty value means unset, as in google-cloud-storage.
+    return os.getenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN") or "googleapis.com"
 
 
 _MTLS_HOST = "storage.mtls.googleapis.com"
@@ -1201,6 +1202,14 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 self.dircache.pop(path, None)
                 path = self._parent(path)
 
+    def invalidate_storage_layout_cache(self, bucket=None):
+        """Forget cached bucket layouts; a no-op here, since this class caches none.
+
+        ``ExtendedGcsFileSystem`` caches each bucket's layout (zonal,
+        hierarchical namespace, Rapid Cache Ultra) and overrides this method.
+        ``_mkdir`` and ``_rmdir`` call it after creating or deleting a bucket.
+        """
+
     async def _mkdir(
         self,
         path,
@@ -1291,6 +1300,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         )
         self.invalidate_cache(bucket)
         self.invalidate_cache("")
+        self.invalidate_storage_layout_cache(bucket)
 
     mkdir = asyn.sync_wrapper(_mkdir)
 
@@ -1309,6 +1319,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         await self._call("DELETE", "b/" + bucket, json_out=False)
         self.invalidate_cache(bucket)
         self.invalidate_cache("")
+        self.invalidate_storage_layout_cache(bucket)
 
     rmdir = asyn.sync_wrapper(_rmdir)
 

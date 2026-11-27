@@ -30,6 +30,42 @@ Unreleased
   ``requests_timeout`` is not given (#633). Pass
   ``requests_timeout=aiohttp.ClientTimeout()`` to restore the old unbounded
   behavior.
+* **Bucket layout lookup failures no longer change HNS results or slow down
+  emulators.** Previously any failed ``get_storage_layout`` lookup silently
+  fell back to flat-bucket behavior and was repeated on every operation:
+  against fake-gcs-server and other ``http://`` endpoints each operation
+  spent 30-100 s retrying a lookup that can never succeed there, and on HNS
+  buckets a transient failure made ``mv`` of a folder move nothing,
+  ``makedirs`` and ``rmdir`` do nothing, and ``rm -r`` leave folders behind.
+  Now ``http://`` endpoints skip the lookup; other non-default endpoints try
+  once until a lookup succeeds on that instance (after which they follow the
+  default endpoint's rules); on an endpoint known to serve Storage Control,
+  only an explicit list of non-retryable errors (``PermissionDenied``,
+  anonymous ``Unauthenticated``, ``InvalidArgument``, ``FailedPrecondition``,
+  and ``MethodNotImplemented``) falls back, plus ``Unauthenticated`` for a
+  caller with a client certificate (mTLS) until a lookup succeeds on the
+  instance, since the gRPC lookup presents no certificate and certificate-bound
+  tokens are accepted only over mTLS. Fallbacks are stored separately
+  from real answers and re-checked after 5 minutes (or immediately on
+  ``invalidate_storage_layout_cache()``); missing buckets are never remembered.
+  Any other error — transient failures after retries, rejected credentials for
+  a non-anonymous caller, or unexpected statuses such as ``Cancelled`` and
+  ``Aborted`` — raises instead of falling back: during a Storage Control
+  outage, the first operation on a bucket fails after about 60 s instead of
+  silently using flat semantics (#1110).
+* With ``token=None`` and no default credentials, the gRPC clients of
+  ``ExtendedGcsFileSystem`` now use anonymous credentials, as they already
+  did for ``token="anon"``, instead of looking for default credentials
+  themselves on every bucket-layout lookup (#1109).
+* An empty ``GOOGLE_CLOUD_UNIVERSE_DOMAIN`` is treated as unset
+  (``googleapis.com``), as in google-cloud-storage. Before, requests went to
+  ``https://storage.``, and the gRPC clients of ``ExtendedGcsFileSystem``
+  failed to start.
+* Creating or deleting a bucket through ``ExtendedGcsFileSystem`` now forgets
+  its cached layout. Before, a bucket deleted and created again with another
+  layout kept the old one on the same filesystem instance; for example, a
+  bucket recreated as HNS stayed cached as flat and ``makedirs`` created no
+  folder.
 * ``sign()`` now works with credentials that have no private key, such as
   Compute Engine and GKE Workload Identity credentials. When the credentials
   cannot sign, the URL is signed through the IAM Credentials ``signBlob`` API
