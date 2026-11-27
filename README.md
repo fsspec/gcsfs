@@ -80,9 +80,9 @@ GCSFS plays nicely with the rest of the Python data ecosystem.
 
 ## Telemetry
 
-GCSFS includes lightweight caller framework detection to identify upstream libraries (such as Pandas, PyTorch, Ray, and Dask) interacting with Google Cloud Storage, along with compute environment detection (`gce`, `gke`, `oth`). This helps prioritize performance optimizations and maintain ecosystem compatibility.
+GCSFS includes lightweight, automatic usage telemetry that sends structured attribution in the `x-goog-storage-gcsfs-features` header on HTTP and gRPC requests: upstream calling framework (such as Pandas, PyTorch, Ray, Dask, and Hugging Face), top-level public method name (and post-open file operations), whether five allowlisted method flags (`recursive`, `detail`, `withdirs`, `prefix`, `cache_options`) are enabled, and compute environment (`gce`, `gke`, `oth`). This helps prioritize performance optimizations and maintain ecosystem compatibility.
 
-- **Privacy Guaranteed:** Only open-source library names and environment categories (`gce`, `gke`, `oth`) are detected. No user data, object keys, file paths, cluster or instance names, credentials, or code logic are ever collected or transmitted.
+- **Privacy Guaranteed:** Only recognized open-source library names, public method names, whether those five allowlisted flags are enabled (truthy, including defaults), and environment categories (`gce`, `gke`, `oth`) are recorded. No user data, object keys, file paths, argument values, cluster or instance names, credentials, or code logic are ever collected or transmitted.
 - **Opt-out:** Telemetry can be disabled at any time by setting the standard environment variable `DO_NOT_TRACK=1` or `GCSFS_NO_TELEMETRY=true` (or `1` / `yes`).
 
 For full details, see the [Telemetry Documentation](https://gcsfs.readthedocs.io/en/latest/telemetry.html).

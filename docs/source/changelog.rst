@@ -87,10 +87,33 @@ Unreleased
   ``use_experimental_adaptive_prefetching`` ``open()`` argument. Setting either to false
   when ``cache_type`` is not set turns off the default ``adaptive`` cache and falls back
   to ``readahead``, as in 2026.8.x (#1172).
-* Framework telemetry now recognizes the Agent Development Kit (``google.adk``) and
-  reports ``adk`` in the ``x-goog-storage-gcsfs-features`` header. Other ``google``
-  packages, such as ``google-auth`` and ``google-cloud-storage``, are not reported as
-  a framework.
+* **Automatic usage telemetry for HTTP and gRPC requests.** ``gcsfs`` now
+  attaches a web-safe base64-encoded ``GcsfsFeatures`` protobuf payload in the
+  ``x-goog-storage-gcsfs-features`` header (for both HTTP requests and gRPC
+  Storage Control RPCs / Rapid and Rapid Cache Ultra stream opens), recording
+  only:
+
+  - the outermost recognized calling framework (19 libraries: ``pandas``,
+    ``polars``, ``dask``, ``ray``, ``spark``, ``pyarrow``, ``duckdb``,
+    ``xarray``, ``fastparquet``, ``torch``, ``torchdata``, ``lightning``,
+    ``datasets``, ``transformers``, ``orbax``, ``tensorstore``,
+    ``tensorflow``, ``jax``, and the Agent Development Kit ``google.adk`` as
+    ``adk``),
+  - the top-level public filesystem method name or post-open file operation
+    (``file_read``, ``file_write``, etc.),
+  - whether five allowlisted method flags (``recursive``, ``detail``,
+    ``withdirs``, ``prefix``, ``cache_options``) are enabled (truthy,
+    including defaults) on the outermost call, never raw argument values, and
+  - the compute environment category (``gce``, ``gke``, or ``oth``), detected
+    once per process without blocking storage calls (GCP hardware is recognized
+    on Linux and Windows; other operating systems report ``oth``).
+
+  The ``User-Agent`` header carries no telemetry tokens. No user data, paths,
+  argument values, credentials, or cluster/instance names are ever collected.
+  Telemetry can be disabled immediately at any time by setting
+  ``DO_NOT_TRACK=1`` or ``GCSFS_NO_TELEMETRY=true``. See :doc:`telemetry` for
+  details (#1097, #1098, #1054, #1128, #1140, #1160, #1161, #1162, #1164,
+  #1165, #1193, #1220).
 * **Zero-copy gRPC reads for Rapid and Rapid Cache Ultra buckets.** When opening
   a gRPC read stream (``init_mrd``), ``gcsfs`` sets
   ``GCS_PYTHON_CLIENT_ZERO_COPY_BIDI_READ=1`` if unset (set ``=0`` to keep the

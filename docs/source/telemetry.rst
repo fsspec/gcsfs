@@ -1,7 +1,7 @@
 Telemetry & Usage Attribution
 =============================
 
-``gcsfs`` includes lightweight, automatic caller framework detection to identify the upstream data science and machine learning libraries that interact with Google Cloud Storage (GCS), along with compute environment detection.
+``gcsfs`` includes lightweight, automatic usage telemetry to identify the upstream data science and machine learning libraries, top-level public operations (and whether five allowlisted flags are enabled), and compute environments interacting with Google Cloud Storage (GCS).
 
 Purpose
 -------
@@ -11,7 +11,7 @@ The Python data ecosystem comprises a rich variety of frameworks—including Pan
 What is Collected
 -----------------
 
-When an operation is executed, ``gcsfs`` identifies the name of the top-level calling framework, the public method name, and the compute environment, and sends them in the ``x-goog-storage-gcsfs-features`` header as a web-safe base64-encoded ``GcsfsFeatures`` protobuf payload.
+When an operation is executed, ``gcsfs`` identifies the name of the top-level calling framework, the public method name, whether five allowlisted method flags (``recursive``, ``detail``, ``withdirs``, ``prefix``, ``cache_options``) are enabled, and the compute environment, and sends them in the ``x-goog-storage-gcsfs-features`` header as a web-safe base64-encoded ``GcsfsFeatures`` protobuf payload.
 
 ``x-goog-storage-gcsfs-features`` is an internal header managed by ``gcsfs``: any caller-supplied per-request value is stripped or replaced, and the header is omitted when no recognized attribution dimensions are active.
 
@@ -20,8 +20,10 @@ Example Header
 
 .. code-block:: text
 
-   User-Agent: python-gcsfs/2026.3.0
+   User-Agent: python-gcsfs/<version>
    x-goog-storage-gcsfs-features: CAEQARgC
+
+In this example, ``CAEQARgC`` decodes to ``method=GCSFS_METHOD_LS``, ``framework=GCSFS_FRAMEWORK_PANDAS``, and ``environment=GCSFS_ENVIRONMENT_GKE``.
 
 Recognized Frameworks
 ~~~~~~~~~~~~~~~~~~~~~
@@ -37,7 +39,7 @@ If no recognized framework is present on the call stack (e.g. pure Python script
 Method Names
 ~~~~~~~~~~~~
 
-``gcsfs`` also records the top-level public filesystem or file operation name (such as ``ls``, ``cat_file``, ``find``, ``open``, or subsequent file reads and writes), never file paths, argument values, or payloads. For methods that accept ``recursive``, ``detail``, ``withdirs``, ``prefix``, or ``cache_options``, ``gcsfs`` also records only boolean flag presence for the outermost call (ignoring default ``"adaptive"`` cache settings on ``GCSFile`` and scoping explicit ``open()`` ``cache_options`` to ``open``).
+``gcsfs`` also records the top-level public filesystem or file operation name (such as ``ls``, ``cat_file``, ``find``, ``open``, or subsequent file reads and writes), never file paths, argument values, or payloads. For methods that accept ``recursive``, ``detail``, ``withdirs``, ``prefix``, or ``cache_options``, ``gcsfs`` also records only whether those flags are enabled (truthy, including defaults) for the outermost call (ignoring default ``"adaptive"`` cache settings on ``GCSFile`` and scoping explicit ``open()`` ``cache_options`` to ``open``).
 
 Compute Environments
 ~~~~~~~~~~~~~~~~~~~~
@@ -98,7 +100,7 @@ The header is omitted when no recognized attribution dimensions are active.
 Privacy & Security Guarantees
 -----------------------------
 
-Telemetry collection is strictly limited to open-source library names, public method names, boolean presence of five allowlisted method flags (``recursive``, ``detail``, ``withdirs``, ``prefix``, ``cache_options``), and environment categories (``gce``, ``gke``, ``oth``), and respects user privacy and security:
+Telemetry collection is strictly limited to open-source library names, public method names, whether five allowlisted method flags (``recursive``, ``detail``, ``withdirs``, ``prefix``, ``cache_options``) are enabled (truthy, including defaults), and environment categories (``gce``, ``gke``, ``oth``), and respects user privacy and security:
 
 - **No User Data or Payloads:** Object contents read or written are never inspected or recorded.
 - **No File Paths or Bucket Names:** Bucket names, object keys, folder hierarchies, and URIs are never collected.
@@ -111,8 +113,8 @@ How It Works
 ------------
 
 1. **Zero Configuration:** Upstream libraries do not need any code changes or special configuration. Detection occurs transparently when a filesystem is created and filesystem methods (e.g. ``fs.ls``, ``fs.cat_file``, ``fs.open``, ``df.to_parquet``, ``torch.load``) are called.
-2. **Thread Boundary Crossing:** In ``fsspec``, synchronous operations dispatch coroutines to a background asyncio event loop thread (``fsspecIO`` by default). ``gcsfs`` captures the calling framework on the user's thread and safely propagates it to the background event loop via Python ``contextvars``.
-3. **Performance & Caching:** Framework detection uses lightweight stack frame inspection (via ``sys._getframe()``) capped at 64 frames, and runs once per call on the caller's thread (never on the background event loop thread for synchronous calls). Compute environment detection runs once per process (querying the metadata server in the background when needed) and caches its result in memory. Active ``GCSFile`` instances cache the framework detected at ``open()`` (including when none is detected) so subsequent chunk reads, writes, and background prefetching execute with zero stack-walking overhead (``O(1)``); ``ZonalFile`` likewise reuses that cached attribution for subsequent HTTP metadata lookups and initial gRPC stream opens.
+2. **Thread Boundary Crossing:** In ``fsspec``, synchronous operations dispatch coroutines to a background asyncio event loop thread (``fsspecIO`` by default). ``gcsfs`` captures the calling framework, top-level public method name, and enabled allowlisted parameter flags once on the user's thread and safely propagates them to the background event loop via Python ``contextvars``.
+3. **Performance & Caching:** Framework detection uses lightweight stack frame inspection (via ``sys._getframe()``) capped at 64 frames, and runs once per call on the caller's thread (never on the background event loop thread for synchronous calls). Method parameter positions and defaults are precomputed once per wrapped function; per-call flag evaluation is skipped entirely when telemetry is disabled. Compute environment detection runs once per process (querying the metadata server in the background when needed) and caches its result in memory. Active ``GCSFile`` instances cache the framework detected at ``open()`` (including when none is detected) so subsequent chunk reads, writes, and background prefetching execute with zero stack-walking overhead (``O(1)``) and record per-operation ``file_*`` methods; ``ZonalFile`` likewise reuses that cached attribution for subsequent HTTP metadata lookups and initial gRPC stream opens.
 
 Disabling Telemetry
 -------------------
