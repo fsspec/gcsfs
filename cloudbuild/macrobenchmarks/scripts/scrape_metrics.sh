@@ -33,7 +33,20 @@ if [ -n "${_CHECKPOINT_LOAD_PATH}" ] || [ "${_SEED_CHECKPOINT}" = "true" ]; then
   MIN_RESTORE_DATAPOINTS=1
   RESUME_ARGS=(--resume-run)
 fi
+# Bucket whose read traffic monitoring.py reports as dataset_* columns.
+MONITORED_DATASET_BUCKET="$DATASET_BUCKET"
 case "${_WORKLOAD}" in
+  adk-agent)
+    # One row per scenario, so each scenario is its own BigQuery series.
+    WORKLOAD_ID="adk-${_SCENARIO}"
+    PARSER_MODULE=metrics.parsers.adk
+    PROFILE_ARGS=(--require-artifact-metrics)
+    MIN_WRITE_DATAPOINTS=0
+    MIN_RESTORE_DATAPOINTS=0
+    RESUME_ARGS=()
+    # No dataset bucket is created for the ADK workload.
+    MONITORED_DATASET_BUCKET=""
+    ;;
   ray-data-ray-train-pytorch)
     WORKLOAD_ID="${_WORKLOAD}"
     PARSER_MODULE=metrics.parsers.ray_train
@@ -132,7 +145,7 @@ sleep "${SYSTEM_METRICS_SETTLE_SECONDS:-900}"
 python3 -m metrics.monitoring \
   --project "${PROJECT_ID}" --run-id "$RUN_ID" \
   --start-time "$START_TIME" --end-time "$END_TIME" \
-  --checkpoint-bucket "$CHECKPOINT_BUCKET" --dataset-bucket "$DATASET_BUCKET" \
+  --checkpoint-bucket "$CHECKPOINT_BUCKET" --dataset-bucket "$MONITORED_DATASET_BUCKET" \
   --cluster "$CLUSTER_NAME" \
   --out-dir "$RAW_DIR" || true
 run_calculate "$SUMMARY" \

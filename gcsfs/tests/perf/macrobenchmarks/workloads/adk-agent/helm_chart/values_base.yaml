@@ -1,0 +1,29 @@
+# One pod runs one scenario of the ADK FsspecArtifactService benchmark.
+# Cloud Build sets workload.scenario from _SCENARIO and
+# gcsfs.ckptWritePath to gs://<per-run bucket>/checkpoints, which is the
+# artifact root.
+# 48 vCPUs is the C4 minimum for TIER_1 networking.
+nodeSelector:
+  cloud.google.com/gke-nodepool: c4-standard-48
+
+serviceAccount: default
+namespace: default
+workload_launcher: launcher.sh
+
+workload:
+  configFile: adk_bench.py
+  configPath: /workload/configs/
+  # Needs git for git+https gcsfs requirements.
+  image: python:3.12
+  nodes: 1
+  # iterative-workspace, genmedia-pipeline or hitl-handoff.
+  scenario: iterative-workspace
+  # Overrides installed after requirements.txt (gcsfs under test and any custom
+  # google-adk build).
+  requirements:
+  envs:
+    - name: GCSFS_LOG_LEVEL
+      value: INFO
+
+gcsfs:
+  ckptWritePath: ""

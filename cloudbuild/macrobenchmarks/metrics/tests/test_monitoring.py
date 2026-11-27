@@ -265,6 +265,43 @@ def test_align_interval_widens_sub_period_window_to_a_full_period():
     assert monitoring._align_interval(130, 140, 60) == (120, 180)
 
 
+def test_monitoring_windows_scopes_artifact_pod_and_pads_bucket_delta():
+    # Step ran 00:00:10..00:05:00 (pip install took the first minute). The
+    # driver's measured scenario ran 00:01:15..00:04:10 (175 s), and final
+    # validation read from the bucket until 00:05:00.
+    pod_win, bucket_win = monitoring._monitoring_windows(
+        "1970-01-01T00:00:10Z",
+        "1970-01-01T00:05:00Z",
+        60,
+        [
+            {
+                "window_start": "1970-01-01T00:01:15Z",
+                "window_end": "1970-01-01T00:04:10Z",
+            }
+        ],
+    )
+
+    assert pod_win == (130, 250)
+    assert bucket_win == (0, 420)
+    # Sub-period artifact windows (<60 s) keep one 60 s period ending at window_end.
+    short_pod, _ = monitoring._monitoring_windows(
+        "1970-01-01T00:00:10Z",
+        "1970-01-01T00:03:00Z",
+        60,
+        [
+            {
+                "window_start": "1970-01-01T00:01:15Z",
+                "window_end": "1970-01-01T00:02:05Z",
+            }
+        ],
+    )
+    assert short_pod == (65, 125)
+    # Non-artifact runs keep identical pod and bucket windows.
+    assert monitoring._monitoring_windows(
+        "1970-01-01T00:00:10Z", "1970-01-01T00:05:00Z", 60
+    ) == ((0, 300), (0, 300))
+
+
 def test_collect_emits_one_row_per_pod_and_series():
     client = _FakeClient(
         {
@@ -446,3 +483,64 @@ def test_assemble_rows_isolates_du_failure():
         end_epoch=600,
     )
     assert {r.metric for r in rows} == {"cpu"}
+
+
+def test_assemble_rows_uses_bucket_window_for_node_capacity():
+    client = _FakeClient(
+        {
+            "kubernetes.io/container/cpu/core_usage_time": [
+                _series("run-workload-0-a", [2.0])
+            ],
+            "kubernetes.io/node/cpu/allocatable_cores": [_bucket_series([47.8])],
+            "storage.googleapis.com/network/sent_bytes_count": [_bucket_series([10.0])],
+        }
+    )
+
+    monitoring.assemble_rows(
+        client,
+        None,
+        project="p",
+        run_id="run",
+        cluster="my-cluster",
+        checkpoint_bucket="ckpt",
+        dataset_bucket=None,
+        restore_rows=[],
+        start_epoch=130,
+        end_epoch=190,
+        bucket_start_epoch=0,
+        bucket_end_epoch=420,
+    )
+
+    pod_reqs = [
+        r for r in client.requests if 'resource.type = "k8s_container"' in r["filter"]
+    ]
+    node_reqs = [
+        r for r in client.requests if 'resource.type = "k8s_node"' in r["filter"]
+    ]
+    bucket_reqs = [
+        r for r in client.requests if 'resource.type = "gcs_bucket"' in r["filter"]
+    ]
+    assert pod_reqs and all(
+        (
+            r["interval"]["start_time"]["seconds"],
+            r["interval"]["end_time"]["seconds"],
+        )
+        == (130, 190)
+        for r in pod_reqs
+    )
+    assert node_reqs and all(
+        (
+            r["interval"]["start_time"]["seconds"],
+            r["interval"]["end_time"]["seconds"],
+        )
+        == (0, 420)
+        for r in node_reqs
+    )
+    assert bucket_reqs and all(
+        (
+            r["interval"]["start_time"]["seconds"],
+            r["interval"]["end_time"]["seconds"],
+        )
+        == (0, 420)
+        for r in bucket_reqs
+    )

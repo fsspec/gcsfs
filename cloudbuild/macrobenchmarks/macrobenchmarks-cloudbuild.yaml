@@ -62,6 +62,9 @@ substitutions:
   # *_rcu_warm only: seconds to wait after the warm-up reads for the cache to
   # ingest the objects. Empty => 120 + 1.5 per GiB of the warmed objects.
   _RCU_WARMUP_SETTLE_SECONDS: ""
+  # _WORKLOAD=adk-agent only: iterative-workspace, genmedia-pipeline or
+  # hitl-handoff. Needs _SEED_CHECKPOINT=false.
+  _SCENARIO: "iterative-workspace"
 
 # Each step's logic lives in scripts/<step>.sh; the step bodies below are just
 # the env wiring (Cloud Build substitutions reach the scripts as environment
@@ -78,6 +81,7 @@ steps:
       - "_ZONE=${_ZONE}"
       - "_GKE_SERVICE_ACCOUNT=${_GKE_SERVICE_ACCOUNT}"
       - "_WORKLOAD=${_WORKLOAD}"
+      - "_SCENARIO=${_SCENARIO}"
       - "_DATASET_PATH=${_DATASET_PATH}"
       - "_REQUIREMENTS=${_REQUIREMENTS}"
       - "_BUCKET_TYPE=${_BUCKET_TYPE}"
@@ -127,6 +131,7 @@ steps:
       - "LOCATION=${LOCATION}"
       - "_BUCKET_TYPE=${_BUCKET_TYPE}"
       - "_ZONE=${_ZONE}"
+      - "_WORKLOAD=${_WORKLOAD}"
       - "_DATASET_PATH=${_DATASET_PATH}"
     args: ["cloudbuild/macrobenchmarks/scripts/create_buckets.sh"]
     waitFor: ["init-variables"]
@@ -222,6 +227,7 @@ steps:
       - "PROJECT_ID=${PROJECT_ID}"
       - "_ZONE=${_ZONE}"
       - "_WORKLOAD=${_WORKLOAD}"
+      - "_SCENARIO=${_SCENARIO}"
       - "_BUCKET_TYPE=${_BUCKET_TYPE}"
       - "_DATASET_PATH=${_DATASET_PATH}"
       - "_CHECKPOINT_LOAD_PATH=${_CHECKPOINT_LOAD_PATH}"
@@ -267,6 +273,7 @@ steps:
       - "_CHECKPOINT_LOAD_PATH=${_CHECKPOINT_LOAD_PATH}"
       - "_SEED_CHECKPOINT=${_SEED_CHECKPOINT}"
       - "_WORKLOAD=${_WORKLOAD}"
+      - "_SCENARIO=${_SCENARIO}"
       - "_REQUIREMENTS=${_REQUIREMENTS}"
       - "_IMAGE=${_IMAGE}"
       - "_BUCKET_TYPE=${_BUCKET_TYPE}"
