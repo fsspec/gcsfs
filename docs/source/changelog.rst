@@ -7,6 +7,14 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
+* **gcsfs now requires** ``requests>=2.33.0`` (released 2026-03-25). Older
+  releases have known security advisories (CVE-2024-35195, CVE-2024-47081 and
+  CVE-2026-25645), and ``google-api-core>=2.31.0`` already requires this
+  version, so most installs are unaffected. If your environment pins an older
+  ``requests``, or ``urllib3<1.26`` or ``certifi<2023.5.7`` (which
+  ``requests`` 2.33.0 no longer accepts), upgrade them with
+  ``pip install -U "requests>=2.33.0"`` (the ``requests`` API is unchanged
+  across 2.x), or stay on gcsfs 2026.10.x until you can.
 * **The storage control gRPC channel (bucket-layout lookup and HNS folder
   operations) now sends keepalive pings** (every 30 s while a call is open,
   20 s to answer). A connection that dies silently in the middle of a call is
