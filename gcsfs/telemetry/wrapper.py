@@ -127,31 +127,40 @@ _FILE_METHOD_TOKENS: dict[str, str] = {
     "write": "file_write",
 }
 
+# One row per GcsfsFeatures.MethodParams flag. List a method when its outermost call
+# accepts the flag (declared or forwarded via **kwargs) and it can change behavior.
+# When adding a MethodParams field, run
+# test_method_tracked_params_match_signatures_and_kwargs_forwarding in
+# gcsfs/tests/test_telemetry.py to list every candidate method across both filesystems.
+_TRACKED_PARAM_METHODS: dict[str, frozenset[str]] = {
+    "cache_options": frozenset({"open", "open_async", "read_text"}),
+    "detail": frozenset({"find", "glob", "listdir", "ls", "walk"}),
+    "prefix": frozenset({"disk_usage", "du", "find", "listdir", "ls", "walk"}),
+    "recursive": frozenset(
+        {
+            "cat",
+            "copy",
+            "cp",
+            "delete",
+            "download",
+            "expand_path",
+            "get",
+            "move",
+            "mv",
+            "put",
+            "rename",
+            "rm",
+            "upload",
+        }
+    ),
+    "withdirs": frozenset({"disk_usage", "du", "find", "glob"}),
+}
+
 _METHOD_TRACKED_PARAMS: dict[str, frozenset[str]] = {
-    "cat": frozenset({"recursive"}),
-    "copy": frozenset({"recursive"}),
-    "cp": frozenset({"recursive"}),
-    "delete": frozenset({"recursive"}),
-    "disk_usage": frozenset({"prefix", "withdirs"}),
-    "download": frozenset({"recursive"}),
-    "du": frozenset({"prefix", "withdirs"}),
-    "expand_path": frozenset({"recursive"}),
-    "find": frozenset({"detail", "prefix", "withdirs"}),
-    "get": frozenset({"recursive"}),
-    "glob": frozenset({"detail", "withdirs"}),
-    "listdir": frozenset({"detail", "prefix"}),
-    "ls": frozenset({"detail", "prefix"}),
-    "move": frozenset({"recursive"}),
-    "mv": frozenset({"recursive"}),
-    "open": frozenset({"cache_options"}),
-    "open_async": frozenset({"cache_options"}),
-    "put": frozenset({"recursive"}),
-    "read_text": frozenset({"cache_options"}),
-    "rename": frozenset({"recursive"}),
-    "rm": frozenset({"recursive"}),
-    "upload": frozenset({"recursive"}),
-    "walk": frozenset({"detail", "prefix"}),
-    "write_text": frozenset({"cache_options"}),
+    method: frozenset(
+        param for param, methods in _TRACKED_PARAM_METHODS.items() if method in methods
+    )
+    for method in frozenset().union(*_TRACKED_PARAM_METHODS.values())
 }
 
 _METHOD_IMPLICIT_TRUTHY_DEFAULTS: dict[str, frozenset[str]] = {

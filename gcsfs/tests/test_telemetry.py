@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import base64
 import contextlib
@@ -14,6 +15,7 @@ import logging
 import os
 import pickle
 import sys
+import textwrap
 import threading
 import time
 import types
@@ -34,7 +36,7 @@ from google.longrunning import operations_pb2, operations_pb2_grpc
 import gcsfs.telemetry.detector as environment_module
 import gcsfs.telemetry.manager as manager_mod
 from gcsfs import __version__ as version
-from gcsfs.core import GCSFileSystem
+from gcsfs.core import GCSFile, GCSFileSystem
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 from gcsfs.telemetry import schema as telemetry_schema
 from gcsfs.telemetry.context import (
@@ -63,6 +65,7 @@ from gcsfs.telemetry.wrapper import (
     _FILE_METHOD_TOKENS,
     _METHOD_TRACKED_PARAMS,
     _TRACKED_METHODS,
+    _TRACKED_PARAM_METHODS,
     _cached_param_spec,
     _gcs_async_wrapper,
     _gcs_sync_wrapper,
@@ -4623,9 +4626,7 @@ def test_encode_features_wire_parity(monkeypatch):
     full_dec = _decode_features(full_enc)
     single_mp_dec = _decode_features(single_mp)
     mp = full_dec.method_params
-    assert set().union(*_METHOD_TRACKED_PARAMS.values()) == (
-        telemetry_schema._METHOD_PARAM_FIELDS
-    )
+    assert set(_TRACKED_PARAM_METHODS) == telemetry_schema._METHOD_PARAM_FIELDS
     assert f"{Dimension.FRAMEWORK}" == "fw"
     assert str(Dimension.METHOD_PARAMS) == "mp"
     assert GRPC_METADATA_KEY == "x-goog-storage-gcsfs-features"
@@ -5434,3 +5435,111 @@ def test_unrecognized_long_framework_omitted_while_method_params_encoded(monkeyp
     assert headers["User-Agent"] == f"python-gcsfs/{version}"
     assert decoded.framework == GcsfsFramework.GCSFS_FRAMEWORK_UNSPECIFIED
     assert decoded.method_params.cache_options is True
+
+
+_INTENTIONALLY_UNTRACKED_PARAMS: dict[tuple[str, str], str] = {
+    ("tree", "prefix"): "indentation string, not a listing prefix",
+    ("du", "detail"): "du returns the same sizes either way",
+    ("disk_usage", "detail"): "du returns the same sizes either way",
+    ("glob", "prefix"): "_glob overwrites it with the pattern stem",
+    ("touch", "cache_options"): "write mode never builds a read cache",
+    ("write_text", "cache_options"): "write mode never builds a read cache",
+}
+_TRACKED_WITHOUT_FORWARDING: dict[tuple[str, str], str] = {
+    (
+        "open_async",
+        "cache_options",
+    ): "fsspec stub; tracked for subclasses that implement it",
+}
+
+
+def _unwrapped_method(cls, name):
+    attr = inspect.getattr_static(cls, name, None)
+    attr = inspect.unwrap(getattr(attr, "fget", attr)) if attr is not None else None
+    return attr if inspect.isfunction(attr) else None
+
+
+def _entry_point_method(cls, method):
+    fn = _unwrapped_method(cls, method)
+    if fn is None or inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn):
+        fn = _unwrapped_method(cls, f"_{method}") or fn
+    return fn
+
+
+def _accepted_params_for_method(cls, fn, seen=()):
+    fields = telemetry_schema._METHOD_PARAM_FIELDS
+    params = inspect.signature(fn).parameters
+    found = {name for name in params if name in fields}
+    if fn.__name__ == "_open":
+        file_classes: tuple[type, ...] = (GCSFile,)
+        if issubclass(cls, ExtendedGcsFileSystem):
+            from gcsfs.zonal_file import ZonalFile
+
+            file_classes = (GCSFile, ZonalFile)
+        for file_cls in file_classes:
+            found |= set(inspect.signature(file_cls.__init__).parameters) & fields
+    varkw = next((p.name for p in params.values() if p.kind is p.VAR_KEYWORD), None)
+    if varkw is None or fn in seen:
+        return found
+    owner = next(k for k in cls.__mro__ if k.__name__ == fn.__qualname__.split(".")[0])
+    for node in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(fn)))):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        func, target = node.func, getattr(node.func.value, "id", None)
+        if target == varkw and func.attr in ("get", "pop") and node.args:
+            found |= {getattr(node.args[0], "value", None)} & fields
+            continue
+        forwards = any(
+            k.arg is None and getattr(k.value, "id", None) == varkw
+            for k in node.keywords
+        )
+        if not forwards or func.attr.removeprefix("_") not in _TRACKED_METHODS:
+            continue
+        if target == "self":
+            callee = _entry_point_method(cls, func.attr)
+        elif (
+            isinstance(func.value, ast.Call)
+            and getattr(func.value.func, "id", None) == "super"
+        ):
+            parents = cls.__mro__[cls.__mro__.index(owner) + 1 :]
+            callee = next(
+                (
+                    _unwrapped_method(k, func.attr)
+                    for k in parents
+                    if func.attr in vars(k)
+                ),
+                None,
+            )
+        else:
+            continue
+        if callee is not None:
+            fixed = {k.arg for k in node.keywords if k.arg}
+            found |= _accepted_params_for_method(cls, callee, seen + (fn,)) - fixed
+    return found
+
+
+@pytest.mark.parametrize("fs_cls", [GCSFileSystem, ExtendedGcsFileSystem])
+def test_method_tracked_params_match_signatures_and_kwargs_forwarding(fs_cls):
+    """Verify `_TRACKED_PARAM_METHODS` stays complete and free of drift against live signatures."""
+    tracked = {(m, p) for m, params in _METHOD_TRACKED_PARAMS.items() for p in params}
+
+    accepted = {
+        (method, param)
+        for method in _TRACKED_METHODS
+        if (fn := _entry_point_method(fs_cls, method)) is not None
+        for param in _accepted_params_for_method(fs_cls, fn)
+    }
+
+    untracked_but_accepted = accepted - tracked - _INTENTIONALLY_UNTRACKED_PARAMS.keys()
+    tracked_but_not_accepted = tracked - accepted - _TRACKED_WITHOUT_FORWARDING.keys()
+    stale_exclusions = _INTENTIONALLY_UNTRACKED_PARAMS.keys() - accepted
+    tracked_and_excluded = tracked & _INTENTIONALLY_UNTRACKED_PARAMS.keys()
+    stale_stubs = (_TRACKED_WITHOUT_FORWARDING.keys() & accepted) | (
+        _TRACKED_WITHOUT_FORWARDING.keys() - tracked
+    )
+    assert not untracked_but_accepted, sorted(untracked_but_accepted)
+    assert not tracked_but_not_accepted, sorted(tracked_but_not_accepted)
+    assert not stale_exclusions, sorted(stale_exclusions)
+    assert not tracked_and_excluded, sorted(tracked_and_excluded)
+    assert not stale_stubs, sorted(stale_stubs)
+    assert _METHOD_TRACKED_PARAMS.keys() <= _TRACKED_METHODS
