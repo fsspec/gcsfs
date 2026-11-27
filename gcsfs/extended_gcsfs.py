@@ -3293,11 +3293,24 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         size = (await self._info(rpath, **info_kwargs)).get("size", 0)
 
                     details = dict(mrd_pool.details or {})
+                    hash_key = {"md5": "md5Hash", "crc32c": "crc32c"}.get(consistency)
+                    if hash_key and hash_key not in details:
+                        # Fail before writing lpath rather than skip the check.
+                        raise NotImplementedError(
+                            f"No {consistency} checksum available to do consistency "
+                            f"check for {rpath}. GCS does not provide md5 sums for "
+                            "objects in Zonal buckets or for composite objects."
+                        )
                     if int(details.get("size", -1)) != size:
                         # Metadata hashes don't describe the bytes the MRD will serve.
                         details.pop("crc32c", None)
                         details.pop("md5Hash", None)
-                        if consistency in ("md5", "crc32c"):
+                        if hash_key:
+                            logger.warning(
+                                f"Object metadata for {rpath} does not match the size "
+                                f"being downloaded; checking 'size' instead of "
+                                f"{consistency!r}."
+                            )
                             consistency = "size"
                     details["size"] = size
                     checker = get_consistency_checker(consistency)

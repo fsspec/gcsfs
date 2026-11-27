@@ -1640,6 +1640,16 @@ def test_get_put(consistency, gcs):
         pytest.skip("emulator does not return size")
     gcs.consistency = consistency
     with tmpfile() as fn:
+        if (
+            consistency == "md5"
+            and hasattr(gcs, "_sync_lookup_bucket_layout")
+            and gcs._sync_lookup_bucket_layout(TEST_BUCKET).is_zonal
+        ):
+            # Objects in Zonal buckets have no MD5 to check the download against.
+            with pytest.raises(NotImplementedError, match="No md5 checksum"):
+                gcs.get(TEST_BUCKET + "/test/accounts.1.json", fn)
+            assert not os.path.exists(fn)
+            return
         gcs.get(TEST_BUCKET + "/test/accounts.1.json", fn)
         data = files["test/accounts.1.json"]
         assert open(fn, "rb").read() == data

@@ -1971,7 +1971,7 @@ async def test_get_file_request_validates_consistency(
     "consistency, bad_details",
     [
         pytest.param("md5", {"md5Hash": _md5_b64(b"wrong")}, id="md5"),
-        pytest.param("crc32c", {"crc32c": _md5_b64(b"wrong")[:8]}, id="crc32c"),
+        pytest.param("crc32c", {"crc32c": "AAAAAA=="}, id="crc32c"),
     ],
 )
 async def test_get_file_request_checksum_mismatch_removes_file(
@@ -2008,10 +2008,72 @@ async def test_get_file_request_checksum_mismatch_removes_file(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
 @pytest.mark.parametrize("consistency", ["md5", "crc32c"])
+@pytest.mark.parametrize("stale", [False, True])
+async def test_get_file_request_missing_hash_raises_not_implemented(
+    async_gcs,
+    gcs_bucket_mocks,
+    monkeypatch,
+    tmp_path,
+    file_path,
+    bucket_layout,
+    consistency,
+    stale,
+):
+    """
+    Tests that a requested hash the object metadata does not have (as md5 on
+    Zonal objects) raises NotImplementedError, whether or not the metadata size
+    is stale, instead of skipping the check, and that no local file is kept.
+    """
+    _enable_crc32c_checker(monkeypatch)
+
+    with gcs_bucket_mocks(json_data, bucket_type_val=bucket_layout) as mocks:
+        mocks["downloader"].persisted_size = len(json_data)
+        mocks["pool"].details = {"size": 10 if stale else len(json_data)}
+        lpath = tmp_path / "output.txt"
+        with pytest.raises(NotImplementedError, match=f"No {consistency} checksum"):
+            await async_gcs._get_file_request(
+                file_path, str(lpath), consistency=consistency
+            )
+
+        assert not lpath.exists()
+        mocks["downloader"].download_ranges.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+async def test_get_file_checksum_mismatch_removes_file(
+    async_gcs, gcs_bucket_mocks, monkeypatch, tmp_path, file_path, bucket_layout
+):
+    """
+    Tests that `consistency` passed to _get_file reaches the single-stream gRPC
+    download: a crc32c mismatch raises ChecksumError and removes the local file.
+    """
+    from gcsfs.retry import ChecksumError
+
+    _enable_crc32c_checker(monkeypatch)
+
+    with gcs_bucket_mocks(json_data, bucket_type_val=bucket_layout) as mocks:
+        mocks["downloader"].persisted_size = len(json_data)
+        mocks["pool"].details = {"size": len(json_data), "crc32c": "AAAAAA=="}
+        lpath = tmp_path / "output.txt"
+        with (
+            # _get_file_concurrent retries the ChecksumError; skip the real backoff.
+            mock.patch("gcsfs.retry.asyncio.sleep", new_callable=mock.AsyncMock),
+            pytest.raises(ChecksumError),
+        ):
+            await async_gcs._get_file(file_path, str(lpath), consistency="crc32c")
+
+        assert not lpath.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bucket_layout", GRPC_READ_LAYOUTS)
+@pytest.mark.parametrize("consistency", ["md5", "crc32c"])
 async def test_get_file_request_stale_metadata_falls_back_to_size_check(
     async_gcs,
     gcs_bucket_mocks,
     monkeypatch,
+    caplog,
     tmp_path,
     file_path,
     bucket_layout,
@@ -2032,15 +2094,19 @@ async def test_get_file_request_stale_metadata_falls_back_to_size_check(
             "crc32c": _crc32c_b64(stale),
         }
         lpath = tmp_path / "output.txt"
-        with mock.patch(
-            "gcsfs.extended_gcsfs.get_consistency_checker",
-            wraps=gcsfs.extended_gcsfs.get_consistency_checker,
-        ) as spy_checker:
+        with (
+            caplog.at_level(logging.WARNING, logger="gcsfs"),
+            mock.patch(
+                "gcsfs.extended_gcsfs.get_consistency_checker",
+                wraps=gcsfs.extended_gcsfs.get_consistency_checker,
+            ) as spy_checker,
+        ):
             await async_gcs._get_file_request(
                 file_path, str(lpath), consistency=consistency
             )
 
         spy_checker.assert_called_once_with("size")
+        assert f"checking 'size' instead of {consistency!r}" in caplog.text
         assert lpath.read_bytes() == json_data
 
 
