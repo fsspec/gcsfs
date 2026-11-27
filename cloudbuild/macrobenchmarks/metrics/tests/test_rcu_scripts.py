@@ -248,6 +248,14 @@ def test_init_accepts_rcu_bucket_types(init_env, bucket_type):
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert _build_var(init_env, "RUN_ID") == "buildid-1234abcd"
+    assert _build_var(init_env, "DATASET_BUCKET") == "pfx-macrobench-dataset-1234abcd"
+
+
+def test_init_omits_dataset_bucket_when_dataset_path_is_empty(init_env):
+    proc, _ = _run_step("init-variables", init_env, _DATASET_PATH="")
+
+    assert proc.returncode == 1
+    assert _build_var(init_env, "DATASET_BUCKET") is None
 
 
 @pytest.mark.parametrize("bucket_type", ["rcu_z", "standard_rcu", "standard_rcu_hot"])
@@ -503,6 +511,28 @@ def test_delete_buckets_keeps_going_when_teardown_calls_fail(env):
     assert [d.split()[4] for d in deletes] == [
         "gs://ckpt-bucket",
         "gs://dataset-bucket",
+    ]
+
+
+@pytest.mark.parametrize("dataset_line", ["", "export DATASET_BUCKET=\n"])
+def test_delete_buckets_skips_dataset_bucket_when_unset_or_empty(env, dataset_line):
+    build_vars = Path(env["BUILD_VARS_FILE"])
+    build_vars.write_text(
+        build_vars.read_text().replace(
+            "export DATASET_BUCKET=dataset-bucket\n", dataset_line
+        )
+    )
+
+    proc, calls = _run_step("delete-buckets", env)
+
+    assert proc.returncode == 0, proc.stderr
+    assert calls == [
+        "gcloud storage rm --recursive --project=test-project gs://ckpt-bucket",
+        (
+            "gcloud alpha storage buckets rapid-caches list gs://ckpt-bucket "
+            "--project=test-project --format=value(id,state)"
+        ),
+        "gcloud storage buckets delete gs://ckpt-bucket --project=test-project --quiet",
     ]
 
 
@@ -887,3 +917,70 @@ def test_run_workload_checks_z_checkpoint_saves_are_rapid(env, listing, failures
         c.startswith("gcloud storage objects list gs://ckpt-bucket/checkpoints/** ")
         for c in listings
     )
+
+
+@pytest.mark.parametrize("step", ["seed-checkpoint", "run-workload"])
+def test_workload_releases_pass_requirements_via_set_literal(env, step):
+    comma_reqs = "google-adk[fsspec,eval]==2.15.1 gcsfs>=2026.9.0,<2027"
+    _add_build_vars(env, RUN_DATASET_PATH="gs://dataset-bucket/", SEEDED_CKPT_PATH=SEED)
+
+    proc, calls = _run_step(step, env, _REQUIREMENTS=comma_reqs, STUB_LS=SEED)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    (install,) = _calls(calls, "helm install")
+    assert f"--set-literal workload.requirements={comma_reqs}" in install
+    assert "--set workload.requirements=" not in install
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="needs helm")
+def test_shared_workload_helm_args_preserves_comma_requirements_with_helm():
+    comma_reqs = "google-adk[fsspec,eval]==2.15.1 gcsfs>=2026.9.0,<2027"
+    chart = (
+        REPO
+        / "gcsfs/tests/perf/macrobenchmarks/workloads/hf-datasets-pytorch-lightning/helm_chart"
+    )
+    helm_env = {
+        "PATH": os.environ["PATH"],
+        "_DATASET_PATH": "gs://src-bucket/data",
+        "_MODEL_ID": "gs://models/llama",
+        "_IMAGE": "test-image:1",
+        "_HF_TOKEN": "",
+        "_NODES": "2",
+        "_RANKS_PER_NODE": "4",
+        "_REQUIREMENTS": comma_reqs,
+        "_TRAINING_STRATEGY": "ddp",
+        "_TENSOR_PARALLEL_SIZE": "4",
+        "_DATA_PARALLEL_SIZE": "2",
+        "_EPOCHS": "3",
+        "_SHUFFLE_BUFFER_SIZE": "1000",
+        "_SHUFFLE_MAX_BUFFER_INPUT_SHARDS": "10",
+        "_DATALOADER_PREFETCH_FACTOR": "2",
+        "_DATALOADER_WORKERS": "4",
+        "_MACHINE_TYPE": "c4-standard-192",
+    }
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                "source cloudbuild/macrobenchmarks/scripts/lib.sh "
+                "&& shared_workload_helm_args "
+                '&& helm template test "$1" -f "$1/values_base.yaml" '
+                '"${SHARED_HELM_ARGS[@]}"'
+            ),
+            "_",
+            str(chart),
+        ],
+        cwd=REPO,
+        env=helm_env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    docs = [doc for doc in yaml.safe_load_all(proc.stdout) if doc]
+    (jobset,) = [doc for doc in docs if doc["kind"] == "JobSet"]
+    container = jobset["spec"]["replicatedJobs"][0]["template"]["spec"]["template"][
+        "spec"
+    ]["containers"][0]
+    env_map = {item["name"]: item.get("value") for item in container["env"]}
+    assert env_map["REQUIREMENTS"] == comma_reqs

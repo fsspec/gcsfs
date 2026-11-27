@@ -261,7 +261,7 @@ shared_workload_helm_args() {
     --set workload.hfToken="${_HF_TOKEN}"
     --set workload.nodes="${_NODES}"
     --set workload.ranksPerNode="${_RANKS_PER_NODE}"
-    --set workload.requirements="${_REQUIREMENTS}"
+    --set-literal workload.requirements="${_REQUIREMENTS}"
     --set workload.trainingStrategy="${_TRAINING_STRATEGY}"
     --set workload.tensorParallelSize="${_TENSOR_PARALLEL_SIZE}"
     --set workload.dataParallelSize="${_DATA_PARALLEL_SIZE}"
