@@ -136,6 +136,73 @@ def _avoid_adc_timeout(monkeypatch):
     yield
 
 
+def _is_local_grpc_target(target):
+    """Whether a gRPC channel target is a unix socket or a loopback host."""
+    target = str(target)
+    if target.startswith("unix:"):
+        return True
+    if "://" in target:  # e.g. dns:///host:443 or google-c2p:///host
+        target = target.split("://", 1)[1].rsplit("/", 1)[-1]
+    elif target.startswith("dns:"):
+        target = target[len("dns:") :]
+    if target.startswith("["):
+        host = target[1:].split("]", 1)[0]
+    elif target.count(":") == 1:
+        host = target.rsplit(":", 1)[0]
+    else:
+        host = target
+    return host in ("localhost", "0.0.0.0", "::1") or host.startswith("127.")
+
+
+@pytest.fixture(autouse=True)
+def _forbid_remote_grpc_connections(request, monkeypatch):
+    """Fail a unit test that leaves a gRPC channel to a remote host connecting.
+
+    Creating a channel is lazy and harmless, but once a call starts, gRPC
+    resolves DNS and connects on its own threads, which call getenv(). On older
+    glibc (e.g. Ubuntu 24.04 CI runners) that races with any setenv() in the
+    test process (pytest, monkeypatch.setenv) and can crash the whole run with
+    SIGSEGV. Stub the client instead. Runs against real GCS and benchmark runs
+    are exempt.
+    """
+    if is_real_gcs() or request.config.getoption("--run-benchmarks"):
+        yield
+        return
+
+    import grpc
+    import grpc.aio
+
+    remote_channels = []
+
+    def record_remote(create_channel):
+        def wrapper(target, *args, **kwargs):
+            channel = create_channel(target, *args, **kwargs)
+            if not _is_local_grpc_target(target):
+                remote_channels.append((target, channel))
+            return channel
+
+        return wrapper
+
+    for name in ("secure_channel", "insecure_channel"):
+        monkeypatch.setattr(grpc.aio, name, record_remote(getattr(grpc.aio, name)))
+
+    yield
+
+    idle = (grpc.ChannelConnectivity.IDLE, grpc.ChannelConnectivity.SHUTDOWN)
+    connected = sorted(
+        {
+            target
+            for target, channel in remote_channels
+            if channel.get_state(try_to_connect=False) not in idle
+        }
+    )
+    if connected:
+        pytest.fail(
+            f"Unit test connected gRPC channel(s) to {connected}; stub the client "
+            "instead of reaching a real host."
+        )
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _stub_environment_detection(request):
     """Keep host-specific env/ tokens and metadata server probes out of tests."""

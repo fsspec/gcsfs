@@ -24,6 +24,7 @@ import grpc
 import grpc.aio
 import pytest
 import pytest_asyncio
+from google.api_core import exceptions as api_exceptions
 from google.auth.transport import DEFAULT_RETRYABLE_STATUS_CODES
 from google.cloud import storage_control_v2
 from google.longrunning import operations_pb2, operations_pb2_grpc
@@ -1819,6 +1820,15 @@ def zonal_fs_harness(monkeypatch):
         self._grpc_client = object()
         return self._grpc_client
 
+    # On an HNS bucket, _info probes get_folder alongside the object lookup.
+    # Answer it like the service does for an object so no real channel connects.
+    fake_control_plane_client = types.SimpleNamespace(
+        get_folder=mock.AsyncMock(side_effect=api_exceptions.NotFound("not a folder"))
+    )
+
+    async def fake_get_control_plane_client(self):
+        return fake_control_plane_client
+
     async def fake_create_mrd(
         grpc_client, bucket_name, object_name, generation=None, **kwargs
     ):
@@ -1850,6 +1860,11 @@ def zonal_fs_harness(monkeypatch):
     monkeypatch.setattr(CoreGCSFileSystem, "_call", fake_call)
     monkeypatch.setattr(ExtendedGcsFileSystem, "_lookup_bucket_layout", fake_layout)
     monkeypatch.setattr(ExtendedGcsFileSystem, "_get_grpc_client", fake_get_grpc_client)
+    monkeypatch.setattr(
+        ExtendedGcsFileSystem,
+        "_get_control_plane_client",
+        fake_get_control_plane_client,
+    )
     monkeypatch.setattr(
         zb_hns_utils.AsyncMultiRangeDownloader, "create_mrd", fake_create_mrd
     )
