@@ -153,7 +153,7 @@ _TRACKED_PARAM_METHODS: dict[str, frozenset[str]] = {
             "upload",
         }
     ),
-    "withdirs": frozenset({"disk_usage", "du", "find", "glob"}),
+    "withdirs": frozenset({"disk_usage", "du", "expand_path", "find", "glob"}),
 }
 
 _METHOD_TRACKED_PARAMS: dict[str, frozenset[str]] = {

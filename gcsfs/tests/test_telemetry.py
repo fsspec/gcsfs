@@ -5451,6 +5451,9 @@ _TRACKED_WITHOUT_FORWARDING: dict[tuple[str, str], str] = {
         "cache_options",
     ): "fsspec stub; tracked for subclasses that implement it",
 }
+_NEWER_FSSPEC_PARAMS: dict[tuple[str, str], str] = {
+    ("expand_path", "withdirs"): "added after fsspec 2026.9.0",
+}
 
 
 def _unwrapped_method(cls, name):
@@ -5531,7 +5534,12 @@ def test_method_tracked_params_match_signatures_and_kwargs_forwarding(fs_cls):
     }
 
     untracked_but_accepted = accepted - tracked - _INTENTIONALLY_UNTRACKED_PARAMS.keys()
-    tracked_but_not_accepted = tracked - accepted - _TRACKED_WITHOUT_FORWARDING.keys()
+    tracked_but_not_accepted = (
+        tracked
+        - accepted
+        - _TRACKED_WITHOUT_FORWARDING.keys()
+        - _NEWER_FSSPEC_PARAMS.keys()
+    )
     stale_exclusions = _INTENTIONALLY_UNTRACKED_PARAMS.keys() - accepted
     tracked_and_excluded = tracked & _INTENTIONALLY_UNTRACKED_PARAMS.keys()
     stale_stubs = (_TRACKED_WITHOUT_FORWARDING.keys() & accepted) | (
@@ -5542,4 +5550,7 @@ def test_method_tracked_params_match_signatures_and_kwargs_forwarding(fs_cls):
     assert not stale_exclusions, sorted(stale_exclusions)
     assert not tracked_and_excluded, sorted(tracked_and_excluded)
     assert not stale_stubs, sorted(stale_stubs)
+    assert _NEWER_FSSPEC_PARAMS.keys() <= tracked, sorted(
+        _NEWER_FSSPEC_PARAMS.keys() - tracked
+    )
     assert _METHOD_TRACKED_PARAMS.keys() <= _TRACKED_METHODS
