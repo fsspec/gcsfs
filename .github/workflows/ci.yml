@@ -123,7 +123,7 @@ jobs:
             gcsfs/tests/perf/subsystembenchmarks/dataloading/huggingface_datasets/requirements.txt
             gcsfs/tests/perf/subsystembenchmarks/dataloading/webdataset/requirements.txt
             gcsfs/tests/perf/subsystembenchmarks/dataloading/ray_data/requirements.txt
-            gcsfs/tests/perf/subsystembenchmarks/checkpointing/pytorch/requirements.txt
+            gcsfs/tests/perf/subsystembenchmarks/checkpointing/pytorch/requirements-common.txt
       - name: Install subsystem benchmark dependencies
         # Resolve dependencies together to catch version conflicts.
         run: |
@@ -132,7 +132,7 @@ jobs:
             -r gcsfs/tests/perf/subsystembenchmarks/dataloading/huggingface_datasets/requirements.txt \
             -r gcsfs/tests/perf/subsystembenchmarks/dataloading/webdataset/requirements.txt \
             -r gcsfs/tests/perf/subsystembenchmarks/dataloading/ray_data/requirements.txt \
-            -r gcsfs/tests/perf/subsystembenchmarks/checkpointing/pytorch/requirements.txt
+            -r gcsfs/tests/perf/subsystembenchmarks/checkpointing/pytorch/requirements-common.txt
       - name: Run subsystem benchmark unit tests
         run: pytest gcsfs/tests/perf/subsystembenchmarks --run-benchmarks-infra
 

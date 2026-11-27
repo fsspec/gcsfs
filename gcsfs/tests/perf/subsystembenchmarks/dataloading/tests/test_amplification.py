@@ -431,3 +431,130 @@ def test_enrich_csv_keeps_rcu_rows_without_monitoring_data_missing(
     assert result.missing_buckets == (f"b-{bucket_type}",)
     # No Anywhere Cache hit-ratio query either.
     assert not [r for r in client.requests if amplification._CACHE_SENT in r["filter"]]
+
+
+def test_hit_ratio_skipped_for_write_rows(tmp_path):
+    csv_path = tmp_path / "results.csv"
+    fields = [
+        "benchmark_case_id",
+        "workload_scenario",
+        "gcs_bucket_name",
+        "bucket_type",
+        "measurement_window_start_unix_seconds",
+        "measurement_window_end_unix_seconds",
+        "checkpoint_physical_size_bytes",
+        "checkpoint_read_throughput_mean_bytes_per_second",
+        "checkpoint_write_throughput_mean_bytes_per_second",
+        "measurement_round_count",
+    ]
+    _write_csv(
+        csv_path,
+        [
+            {
+                "benchmark_case_id": "read-case",
+                "workload_scenario": "checkpoint_read",
+                "gcs_bucket_name": "b-read",
+                "bucket_type": "rapid_cache_warm",
+                "measurement_window_start_unix_seconds": "1000",
+                "measurement_window_end_unix_seconds": "1060",
+                "checkpoint_physical_size_bytes": "500",
+                "checkpoint_read_throughput_mean_bytes_per_second": "250",
+                "checkpoint_write_throughput_mean_bytes_per_second": "N/A",
+                "measurement_round_count": "1",
+            },
+            {
+                "benchmark_case_id": "write-case",
+                "workload_scenario": "checkpoint_write",
+                "gcs_bucket_name": "b-write",
+                "bucket_type": "rapid_cache_warm",
+                "measurement_window_start_unix_seconds": "1000",
+                "measurement_window_end_unix_seconds": "1060",
+                "checkpoint_physical_size_bytes": "500",
+                "checkpoint_read_throughput_mean_bytes_per_second": "N/A",
+                "checkpoint_write_throughput_mean_bytes_per_second": "250",
+                "measurement_round_count": "1",
+            },
+        ],
+        fields,
+    )
+    client = _MetricClient(
+        {
+            amplification._CACHE_SENT: [
+                _CacheSeries(True, [_point(900.0)]),
+                _CacheSeries(False, [_point(100.0)]),
+            ],
+        }
+    )
+
+    result = amplification.enrich_csv(str(csv_path), "proj", client=client)
+
+    assert result.eligible == 1
+    assert result.enriched == 1
+    assert result.missing_buckets == ()
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert float(rows[0]["rapid_cache_hit_ratio"]) == 0.9
+    assert rows[1]["rapid_cache_hit_ratio"] == ""
+
+
+def test_has_eligible_rows(tmp_path):
+    fields = [
+        "benchmark_case_id",
+        "workload_scenario",
+        "gcs_bucket_name",
+        "bucket_type",
+        "measurement_window_start_unix_seconds",
+        "measurement_window_end_unix_seconds",
+        "checkpoint_physical_size_bytes",
+        "checkpoint_read_throughput_mean_bytes_per_second",
+        "checkpoint_write_throughput_mean_bytes_per_second",
+        "measurement_round_count",
+    ]
+    write_row = {
+        "benchmark_case_id": "write-case",
+        "workload_scenario": "checkpoint_write",
+        "gcs_bucket_name": "b-write",
+        "bucket_type": "regional",
+        "measurement_window_start_unix_seconds": "1000",
+        "measurement_window_end_unix_seconds": "1060",
+        "checkpoint_physical_size_bytes": "500",
+        "checkpoint_read_throughput_mean_bytes_per_second": "N/A",
+        "checkpoint_write_throughput_mean_bytes_per_second": "250",
+        "measurement_round_count": "1",
+    }
+    read_row = {
+        "benchmark_case_id": "read-case",
+        "workload_scenario": "checkpoint_read",
+        "gcs_bucket_name": "b-read",
+        "bucket_type": "regional",
+        "measurement_window_start_unix_seconds": "1000",
+        "measurement_window_end_unix_seconds": "1060",
+        "checkpoint_physical_size_bytes": "500",
+        "checkpoint_read_throughput_mean_bytes_per_second": "250",
+        "checkpoint_write_throughput_mean_bytes_per_second": "N/A",
+        "measurement_round_count": "1",
+    }
+
+    ckpt_csv = tmp_path / "ckpt.csv"
+    _write_csv(ckpt_csv, [write_row], fields)
+    assert amplification.has_eligible_rows(ckpt_csv) is False
+
+    _write_csv(ckpt_csv, [write_row, read_row], fields)
+    assert amplification.has_eligible_rows(ckpt_csv) is True
+
+    dataset_csv = tmp_path / "dataset.csv"
+    _write_csv(
+        dataset_csv,
+        [
+            {
+                "benchmark_case_id": "case-a",
+                "gcs_bucket_name": "b1",
+                "measurement_window_start_unix_seconds": "1000",
+                "measurement_window_end_unix_seconds": "1060",
+                "dataset_size_bytes": "500",
+                "measurement_round_count": "1",
+            }
+        ],
+        _FIELDS,
+    )
+    assert amplification.has_eligible_rows(dataset_csv) is True
