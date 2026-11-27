@@ -336,18 +336,11 @@ def _get_cache_type_header_value(cache_type, cache_source=None):
 _HTTP_HEADER_KEY_LOWER = HTTP_HEADER_KEY.lower()
 
 
-def _build_user_agent(cache_type=None, cache_source=None, telemetry_tokens=()):
+def _build_user_agent(cache_type=None, cache_source=None):
     """Build the standard User-Agent header string for HTTP requests."""
-    tokens = [f"python-gcsfs/{version}"]
-
+    base = f"python-gcsfs/{version}"
     cache_val = _get_cache_type_header_value(cache_type, cache_source)
-    if cache_val:
-        tokens.append(cache_val)
-
-    if telemetry_tokens:
-        tokens.extend(telemetry_tokens)
-
-    return " ".join(tokens)
+    return f"{base} {cache_val}" if cache_val else base
 
 
 class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
@@ -705,30 +698,27 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         return params
 
     def _get_headers(self, headers, cache_type=None, cache_source=None):
-        out = dict(headers) if headers else {}
-        need_ua = True
-        need_features = True
-        for k in out:
-            k_lower = k.lower()
-            if k_lower == "user-agent":
-                need_ua = False
-            elif k_lower == _HTTP_HEADER_KEY_LOWER:
-                need_features = False
-        if need_ua or need_features:
-            ua_tokens, encoded = (
-                telemetry_manager.default_usage_tracker.get_http_telemetry(
-                    include_tokens=need_ua,
-                    include_features=need_features,
-                )
+        # X-Goog-Storage-Gcsfs-Features is gcsfs-owned (strip/replace any incoming
+        # per-request value), while User-Agent remains caller-overridable.
+        out = {}
+        has_ua = False
+        if headers:
+            items = headers.items() if hasattr(headers, "items") else headers
+            for k, v in items:
+                k_lower = k.lower()
+                if k_lower == _HTTP_HEADER_KEY_LOWER:
+                    continue
+                if k_lower == "user-agent":
+                    has_ua = True
+                out[k] = v
+        if not has_ua:
+            out["User-Agent"] = _build_user_agent(
+                cache_type=cache_type,
+                cache_source=cache_source,
             )
-            if need_ua:
-                out["User-Agent"] = _build_user_agent(
-                    cache_type=cache_type,
-                    cache_source=cache_source,
-                    telemetry_tokens=ua_tokens,
-                )
-            if encoded:
-                out[HTTP_HEADER_KEY] = encoded
+        encoded = telemetry_manager.default_usage_tracker.encode_features()
+        if encoded:
+            out[HTTP_HEADER_KEY] = encoded
         self.credentials.apply(out)
         return out
 

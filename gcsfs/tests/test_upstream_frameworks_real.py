@@ -2,12 +2,28 @@
 
 from __future__ import annotations
 
+import base64
+
 import pytest
+
+from gcsfs.telemetry.context import HTTP_HEADER_KEY
+from gcsfs.telemetry.features_proto import GcsfsFeatures, GcsfsFramework
 
 # Run every test against both gcsfs.core.GCSFileSystem and ExtendedGcsFileSystem
 pytestmark = pytest.mark.parametrize(
     "mock_gcs_harness", ["core", "extended"], indirect=True, ids=["core", "extended"]
 )
+
+
+def _assert_all_feature_headers(harness, expected_fw: GcsfsFramework) -> None:
+    assert len(harness.feature_headers) > 0
+    for h in harness.feature_headers:
+        assert h, f"Missing {HTTP_HEADER_KEY} header"
+        decoded = GcsfsFeatures.deserialize(base64.urlsafe_b64decode(h))
+        assert (
+            decoded.framework == expected_fw
+        ), f"Expected {expected_fw.name} in {HTTP_HEADER_KEY}, got: {decoded.framework.name}"
+
 
 # ============================================================================
 # 1. PyTorch Lightning Integration Test
@@ -17,7 +33,7 @@ pytestmark = pytest.mark.parametrize(
 def test_pytorch_lightning_real_invocation(mock_gcs_harness, tmp_path):
     """
     Verify that when PyTorch Lightning triggers dataset/file loading,
-    'fw/lightning' is accurately detected as the top-most orchestrator.
+    'lightning' is accurately reported in X-Goog-Storage-Gcsfs-Features.
     """
     lightning = pytest.importorskip("lightning")
     import torch
@@ -76,12 +92,9 @@ def test_pytorch_lightning_real_invocation(mock_gcs_harness, tmp_path):
     mock_gcs_harness.clear()
     trainer.fit(model, datamodule=dm)
 
-    # Verify that User-Agent contains fw/lightning
-    assert len(mock_gcs_harness.user_agents) > 0
-    for ua in mock_gcs_harness.user_agents:
-        assert (
-            "fw/lightning" in ua
-        ), f"Expected 'fw/lightning' in User-Agent, got: '{ua}'"
+    _assert_all_feature_headers(
+        mock_gcs_harness, GcsfsFramework.GCSFS_FRAMEWORK_LIGHTNING
+    )
 
 
 def test_pytorch_lightning_native_checkpoint_save(mock_gcs_harness, tmp_path):
@@ -112,11 +125,9 @@ def test_pytorch_lightning_native_checkpoint_save(mock_gcs_harness, tmp_path):
     # Lightning's internal TorchCheckpointIO executes fs.makedirs, fs.pipe, fs.open
     trainer.save_checkpoint("gcs://test-bucket/model.ckpt")
 
-    assert len(mock_gcs_harness.user_agents) > 0
-    for ua in mock_gcs_harness.user_agents:
-        assert (
-            "fw/lightning" in ua
-        ), f"Expected 'fw/lightning' in User-Agent, got: '{ua}'"
+    _assert_all_feature_headers(
+        mock_gcs_harness, GcsfsFramework.GCSFS_FRAMEWORK_LIGHTNING
+    )
 
 
 # ============================================================================
@@ -126,7 +137,7 @@ def test_pytorch_lightning_native_checkpoint_save(mock_gcs_harness, tmp_path):
 
 def test_pytorch_native_dataloader_real_invocation(mock_gcs_harness):
     """
-    Verify that native PyTorch DataLoader reads detect 'fw/torch'.
+    Verify that native PyTorch DataLoader reads report 'torch' in X-Goog-Storage-Gcsfs-Features.
     """
     torch = pytest.importorskip("torch")
     from torch.utils.data import DataLoader, Dataset
@@ -149,9 +160,7 @@ def test_pytorch_native_dataloader_real_invocation(mock_gcs_harness):
     for batch in loader:
         pass
 
-    assert len(mock_gcs_harness.user_agents) > 0
-    for ua in mock_gcs_harness.user_agents:
-        assert "fw/torch" in ua, f"Expected 'fw/torch' in User-Agent, got: '{ua}'"
+    _assert_all_feature_headers(mock_gcs_harness, GcsfsFramework.GCSFS_FRAMEWORK_TORCH)
 
 
 # ============================================================================
@@ -161,7 +170,7 @@ def test_pytorch_native_dataloader_real_invocation(mock_gcs_harness):
 
 def test_pandas_read_csv_native(mock_gcs_harness):
     """
-    Verify that pd.read_csv("gcs://...") automatically tags User-Agent with 'fw/pandas'.
+    Verify that pd.read_csv("gcs://...") automatically reports 'pandas' in X-Goog-Storage-Gcsfs-Features.
     """
     pandas = pytest.importorskip("pandas")
 
@@ -171,14 +180,12 @@ def test_pandas_read_csv_native(mock_gcs_harness):
     )
 
     assert not df.empty
-    assert len(mock_gcs_harness.user_agents) > 0
-    for ua in mock_gcs_harness.user_agents:
-        assert "fw/pandas" in ua, f"Expected 'fw/pandas' in User-Agent, got: '{ua}'"
+    _assert_all_feature_headers(mock_gcs_harness, GcsfsFramework.GCSFS_FRAMEWORK_PANDAS)
 
 
 def test_pandas_to_csv_native(mock_gcs_harness):
     """
-    Verify that df.to_csv("gcs://...") automatically tags User-Agent with 'fw/pandas'.
+    Verify that df.to_csv("gcs://...") automatically reports 'pandas' in X-Goog-Storage-Gcsfs-Features.
     """
     pandas = pytest.importorskip("pandas")
 
@@ -186,6 +193,4 @@ def test_pandas_to_csv_native(mock_gcs_harness):
     mock_gcs_harness.clear()
     df.to_csv("gcs://test-bucket/out.csv", storage_options={"token": "anon"})
 
-    assert len(mock_gcs_harness.user_agents) > 0
-    for ua in mock_gcs_harness.user_agents:
-        assert "fw/pandas" in ua, f"Expected 'fw/pandas' in User-Agent, got: '{ua}'"
+    _assert_all_feature_headers(mock_gcs_harness, GcsfsFramework.GCSFS_FRAMEWORK_PANDAS)

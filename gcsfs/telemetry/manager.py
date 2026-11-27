@@ -3,14 +3,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
 
-from gcsfs.telemetry.context import (
-    USER_AGENT_DIMENSIONS,
-    Dimension,
-    get_telemetry_context,
-    sanitize_token,
-)
+from gcsfs.telemetry.context import Dimension, get_telemetry_context
 from gcsfs.telemetry.detector import (
     BaseDetector,
     EnvironmentDetector,
@@ -106,83 +100,31 @@ class UsageMetricsTracker:
             return tokens
         return {k: v for k, v in tokens.items() if k in dimensions}
 
-    def get_tokens(
-        self,
-        dimensions: frozenset[Dimension | str] | None = None,
-        tokens_map: Mapping[str, str] | None = None,
-    ) -> list[str]:
-        """
-        Return sanitized formatted telemetry tokens for the requested dimensions.
-
-        Parameters
-        ----------
-        dimensions : frozenset[Dimension | str] | None, optional
-            Dimensions to include, or None to include all active dimensions.
-        tokens_map : Mapping[str, str] | None, optional
-            Optional mapping already returned by ``collect_tokens_map()``; used
-            as is without re-running detectors or re-checking opt-out.
-
-        Returns
-        -------
-        list[str]
-            List of sanitized formatted token strings, e.g. ['fw/pandas', 'env/gke'].
-        """
-        if tokens_map is None:
-            # Include process-wide dimensions (e.g. env), read fresh per request.
-            tokens_map = self.collect_tokens_map(
-                dimensions=dimensions, call_scoped_only=False
-            )
-
-        out = []
-        for dim_key, val in tokens_map.items():
-            if dimensions is None or dim_key in dimensions:
-                clean_val = sanitize_token(val)
-                if clean_val:
-                    out.append(f"{dim_key}/{clean_val}")
-        return out
-
     def get_dimension(self, dimension: Dimension) -> str | None:
         """
-        Resolve a specific dimension's sanitized bare token value (e.g. Dimension.FRAMEWORK -> 'pandas').
+        Resolve a specific dimension's bare token value (e.g. Dimension.FRAMEWORK -> 'pandas').
+
+        The returned string is only stripped (not HTTP-header sanitized) and must not
+        be interpolated directly into raw HTTP headers.
         """
         token_map = self.collect_tokens_map(
             dimensions=frozenset({dimension}), call_scoped_only=False
         )
-        return sanitize_token(token_map.get(dimension.value))
+        val = token_map.get(dimension.value)
+        if not isinstance(val, str):
+            return None
+        stripped = val.strip()
+        return stripped or None
 
-    def encode_features(
-        self, tokens_map: Mapping[str, str] | None = None
-    ) -> str | None:
+    def encode_features(self) -> str | None:
         """Return web-safe base64 encoded GcsfsFeatures for active telemetry state."""
-        if tokens_map is None:
-            tokens_map = self.collect_tokens_map(call_scoped_only=False)
+        tokens_map = self.collect_tokens_map(call_scoped_only=False)
         if not any(tokens_map.values()):
             return None
 
         from gcsfs.telemetry import schema as telemetry_schema
 
         return telemetry_schema.encode_features(tokens_map)
-
-    def get_http_telemetry(
-        self,
-        *,
-        include_tokens: bool = True,
-        include_features: bool = True,
-    ) -> tuple[list[str], str | None]:
-        """Collect HTTP User-Agent tokens and encoded GcsfsFeatures in one lookup."""
-        if not (include_tokens or include_features):
-            return [], None
-
-        tokens_map = self.collect_tokens_map(call_scoped_only=False)
-        ua_tokens = (
-            self.get_tokens(dimensions=USER_AGENT_DIMENSIONS, tokens_map=tokens_map)
-            if include_tokens
-            else []
-        )
-        encoded = (
-            self.encode_features(tokens_map=tokens_map) if include_features else None
-        )
-        return ua_tokens, encoded
 
 
 # Default singleton instance pre-configured with standard detectors
