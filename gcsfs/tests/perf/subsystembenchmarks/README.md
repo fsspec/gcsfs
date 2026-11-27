@@ -194,7 +194,7 @@ For checkpointing groups:
 | `--device` | `cpu` | `cpu` or `cuda`; execution device for `checkpointing/pytorch_{save,load,reshard}` (`ws16` rows skip on an 8-GPU host). |
 | `--amplification-wait` | `420` | Seconds to wait before querying Cloud Monitoring. |
 | `--amplification-retry-wait` | `60` | Seconds to wait before one retry of missing metrics. |
-| `--require-amplification` | off | Fail if no eligible row gets amplification metrics. Rows whose Monitoring points were dropped stay blank and are logged. |
+| `--require-amplification` | off | Fail if the scrape errors for any bucket, or if no eligible row gets amplification metrics. Rows whose Monitoring points were dropped stay blank and are logged. |
 
 ### RCU bucket types
 

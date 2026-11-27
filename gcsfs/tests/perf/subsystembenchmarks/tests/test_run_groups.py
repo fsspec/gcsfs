@@ -97,6 +97,21 @@ def test_required_amplification_allows_partial_or_no_eligible_rows(
     run.require_any_amplification(EnrichmentResult(eligible, enriched, missing))
 
 
+def test_required_amplification_rejects_scrape_errors_even_with_enriched_rows():
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading.amplification import (
+        EnrichmentResult,
+    )
+
+    result = EnrichmentResult(
+        eligible=3,
+        enriched=2,
+        missing_buckets=("bucket-err",),
+        failed_buckets=("bucket-err",),
+    )
+    with pytest.raises(RuntimeError, match="errored for buckets: bucket-err"):
+        run.require_any_amplification(result)
+
+
 def test_amplification_wait_default_matches_the_scrape_module():
     from gcsfs.tests.perf.subsystembenchmarks.dataloading import amplification
 

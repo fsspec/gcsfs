@@ -40,6 +40,8 @@ class EnrichmentResult:
     eligible: int
     enriched: int
     missing_buckets: tuple
+    # Buckets whose scrape raised (API or parsing errors), unlike dropped points.
+    failed_buckets: tuple = ()
 
     @property
     def complete(self):
@@ -53,14 +55,16 @@ class EnrichmentResult:
 # short (up to about 1% of bytes and 40% of request_count) because BidiReadObject
 # CANCELLED counts keep landing for up to about 13 minutes after window_end.
 _END_PAD_SECONDS = 120
-# The padded window can end up to 179s after window_end, and these metrics take up
+# The padded window can end up to 180s after window_end, and these metrics take up
 # to 210s to become visible in Cloud Monitoring.
 DEFAULT_SCRAPE_WAIT_SECONDS = 420
 
 
 def align_interval(start_epoch, end_epoch, period=60, end_pad=_END_PAD_SECONDS):
     start = (int(start_epoch) // period) * period
-    end = ((int(end_epoch) + end_pad + period - 1) // period) * period
+    # Round strictly up: window_end is stored truncated to whole seconds, so a value
+    # on a minute boundary still had reads in the minute after it.
+    end = ((int(end_epoch) + end_pad) // period + 1) * period
     return start, end
 
 
@@ -101,17 +105,25 @@ def _sum_series(client, project, filter_, start_epoch, end_epoch, period):
     return sum(minutes.values()) if minutes is not None else None
 
 
-def _minutes_consistent(egress_minutes, req_minutes):
-    """False if a minute with reads in one metric has no point in the other.
+def _minutes_consistent(egress_minutes, req_minutes, period=60):
+    """False if the per-minute points show that a DELTA point was dropped.
 
-    Cloud Monitoring omits a dropped DELTA point entirely, while a quiet minute
-    reports an explicit 0, so a missing minute means a truncated total.
+    Cloud Monitoring omits a dropped point entirely, while a quiet minute reports
+    an explicit 0. So a total is truncated when a minute with reads in one metric
+    has no point in the other, or when a minute with reads is followed by no point
+    at all before later reads (an idle pause reports a 0 in the next minute first).
     """
     for minutes, other in (
         (egress_minutes, req_minutes),
         (req_minutes, egress_minutes),
     ):
         if any(value > 0 and minute not in other for minute, value in minutes.items()):
+            return False
+        last_positive = max((m for m, v in minutes.items() if v > 0), default=None)
+        if last_positive is not None and any(
+            value > 0 and minute < last_positive and (minute + period) not in minutes
+            for minute, value in minutes.items()
+        ):
             return False
     return True
 
@@ -208,6 +220,7 @@ def enrich_csv(csv_path, project, *, client):
 
     eligible = 0
     missing = []
+    failed = []
     for row in rows:
         bucket = row.get("gcs_bucket_name")
         if not bucket:
@@ -259,7 +272,7 @@ def enrich_csv(csv_path, project, *, client):
                 ready = (
                     (egress or 0.0) > 0
                     and (reqs or 0.0) > 0
-                    and _minutes_consistent(egress_minutes, req_minutes)
+                    and _minutes_consistent(egress_minutes, req_minutes, 60)
                 )
             ideal = physical_size * rounds
             if ready and ideal > 0:
@@ -268,6 +281,7 @@ def enrich_csv(csv_path, project, *, client):
                 row[f"{prefix}_read_amplification_ratio"] = str(egress / ideal)
         except Exception as exc:
             logging.warning("amplification scrape failed for %s: %s", bucket, exc)
+            failed.append(bucket)
 
         if not all(row.get(column) not in (None, "") for column in cols_to_check):
             missing.append(bucket)
@@ -291,6 +305,7 @@ def enrich_csv(csv_path, project, *, client):
         eligible=eligible,
         enriched=eligible - len(missing),
         missing_buckets=missing_buckets,
+        failed_buckets=tuple(sorted(set(failed))),
     )
 
 

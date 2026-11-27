@@ -89,6 +89,12 @@ def test_align_interval_pads_end_window_for_late_delta_flushes():
     assert amplification.align_interval(1010, 1054, period=60, end_pad=0) == (960, 1080)
 
 
+def test_align_interval_rounds_a_minute_boundary_end_strictly_up():
+    # window_end is truncated to whole seconds, so 1020 still read during
+    # (1020, 1080] and needs two trailing minutes after that one.
+    assert amplification.align_interval(1000, 1020, period=60) == (960, 1200)
+
+
 def test_bucket_queries_include_padded_trailing_minutes():
     client = _RecordingClient()
 
@@ -180,6 +186,7 @@ def test_enrich_csv_logs_instead_of_printing_on_row_failure(tmp_path, caplog):
         )
     assert result.enriched == 0
     assert result.missing_buckets == ("b1",)
+    assert result.failed_buckets == ("b1",)
     assert any("amplification scrape failed" in rec.message for rec in caplog.records)
 
 
@@ -462,9 +469,47 @@ def test_enrich_csv_keeps_a_row_with_a_dropped_minute_missing(tmp_path):
     )
 
     assert result.missing_buckets == ("b1",)
+    # A dropped point is missing data, not a scrape error.
+    assert result.failed_buckets == ()
     row = _read_row(csv_path)
     assert row["dataset_read_bytes"] == ""
     assert row["dataset_read_request_count"] == ""
+
+
+def _minute_points(values):
+    return [_TimeSeries([_point(value, end=end, int64=True) for end, value in values])]
+
+
+def test_enrich_csv_keeps_a_minute_dropped_from_both_metrics_missing(tmp_path):
+    """Reads at 1020 and 1140 with no point at all for 1080 means 1080 was dropped."""
+    csv_path = tmp_path / "results.csv"
+    _write_csv(csv_path, [_dataset_row("zonal")], _FIELDS + ["bucket_type"])
+    egress = _minute_points([(1020, 500.0), (1140, 500.0)])
+    reqs = _minute_points([(1020, 5.0), (1140, 5.0)])
+
+    result = amplification.enrich_csv(
+        str(csv_path), "proj", client=_SequencedClient([egress, reqs])
+    )
+
+    assert result.missing_buckets == ("b1",)
+    assert _read_row(csv_path)["dataset_read_bytes"] == ""
+
+
+def test_enrich_csv_accepts_an_idle_pause_with_explicit_zeros(tmp_path):
+    """An idle minute reports explicit 0s, so reads resuming after it are complete."""
+    csv_path = tmp_path / "results.csv"
+    _write_csv(csv_path, [_dataset_row("zonal")], _FIELDS + ["bucket_type"])
+    egress = _minute_points([(1020, 500.0), (1080, 0.0), (1140, 500.0)])
+    reqs = _minute_points([(1020, 5.0), (1080, 0.0), (1140, 5.0)])
+
+    result = amplification.enrich_csv(
+        str(csv_path), "proj", client=_SequencedClient([egress, reqs])
+    )
+
+    assert result.missing_buckets == ()
+    row = _read_row(csv_path)
+    assert row["dataset_read_bytes"] == "1000"
+    assert row["dataset_read_request_count"] == "10"
 
 
 def test_enrich_csv_accepts_explicit_zero_minutes(tmp_path):

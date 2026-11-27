@@ -168,12 +168,18 @@ def enrich_amplification_with_retry(csv_path, project, client, *, retry_wait, sl
 
 
 def require_any_amplification(result):
-    """Fail only when the scrape enriched nothing.
+    """Fail on a scrape error, or when the scrape enriched nothing.
 
     Cloud Monitoring occasionally drops a DELTA point, and a dropped point never
     comes back on retry, so a few missing rows are expected. Those rows stay blank
-    and are logged. No enriched row at all means the scrape itself is broken.
+    and are logged. A scrape that raised for a bucket, or no enriched row at all,
+    means the scrape itself is broken.
     """
+    if result.failed_buckets:
+        raise RuntimeError(
+            "read-amplification scrape errored for buckets: "
+            + ", ".join(result.failed_buckets)
+        )
     if result.eligible and not result.enriched:
         raise RuntimeError(
             "read-amplification metrics missing for every bucket: "
