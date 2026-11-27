@@ -136,21 +136,53 @@ def _avoid_adc_timeout(monkeypatch):
     yield
 
 
+def _split_host_port(address):
+    """Split ``host[:port]`` (IPv6 in brackets) into ``(host, port)``.
+
+    A missing port defaults to 443, as the Google API clients assume.
+    """
+    if address.startswith("["):
+        host, _, rest = address[1:].partition("]")
+        port = rest[1:] if rest.startswith(":") else ""
+    elif address.count(":") == 1:
+        host, port = address.split(":")
+    else:
+        host, port = address, ""
+    return host, port or "443"
+
+
+def _http_emulator_addresses():
+    """``(host, port)`` of the configured GCS emulator, which only speaks HTTP."""
+    return {
+        _split_host_port(location.split("://", 1)[-1].split("/", 1)[0])
+        for location in (os.getenv("STORAGE_EMULATOR_HOST"), params.get("endpoint_url"))
+        if location and location != "default"
+    }
+
+
 def _is_local_grpc_target(target):
-    """Whether a gRPC channel target is a unix socket or a loopback host."""
+    """Whether a gRPC target is a gRPC server run by the tests themselves.
+
+    That is a unix socket or a loopback address other than the HTTP emulator.
+    gcsfs points its gRPC clients at the emulator address too, and connecting
+    there starts the same resolver and connection threads as a real host.
+    """
     target = str(target)
     if target.startswith("unix:"):
         return True
-    if "://" in target:  # e.g. dns:///host:443 or google-c2p:///host
-        target = target.split("://", 1)[1].rsplit("/", 1)[-1]
+    if "://" in target:
+        scheme, rest = target.split("://", 1)
+        if scheme != "dns":
+            # e.g. google-c2p:///localhost: DirectPath resolves through xDS and
+            # the metadata server, whatever the host is.
+            return False
+        target = rest.rsplit("/", 1)[-1]
     elif target.startswith("dns:"):
         target = target[len("dns:") :]
-    if target.startswith("["):
-        host = target[1:].split("]", 1)[0]
-    elif target.count(":") == 1:
-        host = target.rsplit(":", 1)[0]
-    else:
-        host = target
+    address = _split_host_port(target)
+    if address in _http_emulator_addresses():
+        return False
+    host = address[0]
     return host in ("localhost", "0.0.0.0", "::1") or host.startswith("127.")
 
 
@@ -173,12 +205,29 @@ def _forbid_remote_grpc_connections(request, monkeypatch):
     import grpc.aio
 
     remote_channels = []
+    connected = set()
+    idle = (grpc.ChannelConnectivity.IDLE, grpc.ChannelConnectivity.SHUTDOWN)
+
+    def check(target, channel):
+        if channel.get_state(try_to_connect=False) not in idle:
+            connected.add(target)
 
     def record_remote(create_channel):
         def wrapper(target, *args, **kwargs):
             channel = create_channel(target, *args, **kwargs)
             if not _is_local_grpc_target(target):
                 remote_channels.append((target, channel))
+                close = channel._close
+
+                # Fixtures such as gcs or extended_gcsfs close their channels
+                # before this autouse fixture tears down, and a closed channel
+                # reads SHUTDOWN. So also check the state just before closing;
+                # close() and "async with" both go through _close().
+                async def checked_close(grace=None):
+                    check(target, channel)
+                    await close(grace)
+
+                channel._close = checked_close
             return channel
 
         return wrapper
@@ -188,18 +237,12 @@ def _forbid_remote_grpc_connections(request, monkeypatch):
 
     yield
 
-    idle = (grpc.ChannelConnectivity.IDLE, grpc.ChannelConnectivity.SHUTDOWN)
-    connected = sorted(
-        {
-            target
-            for target, channel in remote_channels
-            if channel.get_state(try_to_connect=False) not in idle
-        }
-    )
+    for target, channel in remote_channels:
+        check(target, channel)
     if connected:
         pytest.fail(
-            f"Unit test connected gRPC channel(s) to {connected}; stub the client "
-            "instead of reaching a real host."
+            f"Unit test connected gRPC channel(s) to {sorted(connected)}; stub "
+            "the client instead of reaching a real host."
         )
 
 
