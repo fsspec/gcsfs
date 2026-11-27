@@ -11,9 +11,9 @@ The Python data ecosystem comprises a rich variety of frameworks—including Pan
 What is Collected
 -----------------
 
-When an operation is executed, ``gcsfs`` identifies the name of the top-level calling framework, the public method name, and the compute environment, and sends them in the ``X-Goog-Storage-Gcsfs-Features`` header as a web-safe base64-encoded ``GcsfsFeatures`` protobuf payload.
+When an operation is executed, ``gcsfs`` identifies the name of the top-level calling framework, the public method name, and the compute environment, and sends them in the ``x-goog-storage-gcsfs-features`` header as a web-safe base64-encoded ``GcsfsFeatures`` protobuf payload.
 
-``X-Goog-Storage-Gcsfs-Features`` is omitted when no recognized attribution dimensions are active.
+``x-goog-storage-gcsfs-features`` is omitted when no recognized attribution dimensions are active.
 
 Example Header
 ~~~~~~~~~~~~~~
@@ -21,7 +21,7 @@ Example Header
 .. code-block:: text
 
    User-Agent: python-gcsfs/2026.3.0
-   X-Goog-Storage-Gcsfs-Features: EAEYAg==
+   x-goog-storage-gcsfs-features: CAEQARgC
 
 Recognized Frameworks
 ~~~~~~~~~~~~~~~~~~~~~
@@ -32,7 +32,7 @@ The detector recognizes major ecosystem libraries, including:
 - **Machine Learning & Deep Learning:** ``torch``, ``torchdata``, ``lightning`` / ``pytorch_lightning`` (``lightning``), ``datasets``, ``transformers``, ``orbax``, ``tensorstore``, ``tensorflow``, ``jax``.
 - **AI Agents:** Agent Development Kit, ``google.adk`` (``adk``).
 
-If no recognized framework is present on the call stack (e.g. pure Python scripts or unrecognized utilities), the framework field is left unset in ``X-Goog-Storage-Gcsfs-Features``. When multiple recognized libraries appear in the same call (for example, ``dask`` calling ``pandas`` and ``pyarrow``), only the outermost recognized framework (``dask``) is recorded.
+If no recognized framework is present on the call stack (e.g. pure Python scripts or unrecognized utilities), the framework field is left unset in ``x-goog-storage-gcsfs-features``. When multiple recognized libraries appear in the same call (for example, ``dask`` calling ``pandas`` and ``pyarrow``), only the outermost recognized framework (``dask``) is recorded.
 
 Method Names
 ~~~~~~~~~~~~
@@ -80,7 +80,7 @@ Kubernetes pod).
 gRPC Metadata
 ~~~~~~~~~~~~~
 
-gRPC calls send the same web-safe base64-encoded ``GcsfsFeatures`` protobuf payload as lowercase metadata (``x-goog-storage-gcsfs-features``) when active attribution dimensions are present:
+gRPC calls send the same web-safe base64-encoded ``GcsfsFeatures`` protobuf payload in ``x-goog-storage-gcsfs-features`` metadata when active attribution dimensions are present:
 
 - **Storage Control Unary RPCs:** Every unary call (including LRO operations, bucket layout lookups, and HNS folder operations such as ``mkdir``, ``rmdir``, and ``mv``) attaches the header per RPC.
 - **Rapid (Zonal) and Rapid Cache Ultra Stream Opens:** Initial read (``MRD``) stream opens, and appendable write stream opens (Rapid zonal writes, and Rapid Cache Ultra writes when ``rcu_rapid_write=True``), attach the header at open time.
@@ -146,5 +146,5 @@ The setting is read on every call, so it can be set (or changed) at any time bef
 When disabled:
 
 - All stack frame inspections and detector evaluations are skipped immediately.
-- Outgoing HTTP and gRPC requests omit ``X-Goog-Storage-Gcsfs-Features``.
+- Outgoing HTTP and gRPC requests omit ``x-goog-storage-gcsfs-features``.
 - ``gcsfs`` sends no requests to the metadata server.

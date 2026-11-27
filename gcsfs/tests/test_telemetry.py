@@ -2091,6 +2091,7 @@ def test_zonal_file_pickle_reopen_detects_worker_framework_and_honors_opt_out(
                 assert reopened_opted_out.read(4) == data[:4]
     assert zonal_fs_harness.captured
     assert all((fw_env, m) == ({}, None) for _, fw_env, m in zonal_fs_harness.captured)
+    assert zonal_fs_harness.user_agents
     assert zonal_fs_harness.feature_headers == [""] * len(zonal_fs_harness.user_agents)
     assert detector.thread_names == []
     assert gke_env.calls == 0
@@ -4402,6 +4403,9 @@ async def test_control_plane_interceptor_preserves_call_details(
 ):
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
     monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    monkeypatch.setattr(
+        manager_mod, "default_usage_tracker", UsageMetricsTracker(detectors=[])
+    )
     interceptor = ControlPlaneTelemetryInterceptor()
     seen_calls = []
 
@@ -4463,6 +4467,8 @@ async def test_control_plane_interceptor_preserves_call_details(
         ("x-goog-storage-gcsfs-features", "EAE="),
     )
     assert tuple(details_md.metadata) == (md_req,)
+    expected_mixed_meta = (details_mixed.method, 12.5, call_creds, True)
+    assert _meta(forwarded_replaced) == expected_mixed_meta
     assert isinstance(forwarded_replaced.metadata, grpc.aio.Metadata)
     assert tuple(forwarded_replaced.metadata) == (
         md_req,
@@ -4474,10 +4480,24 @@ async def test_control_plane_interceptor_preserves_call_details(
         ("x-goog-storage-gcsfs-features", "EAE="),
     )
     assert seen_calls[3][0] is details_md
+    assert _meta(forwarded_stripped) == expected_mixed_meta
     assert isinstance(forwarded_stripped.metadata, grpc.aio.Metadata)
     assert tuple(forwarded_stripped.metadata) == (md_req,)
+    assert _meta(forwarded_opt_out_stripped) == expected_mixed_meta
     assert isinstance(forwarded_opt_out_stripped.metadata, grpc.aio.Metadata)
     assert tuple(forwarded_opt_out_stripped.metadata) == (md_req,)
+
+    details_feat_only = _details((("X-Goog-Storage-Gcsfs-Features", "CallerOnly"),))
+    with monkeypatch.context() as mp:
+        mp.setenv("DO_NOT_TRACK", "1")
+        result = await interceptor.intercept_unary_unary(
+            spy_next, details_feat_only, req
+        )
+    assert result == "spy-result"
+    forwarded_feat_only, _ = seen_calls[-1]
+    assert _meta(forwarded_feat_only) == expected_mixed_meta
+    assert isinstance(forwarded_feat_only.metadata, grpc.aio.Metadata)
+    assert tuple(forwarded_feat_only.metadata) == ()
 
 
 # ============================================================================

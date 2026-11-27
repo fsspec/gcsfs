@@ -697,8 +697,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         return params
 
     def _get_headers(self, headers, cache_type=None, cache_source=None):
-        # X-Goog-Storage-Gcsfs-Features is gcsfs-owned (always strip/replace any
-        # incoming value), while User-Agent remains caller-overridable.
+        # X-Goog-Storage-Gcsfs-Features is gcsfs-owned (strip/replace any incoming
+        # per-request value), while User-Agent remains caller-overridable.
         out = {}
         has_ua = False
         if headers:

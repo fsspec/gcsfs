@@ -13,8 +13,8 @@ data path uses gRPC bidi streaming APIs rather than the HTTP JSON API path.
 
 Unlike `test_upstream_frameworks_real.py`, nothing in gcsfs is mocked here. Requests
 go through the real `_call` / `_request` / aiohttp path, and the outgoing
-`X-Goog-Storage-Gcsfs-Features` and `User-Agent` headers are recorded at the aiohttp
-layer, i.e. exactly what is sent over the wire.
+`X-Goog-Storage-Gcsfs-Features` header is recorded at the aiohttp layer, i.e.
+exactly what is sent over the wire.
 """
 
 from __future__ import annotations
@@ -52,20 +52,17 @@ _REAL_ENVIRONMENT_DETECT = EnvironmentDetector.detect
 
 
 class _WireRecorder:
-    """Records User-Agent and feature headers of every HTTP request sent to the GCS endpoint."""
+    """Records X-Goog-Storage-Gcsfs-Features of every HTTP request sent to the GCS endpoint."""
 
     def __init__(self, gcs_netloc: str):
         self.gcs_netloc = gcs_netloc
-        self.user_agents: list[str] = []
         self.feature_headers: list[str] = []
 
     def clear(self):
-        self.user_agents.clear()
         self.feature_headers.clear()
 
     def assert_all_tagged(self, fw: str):
         assert self.feature_headers, "no HTTP requests reached the GCS endpoint"
-        assert len(self.feature_headers) == len(self.user_agents)
         expected_fw = GcsfsFramework[f"GCSFS_FRAMEWORK_{fw.upper()}"]
         for idx, h in enumerate(self.feature_headers):
             assert h, (
@@ -89,7 +86,7 @@ class _WireRecorder:
 def wire(gcs, monkeypatch):
     """
     Point frameworks at the same GCS endpoint/credentials as the `gcs` fixture and
-    record outgoing User-Agent and feature headers at the aiohttp layer.
+    record outgoing feature headers at the aiohttp layer.
     """
     # Filesystems created internally by frameworks (pandas, Lightning, ...) pick up
     # the test endpoint/credentials through fsspec's per-protocol config defaults.
@@ -108,11 +105,6 @@ def wire(gcs, monkeypatch):
     async def recording_request(self, method, str_or_url, *args, **kwargs):
         if urlparse(str(str_or_url)).netloc == recorder.gcs_netloc:
             headers = kwargs.get("headers") or {}
-            ua = (
-                next((v for k, v in headers.items() if k.lower() == "user-agent"), "")
-                or ""
-            )
-            recorder.user_agents.append(ua)
             feature_header = next(
                 (v for k, v in headers.items() if k.lower() == feature_key_lower),
                 "",
@@ -297,7 +289,6 @@ def test_env_token_on_first_op_after_filesystem_init(
             assert f.read() == b"hello world"
 
         assert wire.feature_headers
-        assert len(wire.feature_headers) == len(wire.user_agents)
         assert all(wire.feature_headers)
         decoded_env = [
             GcsfsFeatures.deserialize(base64.urlsafe_b64decode(h))
@@ -331,19 +322,15 @@ def test_http_telemetry_opt_out_and_reenable_e2e(
         wire.clear()
         fs_inst.pipe(remote_path, payload)
         assert fs_inst.cat(remote_path) == payload
-        split = len(wire.user_agents)
+        split = len(wire.feature_headers)
         dest = tmp_path / f"{tag}.bin"
         fs_inst.get_file(remote_path, str(dest))
         assert dest.read_bytes() == payload
-        return (
-            (wire.user_agents[:split], wire.feature_headers[:split]),
-            (wire.user_agents[split:], wire.feature_headers[split:]),
-        )
+        return (wire.feature_headers[:split], wire.feature_headers[split:])
 
     def _assert_tagged_features(slices, expected_methods_by_slice):
-        for (uas, features), expected_methods in zip(slices, expected_methods_by_slice):
-            assert uas
-            assert len(features) == len(uas)
+        for features, expected_methods in zip(slices, expected_methods_by_slice):
+            assert features
             decoded = [
                 GcsfsFeatures.deserialize(base64.urlsafe_b64decode(h)) for h in features
             ]
@@ -367,9 +354,9 @@ def test_http_telemetry_opt_out_and_reenable_e2e(
             ("DO_NOT_TRACK", "1", "X-Goog-Storage-Gcsfs-Features", "caller-dnt"),
         ):
             monkeypatch.setenv(env_key, env_val)
-            for uas, features in _run_round_trip(fs2, env_key):
-                assert uas
-                assert features == [""] * len(uas)
+            for features in _run_round_trip(fs2, env_key):
+                assert features
+                assert all(h == "" for h in features)
             wire.clear()
             fs2.call(
                 "GET",
@@ -379,8 +366,8 @@ def test_http_telemetry_opt_out_and_reenable_e2e(
                 json_out=True,
                 maxResults=1,
             )
-            assert wire.user_agents
-            assert wire.feature_headers == [""] * len(wire.user_agents)
+            assert wire.feature_headers
+            assert all(h == "" for h in wire.feature_headers)
             monkeypatch.delenv(env_key, raising=False)
 
         _assert_tagged_features(
