@@ -98,7 +98,8 @@ Unreleased
     ``xarray``, ``fastparquet``, ``torch``, ``torchdata``, ``lightning``,
     ``datasets``, ``transformers``, ``orbax``, ``tensorstore``,
     ``tensorflow``, ``jax``, and the Agent Development Kit ``google.adk`` as
-    ``adk``),
+    ``adk``; other ``google`` packages such as ``google-auth`` and
+    ``google-cloud-storage`` are not reported as a framework),
   - the top-level public filesystem method name or post-open file operation
     (``file_read``, ``file_write``, etc.),
   - whether five allowlisted method flags (``recursive``, ``detail``,
@@ -108,12 +109,14 @@ Unreleased
     once per process without blocking storage calls (GCP hardware is recognized
     on Linux and Windows; other operating systems report ``oth``).
 
-  The ``User-Agent`` header carries no telemetry tokens. No user data, paths,
-  argument values, credentials, or cluster/instance names are ever collected.
-  Telemetry can be disabled immediately at any time by setting
-  ``DO_NOT_TRACK=1`` or ``GCSFS_NO_TELEMETRY=true``. See :doc:`telemetry` for
-  details (#1097, #1098, #1054, #1128, #1140, #1160, #1161, #1162, #1164,
-  #1165, #1193, #1220).
+  The ``User-Agent`` header carries no usage-attribution tokens (only
+  ``python-gcsfs/<version>`` and, on HTTP reads, the existing
+  ``cache_type/<type>[:e|:d]`` hint). No user data, paths, argument values,
+  credentials, or cluster/instance names are ever collected. Telemetry can be
+  disabled immediately at any time by setting ``DO_NOT_TRACK=1`` or
+  ``GCSFS_NO_TELEMETRY=true``. See :doc:`telemetry` for details (#1097, #1098,
+  #1054, #1128, #1140, #1145, #1148, #1155, #1160, #1161, #1162, #1164, #1165,
+  #1176, #1193, #1220).
 * **Zero-copy gRPC reads for Rapid and Rapid Cache Ultra buckets.** When opening
   a gRPC read stream (``init_mrd``), ``gcsfs`` sets
   ``GCS_PYTHON_CLIENT_ZERO_COPY_BIDI_READ=1`` if unset (set ``=0`` to keep the

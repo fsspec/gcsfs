@@ -32,7 +32,7 @@ The detector recognizes major ecosystem libraries, including:
 
 - **Data Processing & Analytics:** ``pandas``, ``polars``, ``dask``, ``ray``, ``pyspark`` (``spark``), ``pyarrow``, ``duckdb``, ``xarray``, ``fastparquet``.
 - **Machine Learning & Deep Learning:** ``torch``, ``torchdata``, ``lightning`` / ``pytorch_lightning`` (``lightning``), ``datasets``, ``transformers``, ``orbax``, ``tensorstore``, ``tensorflow``, ``jax``.
-- **AI Agents:** Agent Development Kit, ``google.adk`` (``adk``).
+- **AI Agents:** Agent Development Kit, ``google.adk`` (``adk``). Other ``google`` packages, such as ``google-auth`` and ``google-cloud-storage``, are not reported as a framework.
 
 If no recognized framework is present on the call stack (e.g. pure Python scripts or unrecognized utilities), the framework field is left unset in ``x-goog-storage-gcsfs-features``. When multiple recognized libraries appear in the same call (for example, ``dask`` calling ``pandas`` and ``pyarrow``), only the outermost recognized framework (``dask``) is recorded.
 

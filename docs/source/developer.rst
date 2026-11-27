@@ -80,7 +80,12 @@ Architecture
 Extending Telemetry
 ~~~~~~~~~~~~~~~~~~~
 
-- **Adding a public method or file operation:** Add the enum value to ``GcsfsMethod`` in ``gcsfs/telemetry/features_proto.py`` (never reuse reserved wire numbers ``2, 42, 43, 45``, and keep wire numbers aligned with the server-side GCS protobuf definition). Token names must match the lowercased suffix of their ``GCSFS_METHOD_*`` enum name (otherwise ``schema.py`` silently drops them). ``_TRACKED_METHODS`` in ``wrapper.py`` derives automatically from ``GcsfsMethod``, excluding ``GCSFS_METHOD_FILE_*`` entries; for new file-handle methods that issue requests, use a ``GCSFS_METHOD_FILE_*`` enum name and add an entry to ``_FILE_METHOD_TOKENS``. Keep ``bind_gcs_sync_methods`` for mirrored sync methods so ``fork()`` safety is preserved.
+- **Adding a public method or file operation:** Add the enum value to ``GcsfsMethod`` in ``gcsfs/telemetry/features_proto.py`` (never reuse reserved wire numbers ``2, 42, 43, 45``, and keep wire numbers aligned with the server-side GCS protobuf definition). Token names must match the lowercased suffix of their ``GCSFS_METHOD_*`` enum name (otherwise ``schema.py`` silently drops them). ``_TRACKED_METHODS`` in ``wrapper.py`` derives automatically from ``GcsfsMethod``, excluding ``GCSFS_METHOD_FILE_*`` entries:
+
+  - New GCSFS-only ``async def _foo`` methods (not on ``AbstractFileSystem``/``AsyncFileSystem``) are skipped by ``mirror_gcs_methods`` unless a class-level ``foo = asyn.sync_wrapper(_foo)`` is declared first, and every ``_TRACKED_METHODS`` entry must exist on both ``GCSFileSystem`` and ``ExtendedGcsFileSystem`` (enforced by ``test_filesystem_methods_are_telemetry_wrapped``). Keep ``bind_gcs_sync_methods`` for mirrored sync methods so ``fork()`` + ``exec()`` safety (e.g. ``subprocess.Popen(..., preexec_fn=...)``) is preserved.
+  - For new file-handle methods that issue requests, use a ``GCSFS_METHOD_FILE_*`` enum name and add an entry to ``_FILE_METHOD_TOKENS``. Note that ``wrap_file_methods`` only wraps attributes defined directly in ``cls.__dict__`` (inherited ``AbstractBufferedFile`` methods need explicit handling, as done for ``GCSFile.flush``).
+  - Update the expected method/file-token counts in ``test_tracked_and_file_methods_map_to_schema_enums`` (``gcsfs/tests/test_telemetry.py``), and if the new method accepts any allowlisted parameter flag, update ``_TRACKED_PARAM_METHODS`` or ``_INTENTIONALLY_UNTRACKED_PARAMS`` for ``test_method_tracked_params_match_signatures_and_kwargs_forwarding``.
+
 - **Adding a tracked method parameter:** Only whether a flag is enabled (truthy, including defaults — never raw argument values) may be recorded. Add a ``proto.BOOL`` field to ``GcsfsFeatures.MethodParams`` in ``features_proto.py`` (and the server-side protobuf), add a corresponding row to ``_TRACKED_PARAM_METHODS`` in ``wrapper.py`` (and ``_METHOD_IMPLICIT_TRUTHY_DEFAULTS`` if a method defaults a flag to truthy via ``kwargs.pop``), and run ``test_method_tracked_params_match_signatures_and_kwargs_forwarding`` in ``gcsfs/tests/test_telemetry.py`` to identify every accepting method across ``GCSFileSystem`` and ``ExtendedGcsFileSystem`` (recording any intentional omissions in ``_INTENTIONALLY_UNTRACKED_PARAMS``). Update :doc:`telemetry` and ``README.md`` to reflect the updated allowlist.
 - **Adding an upstream framework:** Register the package mapping in ``FrameworkDetector.KNOWN_FRAMEWORKS`` (``detector.py``) so the token matches the lowercased suffix of its ``GCSFS_FRAMEWORK_*`` enum name, add the enum value to ``GcsfsFramework`` (``features_proto.py`` and server-side protobuf), update :doc:`telemetry`, and add coverage in ``gcsfs/tests/test_telemetry.py`` and ``gcsfs/tests/test_upstream_frameworks_real.py``.
 
@@ -90,7 +95,12 @@ Telemetry Tests
 - Unit tests: ``pytest gcsfs/tests/test_telemetry.py``
 - End-to-end tests: ``pytest gcsfs/tests/test_telemetry_e2e.py``
 - Real upstream framework integration tests: ``pytest gcsfs/tests/test_upstream_frameworks_real.py``
-- Note on module reloads: ``gcsfs/tests/test_init.py`` keeps ``gcsfs.telemetry.features_proto`` in ``_KEEP_MODULES`` because protobuf's default descriptor pool cannot register the same proto definitions twice in one process.
+- **Test prerequisites:**
+
+  - Without Docker on ``PATH``, ``conftest.py``'s session-scoped autouse ``final_cleanup`` fixture skips even the mocked unit suites (``test_telemetry.py``, ``test_upstream_frameworks_real.py``) unless ``STORAGE_EMULATOR_HOST`` is set (any placeholder such as ``STORAGE_EMULATOR_HOST=http://localhost:4443`` suffices for mocked suites; ``test_telemetry_e2e.py`` requires a running emulator or real GCS).
+  - ``test_upstream_frameworks_real.py`` (and the framework E2E tests in ``test_telemetry_e2e.py``) skip any framework package that is not installed (``pandas``, ``pytorch-cpu``, and ``lightning`` are listed in ``environment_gcsfs.yaml``, not ``pyproject.toml``'s ``[dev]`` extra).
+
+- **Module reload note:** ``gcsfs/tests/test_init.py`` keeps ``gcsfs.telemetry.features_proto`` in ``_KEEP_MODULES`` because protobuf's default descriptor pool cannot register the same proto definitions twice in one process.
 
 Release Process
 ---------------
