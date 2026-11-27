@@ -1,7 +1,7 @@
 Telemetry & Usage Attribution
 =============================
 
-``gcsfs`` includes lightweight, automatic usage telemetry to identify the upstream data science and machine learning libraries, top-level public operations (and whether five allowlisted flags are enabled), and compute environments interacting with Google Cloud Storage (GCS).
+``gcsfs`` includes lightweight, automatic usage telemetry to identify the upstream data science and machine learning libraries, top-level public operations (and whether five allowlisted flags are enabled), and the compute environments from which clients interact with Google Cloud Storage (GCS).
 
 Purpose
 -------
