@@ -231,6 +231,54 @@ def test_asymmetric_single_node_phase_does_not_advance_multinode_rdzv_port(
     assert "--rdzv_endpoint=leader:29400" in pod1_multi_cmd
 
 
+def test_partial_subset_multinode_phase_keeps_rdzv_port_in_lockstep(
+    on_cuda_8, capture_popen
+):
+    endpoints_for_4node: dict[int, str] = {}
+    for rank in range(4):
+        group = nodes.NodeGroup(
+            node_rank=rank, num_nodes=4, leader_addr="leader", rdzv_port=29400
+        )
+        launcher.reset_rdzv_step()
+
+        # Phase 1: 2-node subset (world_size=16 on 4x8 cluster)
+        ran_subset = launcher.run_torchrun(
+            "pkg.worker",
+            ["--phase", "subset"],
+            world_size=16,
+            rdzv_id="subset-16",
+            node_group=group,
+            devices_per_node=8,
+        )
+        assert ran_subset is (rank < 2)
+        if ran_subset:
+            assert "--rdzv_endpoint=leader:29400" in capture_popen[-1]["cmd"]
+
+        # Phase 2: full 4-node launch (world_size=32)
+        ran_full = launcher.run_torchrun(
+            "pkg.worker",
+            ["--phase", "full"],
+            world_size=32,
+            rdzv_id="full-32",
+            node_group=group,
+            devices_per_node=8,
+        )
+        assert ran_full is True
+        endpoint_arg = next(
+            arg
+            for arg in capture_popen[-1]["cmd"]
+            if arg.startswith("--rdzv_endpoint=")
+        )
+        endpoints_for_4node[rank] = endpoint_arg
+
+    assert endpoints_for_4node == {
+        0: "--rdzv_endpoint=leader:29401",
+        1: "--rdzv_endpoint=leader:29401",
+        2: "--rdzv_endpoint=leader:29401",
+        3: "--rdzv_endpoint=leader:29401",
+    }
+
+
 def test_run_torchrun_1node_tpu_uses_tpu_torchrun_wrapper_when_world_size_gt_1(
     on_tpu_4, capture_popen, monkeypatch
 ):

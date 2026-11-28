@@ -45,17 +45,17 @@ def find_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def local_nprocs_for_world_size(
+def _placement_for_world_size(
     world_size: int,
     node_group: NodeGroup | None = None,
     *,
     devices_per_node: int | None = None,
-) -> int:
-    """Return how many ranks this node should launch for ``world_size``."""
+) -> tuple[int, int]:
+    """Return ``(active_nodes, local_nprocs)`` for ``world_size`` on this node."""
     if world_size <= 0:
         raise ValueError(f"world_size must be positive, got {world_size}")
     if node_group is None:
-        return world_size
+        return 1, world_size
 
     if devices_per_node is None:
         from gcsfs.tests.perf.subsystembenchmarks._common import placement
@@ -67,7 +67,7 @@ def local_nprocs_for_world_size(
         raise ValueError(f"devices_per_node must be positive, got {per_node}")
 
     if world_size <= per_node:
-        return world_size if node_group.is_leader else 0
+        return 1, world_size if node_group.is_leader else 0
 
     active_nodes = math.ceil(world_size / per_node)
     if active_nodes > node_group.num_nodes:
@@ -81,8 +81,20 @@ def local_nprocs_for_world_size(
             f"{active_nodes} nodes"
         )
     if node_group.node_rank >= active_nodes:
-        return 0
-    return world_size // active_nodes
+        return active_nodes, 0
+    return active_nodes, world_size // active_nodes
+
+
+def local_nprocs_for_world_size(
+    world_size: int,
+    node_group: NodeGroup | None = None,
+    *,
+    devices_per_node: int | None = None,
+) -> int:
+    """Return how many ranks this node should launch for ``world_size``."""
+    return _placement_for_world_size(
+        world_size, node_group, devices_per_node=devices_per_node
+    )[1]
 
 
 def next_rdzv_port(node_group: NodeGroup) -> int:
@@ -146,10 +158,13 @@ def run_torchrun(
     prepare_tpu_env: bool = True,
 ) -> bool:
     """Launch ``module`` via torchrun; return False if skipped on a follower node."""
-    local_nprocs = local_nprocs_for_world_size(
+    active_nodes, local_nprocs = _placement_for_world_size(
         world_size, node_group, devices_per_node=devices_per_node
     )
     if local_nprocs == 0:
+        if active_nodes > 1 and port is None:
+            assert node_group is not None
+            next_rdzv_port(node_group)
         return False
 
     kind = accelerator.device_kind()
@@ -161,7 +176,6 @@ def run_torchrun(
                 f"device count {capacity}"
             )
 
-    active_nodes = 1 if node_group is None else world_size // local_nprocs
     child_env = _build_child_env(kind, env)
 
     if kind == "tpu" and active_nodes == 1:
