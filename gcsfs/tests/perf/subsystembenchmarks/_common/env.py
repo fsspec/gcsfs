@@ -16,23 +16,8 @@ def detect_accelerator() -> str:
     return "gpu" if _cuda_available() else "cpu"
 
 
-def detect_backend() -> str:
-    return "nccl" if detect_accelerator() == "gpu" else "gloo"
-
-
 def python_version() -> str:
     return ".".join(platform.python_version_tuple()[:2])
-
-
-def gpu_model() -> str:
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            return torch.cuda.get_device_name(0)
-    except Exception:
-        pass
-    return "none"
 
 
 def machine_type() -> str:

@@ -1,4 +1,9 @@
-"""Single-node TPU wrapper that prepares TPU launch env before exec'ing torchrun."""
+"""Single-host TPU wrapper: set the TorchTPU launch env, then exec torchrun.
+
+``launcher.run_torchrun`` starts this module with a clean ``TORCH_TPU_*`` env;
+``set_tpu_launch_env`` runs in this short-lived process so the benchmark parent
+never imports TorchTPU distributed state.
+"""
 
 from __future__ import annotations
 
@@ -6,9 +11,6 @@ import argparse
 import os
 import sys
 from collections.abc import Sequence
-
-_TPU_TOPOLOGY_ENV = "TORCH_TPU_TOPOLOGY"
-_TPU_SLICEBUILDER_ADDRESSES_ENV = "TORCH_TPU_SLICEBUILDER_ADDRESSES"
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -20,7 +22,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         own_args, rest = raw, []
 
     parser = argparse.ArgumentParser(
-        description="Configure single-node TPU launch env and exec torch.distributed.run."
+        description="Configure single-host TPU launch env and exec torch.distributed.run."
     )
     parser.add_argument("--nproc-per-node", type=int, required=True)
     parsed = parser.parse_args(own_args)
@@ -28,9 +30,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("--nproc-per-node must be >= 1")
     if not rest:
         parser.error("expected torchrun arguments after '--'")
-
-    os.environ.pop(_TPU_TOPOLOGY_ENV, None)
-    os.environ.pop(_TPU_SLICEBUILDER_ADDRESSES_ENV, None)
 
     import torch.tpu.distributed
 

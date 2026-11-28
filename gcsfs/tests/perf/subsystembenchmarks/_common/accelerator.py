@@ -1,4 +1,9 @@
-"""Thin torch.accelerator probe and worker device helpers for subsystem benchmarks."""
+"""Thin torch.accelerator probe and worker device helpers for subsystem benchmarks.
+
+Detection runs ``torch.accelerator`` once in a short-lived child process so the
+benchmark parent never initializes CUDA or claims libtpu. Launchers forward the
+result to their children (``child_probe_env``) so ranks do not probe again.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +23,10 @@ DEVICE_ENV = "GCSFS_SUBSYSTEM_DEVICE"
 DEVICES = ("auto", "cpu", "cuda", "tpu")
 ACCELERATOR_MODEL_ENV = "GCSFS_SUBSYSTEM_ACCELERATOR_MODEL"
 _PROBED_ACCELERATOR_ENV = "_GCSFS_SUBSYSTEM_PROBED_ACCELERATOR"
+_TORCH_AUTOLOAD_ENV = "TORCH_DEVICE_BACKEND_AUTOLOAD"
+_TPU_ENV_PREFIX = "TORCH_TPU_"
+_PROBE_KINDS = ("cpu", "cuda", "tpu")
+_PROBE_TIMEOUT_S = 60
 CPU_MAX_RANKS = 16
 RAY_RESOURCE_SCALE = 10_000
 
@@ -26,92 +35,101 @@ class AcceleratorSetupError(RuntimeError):
     """Raised when explicit accelerator selection cannot be satisfied."""
 
 
+# Requires torch>=2.6 (torch.accelerator); an older accelerator image fails the
+# probe loudly instead of silently benchmarking on CPU.
 _PROBE_SNIPPET = """
-import json, os, sys
-try:
-    import torch
-except ImportError:
-    print(json.dumps(["cpu", 0, "none"]))
-    sys.exit(0)
-if not hasattr(torch, "accelerator") or not torch.accelerator.is_available():
-    print(json.dumps(["cpu", 0, "none"]))
-    sys.exit(0)
-acc = torch.accelerator.current_accelerator()
-raw = acc.type if acc is not None else "cpu"
-kind = raw if raw in ("cuda", "tpu") else "cpu"
-count = int(torch.accelerator.device_count()) if kind != "cpu" else 0
-if kind == "cuda" and count > 0:
-    model = str(torch.cuda.get_device_name(0))
-elif kind == "tpu":
-    model = (
-        os.environ.get("GCSFS_SUBSYSTEM_ACCELERATOR_MODEL", "").strip()
-        or os.environ.get("TPU_ACCELERATOR_TYPE", "").strip()
-        or "tpu"
-    )
-else:
-    model = "none"
-print(json.dumps([kind, count, model]))
+import json
+import torch
+
+acc = torch.accelerator.current_accelerator() if torch.accelerator.is_available() else None
+kind = acc.type if acc is not None and acc.type in ("cuda", "tpu") else "cpu"
+count = torch.accelerator.device_count() if kind != "cpu" else 0
+name = torch.cuda.get_device_name(0) if kind == "cuda" and count else ""
+print(json.dumps({"kind": kind, "count": count, "name": name}))
 """.strip()
 
 
-@functools.lru_cache(maxsize=1)
+def single_host_env() -> dict[str, str]:
+    """Return ``os.environ`` without settings that must not leak into a child.
+
+    ``TORCH_DEVICE_BACKEND_AUTOLOAD=0`` (set around TPU DataLoader workers) would
+    hide TorchTPU, and inherited ``TORCH_TPU_*`` launch/slice settings would make
+    TorchTPU wait for peers that are not part of a single-host process tree.
+    """
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key != _TORCH_AUTOLOAD_ENV and not key.startswith(_TPU_ENV_PREFIX)
+    }
+
+
+def _parse_probe(raw: str) -> tuple[str, int, str]:
+    try:
+        data = json.loads(raw)
+        kind, count, name = str(data["kind"]), int(data["count"]), str(data["name"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise AcceleratorSetupError(
+            f"invalid accelerator probe result: {raw!r}"
+        ) from exc
+    if kind not in _PROBE_KINDS or count < 0:
+        raise AcceleratorSetupError(f"invalid accelerator probe result: {raw!r}")
+    return kind, count, name
+
+
 def _probe_accelerator() -> tuple[str, int, str]:
-    """Probe torch.accelerator in a child process so the parent avoids TPU init."""
-    raw = os.environ.get(_PROBED_ACCELERATOR_ENV, "").strip()
-    if raw:
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                kind = str(parsed["kind"])
-                count = int(parsed["count"])
-                model = str(parsed["name"])
-                if kind in ("cpu", "cuda", "tpu") and count >= 0:
-                    return kind, count, model
-        except (ValueError, KeyError, TypeError):
-            pass
-    env = dict(os.environ)
-    env.pop("TORCH_DEVICE_BACKEND_AUTOLOAD", None)
+    """Return ``(kind, count, name)`` from the forwarded probe or a child process."""
+    forwarded = os.environ.get(_PROBED_ACCELERATOR_ENV, "").strip()
+    if forwarded:
+        return _parse_probe(forwarded)
+    env = single_host_env()
     env.pop(_PROBED_ACCELERATOR_ENV, None)
-    proc = subprocess.run(
-        [sys.executable, "-c", _PROBE_SNIPPET],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=True,
-        env=env,
-    )
-    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-    kind, count, model = json.loads(lines[-1])
-    return str(kind), int(count), str(model)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _PROBE_SNIPPET],
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT_S,
+            check=True,
+            env=env,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        stderr = exc.stderr or ""
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        tail = "\n".join(stderr.strip().splitlines()[-20:])
+        raise AcceleratorSetupError(
+            f"torch.accelerator probe failed ({exc}); stderr tail:\n{tail}"
+        ) from exc
+    lines = [line for line in proc.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise AcceleratorSetupError("torch.accelerator probe printed no result")
+    return _parse_probe(lines[-1])
 
 
-def child_probe_env(kind: str | None = None) -> dict[str, str]:
-    """Return env vars forwarding the parent's validated probe to child workers."""
-    resolved = device_kind() if kind is None else kind
-    if resolved == "cpu":
-        payload = {"kind": "cpu", "count": 0, "name": "none"}
-    else:
-        payload = {
-            "kind": resolved,
-            "count": local_device_count(),
-            "name": model_name(),
-        }
-    return {_PROBED_ACCELERATOR_ENV: json.dumps(payload)}
+@functools.lru_cache(maxsize=1)
+def _cached_probe() -> tuple[str, int, str]:
+    return _probe_accelerator()
 
 
 @functools.lru_cache(maxsize=8)
 def _resolve_device_kind(requested: str) -> str:
     if requested == "cpu":
         return "cpu"
-    kind, count, _ = _probe_accelerator()
+    kind, count, _ = _cached_probe()
     if requested == "auto":
-        return kind if (kind != "cpu" and count > 0) else "cpu"
+        return kind if count > 0 else "cpu"
     if kind != requested or count <= 0:
         raise AcceleratorSetupError(
             f"{DEVICE_ENV}={requested} but torch.accelerator reported "
             f"{kind!r} (count={count})"
         )
     return requested
+
+
+def reset_cache() -> None:
+    """Forget the cached probe and device resolution, e.g. after changing env."""
+    _cached_probe.cache_clear()
+    _resolve_device_kind.cache_clear()
 
 
 def device_kind() -> str:
@@ -122,13 +140,14 @@ def device_kind() -> str:
     return _resolve_device_kind(requested)
 
 
-def _clear_caches() -> None:
-    if hasattr(_probe_accelerator, "cache_clear"):
-        _probe_accelerator.cache_clear()
-    _resolve_device_kind.cache_clear()
-
-
-device_kind.cache_clear = _clear_caches  # type: ignore[attr-defined]
+def child_probe_env(kind: str) -> dict[str, str]:
+    """Return env vars forwarding this process's probe to children running on ``kind``."""
+    if kind == "cpu":
+        # Children pinned to CPU never consult the probe.
+        return {}
+    probed_kind, count, name = _cached_probe()
+    payload = {"kind": probed_kind, "count": count, "name": name}
+    return {_PROBED_ACCELERATOR_ENV: json.dumps(payload)}
 
 
 def accelerator_type() -> str:
@@ -142,14 +161,14 @@ def local_device_count() -> int:
     kind = device_kind()
     if kind == "cpu":
         return CPU_MAX_RANKS
-    _, count, _ = _probe_accelerator()
+    _, count, _ = _cached_probe()
     if count <= 0:
         raise AcceleratorSetupError(f"{kind} accelerator reported 0 devices")
     return count
 
 
 def model_name() -> str:
-    """Return GPU name, TPU model label, or 'none'."""
+    """Return the accelerator model label: GPU name, TPU type, or 'none' on CPU."""
     kind = device_kind()
     if kind == "cpu":
         return "none"
@@ -157,32 +176,29 @@ def model_name() -> str:
     if override:
         return override
     if kind == "tpu":
-        return (
-            os.environ.get("TPU_ACCELERATOR_TYPE", "").strip()
-            or _probe_accelerator()[2]
-            or "tpu"
-        )
-    return _probe_accelerator()[2] or "none"
-
-
-def process_group_backend(world_size: int | None = None) -> str:
-    """Return PyTorch init_process_group backend string for the active device."""
-    kind = device_kind()
-    if kind == "cuda":
-        return "cpu:gloo,cuda:nccl"
-    if kind == "tpu":
-        return "gloo" if world_size == 1 else "tpu_dist"
-    return "gloo"
+        tpu_type = os.environ.get("TPU_ACCELERATOR_TYPE", "").strip()
+        if tpu_type:
+            return tpu_type
+    return _cached_probe()[2] or kind
 
 
 def backend_name(world_size: int | None = None) -> str:
-    """Return concise distributed backend label ('gloo', 'nccl', or 'tpu_dist')."""
+    """Return the distributed backend label ('gloo', 'nccl', or 'tpu_dist')."""
     kind = device_kind()
     if kind == "cuda":
         return "nccl"
-    if kind == "tpu":
-        return "gloo" if world_size == 1 else "tpu_dist"
+    if kind == "tpu" and world_size != 1:
+        return "tpu_dist"
     return "gloo"
+
+
+def process_group_backend(world_size: int | None = None) -> str:
+    """Return the ``init_process_group`` backend string for the active device.
+
+    CUDA keeps gloo for CPU-tensor collectives (e.g. object gathers) next to NCCL.
+    """
+    name = backend_name(world_size)
+    return "cpu:gloo,cuda:nccl" if name == "nccl" else name
 
 
 def bind_rank(
@@ -191,7 +207,11 @@ def bind_rank(
     global_rank: int | None = None,
     world_size: int | None = None,
 ) -> "torch.device":
-    """Bind the current worker rank to its device and warm up runtime state."""
+    """Bind the current worker rank to its device and warm up runtime state.
+
+    CUDA ranks map to ``local_rank % device_count`` so several ranks may share
+    a GPU; TorchTPU owns one chip per process.
+    """
     import torch
 
     kind = device_kind()
@@ -235,16 +255,15 @@ def loader_worker_env() -> Iterator[None]:
     if device_kind() != "tpu":
         yield
         return
-    key = "TORCH_DEVICE_BACKEND_AUTOLOAD"
-    prev = os.environ.get(key)
-    os.environ[key] = "0"
+    prev = os.environ.get(_TORCH_AUTOLOAD_ENV)
+    os.environ[_TORCH_AUTOLOAD_ENV] = "0"
     try:
         yield
     finally:
         if prev is None:
-            os.environ.pop(key, None)
+            os.environ.pop(_TORCH_AUTOLOAD_ENV, None)
         else:
-            os.environ[key] = prev
+            os.environ[_TORCH_AUTOLOAD_ENV] = prev
 
 
 def ray_resources(world_size: int) -> dict:

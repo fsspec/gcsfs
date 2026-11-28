@@ -5,18 +5,15 @@ from __future__ import annotations
 import math
 import os
 import signal
-import socket
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 
-from gcsfs.tests.perf.subsystembenchmarks._common import accelerator, nodes
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
 from gcsfs.tests.perf.subsystembenchmarks._common.nodes import NodeGroup
 
 TPU_SLICE_TOPOLOGY_ENV = "GCSFS_SUBSYSTEM_TPU_SLICE_TOPOLOGY"
 TPU_SLICE_ADDRESSES_ENV = "GCSFS_SUBSYSTEM_TPU_SLICE_ADDRESSES"
-PORT_BASE_ENV = "GCSFS_SUBSYSTEM_PORT_BASE"
-PORT_BLOCK_SIZE = 16
 RDZV_READ_TIMEOUT_S = 1800
 RDZV_JOIN_TIMEOUT_S = 7200
 
@@ -26,23 +23,6 @@ _TPU_SLICEBUILDER_ADDRESSES_ENV = "TORCH_TPU_SLICEBUILDER_ADDRESSES"
 _TPU_TORCHRUN_MODULE = "gcsfs.tests.perf.subsystembenchmarks._common._tpu_torchrun"
 
 _rdzv_step = 0
-
-
-def find_free_port() -> int:
-    """Return an unused localhost TCP port, honoring GCSFS_SUBSYSTEM_PORT_BASE."""
-    base = nodes.int_env(PORT_BASE_ENV, min_val=1, max_val=65535)
-    if base is not None:
-        end = min(base + PORT_BLOCK_SIZE, 65536)
-        for candidate in range(base, end):
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                try:
-                    sock.bind(("127.0.0.1", candidate))
-                except OSError:
-                    continue
-                return candidate
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 def _placement_for_world_size(
@@ -98,7 +78,14 @@ def local_nprocs_for_world_size(
 
 
 def next_rdzv_port(node_group: NodeGroup) -> int:
-    """Allocate the next sequential c10d rendezvous port for multi-node launches."""
+    """Allocate the next sequential c10d rendezvous port for multi-node launches.
+
+    Every node keeps its own counter, so all nodes must make the same sequence of
+    multi-node ``run_torchrun`` calls (nodes outside a phase still advance it).
+    Distinct ports per phase keep a late follower from joining the previous
+    phase's store; multi-node runs use ``pytest -x``, so a node that fails stops
+    instead of drifting out of step.
+    """
     global _rdzv_step
     port = node_group.rdzv_port + _rdzv_step
     _rdzv_step += 1
@@ -111,13 +98,51 @@ def reset_rdzv_step() -> None:
     _rdzv_step = 0
 
 
+def _tpu_slice_env() -> dict[str, str]:
+    """Return the TorchTPU slice env a multi-host TPU launch needs."""
+    topology = (
+        os.environ.get(TPU_SLICE_TOPOLOGY_ENV, "").strip()
+        or os.environ.get(_TPU_TOPOLOGY_ENV, "").strip()
+    )
+    addresses = (
+        os.environ.get(TPU_SLICE_ADDRESSES_ENV, "").strip()
+        or os.environ.get(_TPU_SLICEBUILDER_ADDRESSES_ENV, "").strip()
+    )
+    if not topology or not addresses:
+        raise accelerator.AcceleratorSetupError(
+            f"Multi-node TPU launch requires {TPU_SLICE_TOPOLOGY_ENV} "
+            f"(or {_TPU_TOPOLOGY_ENV}) and {TPU_SLICE_ADDRESSES_ENV} "
+            f"(or {_TPU_SLICEBUILDER_ADDRESSES_ENV})"
+        )
+    return {_TPU_TOPOLOGY_ENV: topology, _TPU_SLICEBUILDER_ADDRESSES_ENV: addresses}
+
+
 def _build_child_env(
-    device_kind: str, env: Mapping[str, str] | None = None
+    kind: str,
+    env: Mapping[str, str] | None = None,
+    *,
+    multi_host_tpu: bool = False,
+    cpu_only: bool = False,
 ) -> dict[str, str]:
-    child_env = os.environ.copy()
-    child_env.pop(_TORCH_AUTOLOAD_ENV, None)
-    child_env[accelerator.DEVICE_ENV] = device_kind
-    child_env.update(accelerator.child_probe_env(device_kind))
+    """Return the environment for a child process running on ``kind``.
+
+    Single-host children start from ``accelerator.single_host_env()`` (no
+    inherited ``TORCH_TPU_*``; ``_tpu_torchrun`` or the worker sets what it
+    needs). Multi-host TPU launches keep the inherited TorchTPU settings and get
+    the slice topology/addresses explicitly.
+    """
+    if multi_host_tpu:
+        child_env = dict(os.environ)
+        child_env.pop(_TORCH_AUTOLOAD_ENV, None)
+        child_env.update(_tpu_slice_env())
+    else:
+        child_env = accelerator.single_host_env()
+    child_env[accelerator.DEVICE_ENV] = kind
+    child_env.update(accelerator.child_probe_env(kind))
+    if cpu_only:
+        # Prevent torch_tpu autoload in CPU-only children and their DataLoader
+        # workers on TPU hosts; caller env overrides still win below.
+        child_env[_TORCH_AUTOLOAD_ENV] = "0"
     if env:
         child_env.update(env)
     return child_env
@@ -154,80 +179,56 @@ def run_torchrun(
     rdzv_id: str,
     node_group: NodeGroup | None = None,
     devices_per_node: int | None = None,
-    port: int | None = None,
     env: Mapping[str, str] | None = None,
-    prepare_tpu_env: bool = True,
+    cpu_only: bool = False,
 ) -> bool:
-    """Launch ``module`` via torchrun; return False if skipped on a follower node."""
+    """Launch ``module`` via torchrun; return False if this node has no ranks.
+
+    ``cpu_only`` runs the ranks on CPU regardless of the detected accelerator,
+    for ranks that never touch a device. Multi-node launches allocate rendezvous
+    ports with ``next_rdzv_port`` (see its lockstep contract).
+    """
     active_nodes, local_nprocs = _placement_for_world_size(
         world_size, node_group, devices_per_node=devices_per_node
     )
     if local_nprocs == 0:
-        if active_nodes > 1 and port is None:
-            assert node_group is not None
+        if active_nodes > 1:
             next_rdzv_port(node_group)
         return False
 
-    kind = accelerator.device_kind()
-    if kind != "cpu":
+    kind = "cpu" if cpu_only else accelerator.device_kind()
+    if kind == "tpu":
+        # TorchTPU owns one chip per process; CUDA ranks may share a GPU.
         capacity = accelerator.local_device_count()
         if local_nprocs > capacity:
             raise accelerator.AcceleratorSetupError(
-                f"local_nprocs={local_nprocs} exceeds local {kind} "
-                f"device count {capacity}"
+                f"local_nprocs={local_nprocs} exceeds local tpu device count "
+                f"{capacity}"
             )
 
-    child_env = _build_child_env(kind, env)
-
-    if kind == "tpu" and active_nodes == 1:
-        child_env.pop(_TPU_TOPOLOGY_ENV, None)
-        child_env.pop(_TPU_SLICEBUILDER_ADDRESSES_ENV, None)
-    elif kind == "tpu" and active_nodes > 1 and prepare_tpu_env:
-        topology = (
-            child_env.get(TPU_SLICE_TOPOLOGY_ENV, "").strip()
-            or child_env.get(_TPU_TOPOLOGY_ENV, "").strip()
-        )
-        addresses = (
-            child_env.get(TPU_SLICE_ADDRESSES_ENV, "").strip()
-            or child_env.get(_TPU_SLICEBUILDER_ADDRESSES_ENV, "").strip()
-        )
-        if not topology or not addresses:
-            raise accelerator.AcceleratorSetupError(
-                f"Multi-node TPU launch requires {TPU_SLICE_TOPOLOGY_ENV} "
-                f"(or {_TPU_TOPOLOGY_ENV}) and {TPU_SLICE_ADDRESSES_ENV} "
-                f"(or {_TPU_SLICEBUILDER_ADDRESSES_ENV})"
-            )
-        child_env[_TPU_TOPOLOGY_ENV] = topology
-        child_env[_TPU_SLICEBUILDER_ADDRESSES_ENV] = addresses
+    child_env = _build_child_env(
+        kind,
+        env,
+        multi_host_tpu=(kind == "tpu" and active_nodes > 1),
+        cpu_only=cpu_only,
+    )
 
     if active_nodes == 1:
-        master_port = port if port is not None else find_free_port()
-        torchrun_args = [
-            "--standalone",
-            f"--nproc_per_node={local_nprocs}",
-            f"--master_port={master_port}",
-            "-m",
-            module,
-            *args,
-        ]
+        torchrun_args = ["--standalone", f"--nproc_per_node={local_nprocs}"]
     else:
-        assert node_group is not None
-        rdzv_port = port if port is not None else next_rdzv_port(node_group)
         torchrun_args = [
             f"--nnodes={active_nodes}",
             f"--nproc_per_node={local_nprocs}",
             f"--node_rank={node_group.node_rank}",
             "--rdzv_backend=c10d",
-            f"--rdzv_endpoint={node_group.leader_addr}:{rdzv_port}",
+            f"--rdzv_endpoint={node_group.leader_addr}:{next_rdzv_port(node_group)}",
             f"--rdzv_id={rdzv_id}",
             f"--rdzv_conf=read_timeout={RDZV_READ_TIMEOUT_S},"
             f"join_timeout={RDZV_JOIN_TIMEOUT_S}",
-            "-m",
-            module,
-            *args,
         ]
+    torchrun_args += ["-m", module, *args]
 
-    if kind == "tpu" and active_nodes == 1 and prepare_tpu_env and local_nprocs > 1:
+    if kind == "tpu" and active_nodes == 1 and local_nprocs > 1:
         cmd = [
             sys.executable,
             "-m",
@@ -250,8 +251,6 @@ def run_subprocess(
     *,
     env: Mapping[str, str] | None = None,
 ) -> None:
-    """Launch ``module`` in an isolated Python subprocess."""
-    kind = accelerator.device_kind()
-    child_env = _build_child_env(kind, env)
-    cmd = [sys.executable, "-m", module, *args]
-    _run_managed(cmd, child_env)
+    """Launch ``module`` in an isolated single-host Python subprocess."""
+    child_env = _build_child_env(accelerator.device_kind(), env)
+    _run_managed([sys.executable, "-m", module, *args], child_env)

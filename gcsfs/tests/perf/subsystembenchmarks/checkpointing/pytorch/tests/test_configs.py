@@ -63,7 +63,7 @@ def _cases(group: str = "load"):
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
     for key in (
         "GCSFS_SUBSYSTEM_MODEL_ID",
         "GCSFS_SUBSYSTEM_BUCKET_TYPE",
@@ -78,7 +78,7 @@ def _clean_env(monkeypatch):
     ):
         monkeypatch.delenv(key, raising=False)
     yield
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
 
 
 def test_group_row_counts_and_frameworks():
@@ -148,20 +148,20 @@ def test_placement_select_default_host_follows_cuda_device_count(monkeypatch):
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import MAX_RANKS
 
     monkeypatch.setenv("GCSFS_SUBSYSTEM_DEVICE", "cpu")
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
     assert placement.devices_per_node() == MAX_RANKS
 
     monkeypatch.setenv("GCSFS_SUBSYSTEM_DEVICE", "cuda")
     monkeypatch.setattr(
         accelerator, "_probe_accelerator", lambda: ("cuda", 8, "NVIDIA H200")
     )
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
     assert placement.devices_per_node() == 8
 
     monkeypatch.setattr(
         accelerator, "_probe_accelerator", lambda: ("cuda", 4, "NVIDIA H200")
     )
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
     default_params = placement.select(
         PyTorchLoadConfigurator(CONFIG).generate_cases(),
         group="checkpointing/pytorch_load",
@@ -338,7 +338,7 @@ def test_parameters_layouts_max_world_size_and_extra_columns(monkeypatch):
     monkeypatch.setattr(
         accelerator, "_probe_accelerator", lambda: ("cuda", 8, "NVIDIA H200")
     )
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
     assert p.extra_columns()["device"] == "cuda"
 
     wider_target = make_params(
@@ -508,13 +508,13 @@ def test_extra_columns_device_follows_default_auto(monkeypatch):
     p = make_params()
     monkeypatch.setenv(accelerator.DEVICE_ENV, "auto")
     monkeypatch.setattr(accelerator, "_probe_accelerator", lambda: ("cpu", 0, "none"))
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
     try:
         assert p.extra_columns()["device"] == "cpu"
         monkeypatch.setattr(
             accelerator, "_probe_accelerator", lambda: ("cuda", 8, "NVIDIA H200")
         )
-        accelerator.device_kind.cache_clear()
+        accelerator.reset_cache()
         assert p.extra_columns()["device"] == "cuda"
     finally:
-        accelerator.device_kind.cache_clear()
+        accelerator.reset_cache()

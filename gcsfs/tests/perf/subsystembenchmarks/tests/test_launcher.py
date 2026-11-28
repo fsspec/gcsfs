@@ -1,6 +1,6 @@
+import json
 import os
 import signal
-import socket
 import subprocess
 import sys
 import types
@@ -17,7 +17,7 @@ from gcsfs.tests.perf.subsystembenchmarks._common import (
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
     launcher.reset_rdzv_step()
     for key in (
         accelerator.DEVICE_ENV,
@@ -25,9 +25,9 @@ def _clean_env(monkeypatch):
         "TORCH_DEVICE_BACKEND_AUTOLOAD",
         "TORCH_TPU_TOPOLOGY",
         "TORCH_TPU_SLICEBUILDER_ADDRESSES",
+        "TORCH_TPU_DEVICES_PER_HOST",
         launcher.TPU_SLICE_TOPOLOGY_ENV,
         launcher.TPU_SLICE_ADDRESSES_ENV,
-        "GCSFS_SUBSYSTEM_PORT_BASE",
         nodes.NODES_ENV,
         nodes.NODE_RANK_ENV,
         nodes.LEADER_ADDR_ENV,
@@ -35,7 +35,7 @@ def _clean_env(monkeypatch):
     ):
         monkeypatch.delenv(key, raising=False)
     yield
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
     launcher.reset_rdzv_step()
 
 
@@ -81,10 +81,7 @@ def capture_popen(monkeypatch):
     return calls
 
 
-def test_run_torchrun_single_node_standalone_command(
-    on_cpu, capture_popen, monkeypatch
-):
-    monkeypatch.setattr(launcher, "find_free_port", lambda: 29511)
+def test_run_torchrun_single_node_standalone_command(on_cpu, capture_popen):
     ran = launcher.run_torchrun(
         "pkg.worker",
         ["--foo", "bar"],
@@ -101,7 +98,6 @@ def test_run_torchrun_single_node_standalone_command(
         "torch.distributed.run",
         "--standalone",
         "--nproc_per_node=4",
-        "--master_port=29511",
         "-m",
         "pkg.worker",
         "--foo",
@@ -285,7 +281,7 @@ def test_run_torchrun_1node_tpu_uses_tpu_torchrun_wrapper_when_world_size_gt_1(
 ):
     monkeypatch.setenv("TORCH_TPU_TOPOLOGY", "stale-topo")
     monkeypatch.setenv("TORCH_TPU_SLICEBUILDER_ADDRESSES", "stale-addr")
-    monkeypatch.setattr(launcher, "find_free_port", lambda: 29520)
+    monkeypatch.setenv("TORCH_TPU_DEVICES_PER_HOST", "8")
 
     launcher.run_torchrun("pkg.worker", ["--a"], world_size=4, rdzv_id="tpu-4")
     call_4 = capture_popen[-1]
@@ -298,26 +294,38 @@ def test_run_torchrun_1node_tpu_uses_tpu_torchrun_wrapper_when_world_size_gt_1(
         "--",
     ]
     assert "--standalone" in call_4["cmd"][6:]
-    assert "TORCH_TPU_TOPOLOGY" not in call_4["env"]
-    assert "TORCH_TPU_SLICEBUILDER_ADDRESSES" not in call_4["env"]
+    assert not [k for k in call_4["env"] if k.startswith("TORCH_TPU_")]
 
     launcher.run_torchrun("pkg.worker", ["--b"], world_size=1, rdzv_id="tpu-1")
     call_1 = capture_popen[-1]
     assert call_1["cmd"][:3] == [sys.executable, "-m", "torch.distributed.run"]
-    assert "TORCH_TPU_TOPOLOGY" not in call_1["env"]
-    assert "TORCH_TPU_SLICEBUILDER_ADDRESSES" not in call_1["env"]
+    assert not [k for k in call_1["env"] if k.startswith("TORCH_TPU_")]
+
+
+def test_run_torchrun_cpu_override_on_tpu_host_skips_tpu_setup(
+    on_tpu_4, capture_popen, monkeypatch
+):
+    monkeypatch.setenv("TORCH_TPU_TOPOLOGY", "stale-topo")
 
     launcher.run_torchrun(
-        "pkg.worker",
-        ["--c"],
-        world_size=4,
-        rdzv_id="tpu-noprep",
-        prepare_tpu_env=False,
+        "pkg.worker", ["--c"], world_size=8, rdzv_id="cpu-ranks", cpu_only=True
     )
-    call_noprep = capture_popen[-1]
-    assert call_noprep["cmd"][:3] == [sys.executable, "-m", "torch.distributed.run"]
-    assert "TORCH_TPU_TOPOLOGY" not in call_noprep["env"]
-    assert "TORCH_TPU_SLICEBUILDER_ADDRESSES" not in call_noprep["env"]
+    call = capture_popen[-1]
+    assert call["cmd"][:3] == [sys.executable, "-m", "torch.distributed.run"]
+    assert "--nproc_per_node=8" in call["cmd"]
+    assert call["env"][accelerator.DEVICE_ENV] == "cpu"
+    assert call["env"]["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
+    assert accelerator._PROBED_ACCELERATOR_ENV not in call["env"]
+    assert not [k for k in call["env"] if k.startswith("TORCH_TPU_")]
+
+
+def test_run_torchrun_lets_cuda_ranks_share_gpus(capture_popen, monkeypatch):
+    monkeypatch.setattr(
+        accelerator, "_probe_accelerator", lambda: ("cuda", 1, "NVIDIA L4")
+    )
+
+    assert launcher.run_torchrun("pkg.worker", [], world_size=8, rdzv_id="share")
+    assert "--nproc_per_node=8" in capture_popen[-1]["cmd"]
 
 
 def test_run_torchrun_multinode_tpu_forwards_slice_env_and_fails_if_missing(
@@ -364,8 +372,10 @@ def test_launcher_strips_inherited_torch_device_backend_autoload(
     launcher.run_torchrun("pkg.worker", [], world_size=2, rdzv_id="strip-1")
     assert "TORCH_DEVICE_BACKEND_AUTOLOAD" not in capture_popen[-1]["env"]
 
+    monkeypatch.setenv("TORCH_TPU_TOPOLOGY", "stale-topo")
     launcher.run_subprocess("pkg.setup", ["--flag"])
     assert "TORCH_DEVICE_BACKEND_AUTOLOAD" not in capture_popen[-1]["env"]
+    assert "TORCH_TPU_TOPOLOGY" not in capture_popen[-1]["env"]
     assert capture_popen[-1]["cmd"] == [sys.executable, "-m", "pkg.setup", "--flag"]
     assert capture_popen[-1]["env"][accelerator.DEVICE_ENV] == "cpu"
 
@@ -397,28 +407,11 @@ def test_launcher_terminates_process_group_on_keyboard_interrupt(on_cpu, monkeyp
     assert wait_calls == [None, 10, None]
 
 
-def test_find_free_port_uses_disjoint_port_base_block(monkeypatch):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
-        occupied.bind(("127.0.0.1", 0))
-        occupied.listen(1)
-        base = int(occupied.getsockname()[1])
-        monkeypatch.setenv("GCSFS_SUBSYSTEM_PORT_BASE", str(base))
-        chosen = launcher.find_free_port()
-        assert base < chosen < base + launcher.PORT_BLOCK_SIZE
-
-
-def test_tpu_torchrun_strips_env_sets_launch_env_and_execs(monkeypatch):
-    monkeypatch.setenv("TORCH_TPU_TOPOLOGY", "old")
-    monkeypatch.setenv("TORCH_TPU_SLICEBUILDER_ADDRESSES", "old")
-
+def test_tpu_torchrun_sets_launch_env_and_execs(monkeypatch):
     recorded: dict = {}
 
     def fake_set_tpu_launch_env(*, nproc_per_node):
         recorded["nproc_per_node"] = nproc_per_node
-        recorded["env_during_call"] = {
-            "topo": os.environ.get("TORCH_TPU_TOPOLOGY"),
-            "addr": os.environ.get("TORCH_TPU_SLICEBUILDER_ADDRESSES"),
-        }
 
     fake_dist = types.SimpleNamespace(set_tpu_launch_env=fake_set_tpu_launch_env)
     fake_tpu = types.SimpleNamespace(distributed=fake_dist)
@@ -437,7 +430,6 @@ def test_tpu_torchrun_strips_env_sets_launch_env_and_execs(monkeypatch):
     )
 
     assert recorded["nproc_per_node"] == 4
-    assert recorded["env_during_call"] == {"topo": None, "addr": None}
     assert recorded["execv"] == (
         sys.executable,
         [
@@ -464,7 +456,7 @@ def test_child_env_skips_probe_subprocess_in_worker(monkeypatch, kind, count, mo
         mp.setattr(accelerator, "_probe_accelerator", lambda: (kind, count, model))
         child_env = launcher._build_child_env(kind)
 
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
     monkeypatch.setenv(accelerator.DEVICE_ENV, child_env[accelerator.DEVICE_ENV])
     monkeypatch.setenv(
         accelerator._PROBED_ACCELERATOR_ENV,
@@ -501,3 +493,48 @@ def test_run_torchrun_raises_when_local_nprocs_exceeds_device_count(
     with pytest.raises(accelerator.AcceleratorSetupError, match="local_nprocs=8"):
         launcher.run_torchrun("pkg.worker", [], world_size=8, rdzv_id="too-many")
     assert capture_popen == []
+
+
+@pytest.mark.timeout(180)
+def test_run_torchrun_launches_real_cpu_ranks(tmp_path, monkeypatch):
+    monkeypatch.setenv(accelerator.DEVICE_ENV, "cpu")
+    monkeypatch.setenv("TORCH_TPU_TOPOLOGY", "stale-topo")
+
+    ran = launcher.run_torchrun(
+        "gcsfs.tests.perf.subsystembenchmarks.tests._torchrun_echo_worker",
+        [str(tmp_path)],
+        world_size=2,
+        rdzv_id="echo",
+    )
+
+    assert ran is True
+    reports = [json.loads(p.read_text()) for p in sorted(tmp_path.glob("rank-*.json"))]
+    assert reports == [
+        {"rank": 0, "world_size": 2, "device": "cpu", "tpu_env": []},
+        {"rank": 1, "world_size": 2, "device": "cpu", "tpu_env": []},
+    ]
+
+
+def test_multinode_tpu_keeps_inherited_torchtpu_settings(
+    on_tpu_4, capture_popen, monkeypatch
+):
+    group = nodes.NodeGroup(
+        node_rank=0, num_nodes=2, leader_addr="leader", rdzv_port=29400
+    )
+    monkeypatch.setenv(launcher.TPU_SLICE_TOPOLOGY_ENV, "2x4")
+    monkeypatch.setenv(launcher.TPU_SLICE_ADDRESSES_ENV, "10.0.0.1,10.0.0.2")
+    monkeypatch.setenv("TORCH_TPU_DEVICES_PER_HOST", "4")
+    monkeypatch.setenv("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+
+    launcher.run_torchrun(
+        "pkg.worker",
+        [],
+        world_size=8,
+        rdzv_id="tpu-multi",
+        node_group=group,
+        devices_per_node=4,
+    )
+    env = capture_popen[-1]["env"]
+    assert env["TORCH_TPU_DEVICES_PER_HOST"] == "4"
+    assert env["TORCH_TPU_TOPOLOGY"] == "2x4"
+    assert "TORCH_DEVICE_BACKEND_AUTOLOAD" not in env

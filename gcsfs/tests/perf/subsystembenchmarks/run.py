@@ -5,6 +5,8 @@ import logging
 import os
 from datetime import datetime
 
+import pytest
+
 from gcsfs.tests.perf.subsystembenchmarks._common import (
     accelerator,
     cli,
@@ -311,7 +313,7 @@ def main(argv=None):
     os.makedirs(results_dir, exist_ok=True)
 
     rc, csv_path = cli.run_suite(suite_dir, results_dir, filter_expr=args.filter)
-    if rc == 5:
+    if rc == pytest.ExitCode.NO_TESTS_COLLECTED:
         if args.nodes is not None:
             logging.error("no cases need %s node(s) in %s", args.nodes, args.group)
         else:

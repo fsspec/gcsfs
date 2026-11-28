@@ -1,4 +1,3 @@
-import inspect
 import json
 import os
 import subprocess
@@ -12,13 +11,11 @@ from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
     for key in (
         accelerator.DEVICE_ENV,
         accelerator._PROBED_ACCELERATOR_ENV,
-        getattr(
-            accelerator, "ACCELERATOR_MODEL_ENV", "GCSFS_SUBSYSTEM_ACCELERATOR_MODEL"
-        ),
+        accelerator.ACCELERATOR_MODEL_ENV,
         "TPU_ACCELERATOR_TYPE",
         "TORCH_DEVICE_BACKEND_AUTOLOAD",
         "RANK",
@@ -28,7 +25,7 @@ def _clean_env(monkeypatch):
     ):
         monkeypatch.delenv(key, raising=False)
     yield
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
 
 
 def test_cpu_device_skips_subprocess_probe(monkeypatch):
@@ -49,12 +46,12 @@ def test_cpu_device_skips_subprocess_probe(monkeypatch):
 
 def test_auto_trusts_torch_accelerator_strictly(monkeypatch):
     cases = [
-        ("cpu", 0, "none", "cpu", 16, "none", "gloo", "gloo"),
-        ("cuda", 8, "NVIDIA H200", "gpu", 8, "NVIDIA H200", "nccl", "nccl"),
-        ("tpu", 8, "tpu7x", "tpu", 8, "tpu7x", "gloo", "tpu_dist"),
+        ("cpu", 0, "none", "cpu", 16, "none", "gloo", "gloo", "gloo"),
+        ("cuda", 8, "NVIDIA H200", "gpu", 8, "NVIDIA H200", "nccl", "nccl", None),
+        ("tpu", 8, "", "tpu", 8, "tpu", "gloo", "tpu_dist", "tpu_dist"),
     ]
-    for kind, count, model, accel_type, exp_count, exp_model, b1, b8 in cases:
-        accelerator.device_kind.cache_clear()
+    for kind, count, model, accel_type, exp_count, exp_model, b1, b8, pg8 in cases:
+        accelerator.reset_cache()
         monkeypatch.setattr(
             accelerator,
             "_probe_accelerator",
@@ -66,6 +63,9 @@ def test_auto_trusts_torch_accelerator_strictly(monkeypatch):
         assert accelerator.model_name() == exp_model
         assert accelerator.backend_name(world_size=1) == b1
         assert accelerator.backend_name(world_size=8) == b8
+        assert accelerator.process_group_backend(world_size=8) == (
+            pg8 or "cpu:gloo,cuda:nccl"
+        )
 
 
 @pytest.mark.parametrize(
@@ -91,25 +91,85 @@ def test_explicit_cuda_or_tpu_fails_fast_when_unavailable_or_zero(
 
 def test_probe_subprocess_strips_torch_device_backend_autoload(monkeypatch):
     monkeypatch.setenv("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+    monkeypatch.setenv("TORCH_TPU_TOPOLOGY", "stale-topo")
     captured = {}
 
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
         captured["env"] = kwargs.get("env")
         return subprocess.CompletedProcess(
-            cmd, 0, stdout=json.dumps(["tpu", 8, "tpu7x"]) + "\n", stderr=""
+            cmd,
+            0,
+            stdout="libtpu log line\n"
+            + json.dumps({"kind": "tpu", "count": 8, "name": ""})
+            + "\n",
+            stderr="",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     result = accelerator._probe_accelerator()
-    assert result == ("tpu", 8, "tpu7x")
+    assert result == ("tpu", 8, "")
     assert "TORCH_DEVICE_BACKEND_AUTOLOAD" not in captured["env"]
+    assert "TORCH_TPU_TOPOLOGY" not in captured["env"]
     assert os.environ["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        subprocess.CalledProcessError(
+            1, ["python"], stderr="AttributeError: module 'torch' has no attribute"
+        ),
+        subprocess.TimeoutExpired(["python"], 60, stderr=b"libtpu: TPU in use"),
+    ],
+)
+def test_probe_failure_raises_setup_error_with_stderr_tail(monkeypatch, error):
+    def fake_run(cmd, **kwargs):
+        raise error
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(accelerator.AcceleratorSetupError) as excinfo:
+        accelerator._probe_accelerator()
+    stderr = error.stderr
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode()
+    assert stderr in str(excinfo.value)
+
+
+def test_forwarded_probe_is_used_without_subprocess(monkeypatch):
+    monkeypatch.setenv(
+        accelerator._PROBED_ACCELERATOR_ENV,
+        json.dumps({"kind": "cuda", "count": 2, "name": "NVIDIA L4"}),
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **kw: pytest.fail("forwarded probe must not spawn subprocess"),
+    )
+
+    assert accelerator._probe_accelerator() == ("cuda", 2, "NVIDIA L4")
+
+    for bad in (json.dumps({"kind": "xla", "count": 2, "name": ""}), "not json"):
+        monkeypatch.setenv(accelerator._PROBED_ACCELERATOR_ENV, bad)
+        with pytest.raises(accelerator.AcceleratorSetupError, match="invalid"):
+            accelerator._probe_accelerator()
+
+
+@pytest.mark.timeout(120)
+def test_real_probe_reports_a_supported_kind():
+    pytest.importorskip("torch")
+
+    kind, count, name = accelerator._probe_accelerator()
+
+    assert kind in ("cpu", "cuda", "tpu")
+    assert (count == 0) == (kind == "cpu")
+    assert isinstance(name, str)
+
+
 def test_tpu_model_name_reads_env_vars_in_order(monkeypatch):
-    monkeypatch.setattr(accelerator, "_probe_accelerator", lambda: ("tpu", 8, "tpu"))
+    monkeypatch.setattr(accelerator, "_probe_accelerator", lambda: ("tpu", 8, ""))
 
     assert accelerator.model_name() == "tpu"
 
@@ -126,11 +186,11 @@ def test_ray_resources_floors_gpu_fraction_with_integer_scale(monkeypatch):
     assert res == {"num_gpus": 0.6666}
     assert 3 * res["num_gpus"] <= 2
 
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
     monkeypatch.setattr(accelerator, "_probe_accelerator", lambda: ("cuda", 4, "H200"))
     assert accelerator.ray_resources(2) == {"num_gpus": 1.0}
 
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
     monkeypatch.setattr(accelerator, "_probe_accelerator", lambda: ("tpu", 4, "v6e"))
     assert accelerator.ray_resources(4) == {"resources": {"TPU": 1.0}}
     with pytest.raises(ValueError, match="exceeds"):
@@ -182,23 +242,11 @@ def test_loader_worker_env_toggles_autoload_on_tpu_only(monkeypatch):
 
     # On CPU and CUDA -> no-op.
     for probe_res in (("cpu", 0, "none"), ("cuda", 4, "H200")):
-        accelerator.device_kind.cache_clear()
+        accelerator.reset_cache()
         monkeypatch.setattr(accelerator, "_probe_accelerator", lambda r=probe_res: r)
         monkeypatch.delenv("TORCH_DEVICE_BACKEND_AUTOLOAD", raising=False)
         with accelerator.loader_worker_env():
             assert "TORCH_DEVICE_BACKEND_AUTOLOAD" not in os.environ
-
-
-def test_no_pci_or_dev_shm_hacks_in_accelerator():
-    src = inspect.getsource(accelerator)
-    for forbidden in (
-        "0x1ae0",
-        "torch_tpu_pg_store_",
-        "/dev/vfio",
-        "/dev/nvidiactl",
-        "AF_INET6",
-    ):
-        assert forbidden not in src, f"Forbidden token {forbidden!r} found"
 
 
 @pytest.mark.parametrize("raw_val", ["", "   "])

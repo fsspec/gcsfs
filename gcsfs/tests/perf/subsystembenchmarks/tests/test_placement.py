@@ -24,7 +24,7 @@ def _case(name="c", ws=8, *, multi_node=False, gpu_share=False):
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
     for key in (
         accelerator.DEVICE_ENV,
         placement.NODES_ENV,
@@ -34,7 +34,7 @@ def _clean_env(monkeypatch):
     ):
         monkeypatch.delenv(key, raising=False)
     yield
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
 
 
 @pytest.fixture
