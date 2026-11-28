@@ -13,8 +13,7 @@ from gcsfs.tests.perf.subsystembenchmarks.dataloading.ray_data.parameters import
 )
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.ray_data.read import driver
 
-_TPU_TOPOLOGY_ENV = "TORCH_TPU_TOPOLOGY"
-_TPU_SLICEBUILDER_ADDRESSES_ENV = "TORCH_TPU_SLICEBUILDER_ADDRESSES"
+_TPU_ENV_PREFIX = "TORCH_TPU_"
 _RAY_NOSET_TPU_ENV = "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS"
 
 
@@ -36,8 +35,8 @@ def _prepare_tpu_env(effective_ws: int) -> None:
             f"world_size {effective_ws} exceeds {count} "
             f"{accelerator.accelerator_type()} devices"
         )
-    os.environ.pop(_TPU_TOPOLOGY_ENV, None)
-    os.environ.pop(_TPU_SLICEBUILDER_ADDRESSES_ENV, None)
+    for key in [k for k in os.environ if k.startswith(_TPU_ENV_PREFIX)]:
+        os.environ.pop(key, None)
     if effective_ws > 1:
         os.environ[_RAY_NOSET_TPU_ENV] = "1"
         from torch.tpu import distributed as tpu_distributed

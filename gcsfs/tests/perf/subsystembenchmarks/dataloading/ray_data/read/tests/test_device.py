@@ -258,11 +258,11 @@ def test_feature_columns_skip_the_accelerator(
 
 
 class _FakeActor:
-    def __init__(self, log, rank, source, opts, fail_consume=False):
+    def __init__(self, log, rank, world_size, source, opts, fail_consume=False):
         self.log = log
         self.rank = rank
         self.fail_consume = fail_consume
-        log["inits"].append((rank, source, opts))
+        log["inits"].append((rank, world_size, source, opts))
 
     class _Method:
         def __init__(self, fn):
@@ -300,9 +300,14 @@ def fake_tpu_actors(monkeypatch):
     class _ConsumerCls:
         def options(self, **opts):
             class _Bound:
-                def remote(self, rank, params, source):
+                def remote(self, rank, world_size, params, source):
                     return _FakeActor(
-                        log, rank, source, opts, fail_consume=log["fail_consume"]
+                        log,
+                        rank,
+                        world_size,
+                        source,
+                        opts,
+                        fail_consume=log["fail_consume"],
                     )
 
             return _Bound()
@@ -344,7 +349,7 @@ def test_tpu_multi_rank_gives_each_actor_its_split_once(fake_tpu_actors):
 
     assert dataset.split_calls == 1
     assert fake_tpu_actors["inits"] == [
-        (r, f"split-{r}", {"resources": {"TPU": 1.0}}) for r in range(4)
+        (r, 4, f"split-{r}", {"resources": {"TPU": 1.0}}) for r in range(4)
     ]
     assert fake_tpu_actors["ready"] == [0, 1, 2, 3]
     assert len(fake_tpu_actors["consume"]) == 8
@@ -372,11 +377,31 @@ def test_tpu_single_rank_gives_the_actor_its_dataset_once(fake_tpu_actors, monke
     durations, rows, _ = driver.run_single_rank("fake-ds", params)
 
     assert parent_binds == []
-    assert fake_tpu_actors["inits"] == [(0, "fake-ds", {"resources": {"TPU": 1.0}})]
+    assert fake_tpu_actors["inits"] == [(0, 1, "fake-ds", {"resources": {"TPU": 1.0}})]
     assert fake_tpu_actors["consume"] == [(0, None), (0, None)]
     assert rows == [5, 5]
     assert len(durations) == 2 and all(d > 0 for d in durations)
     assert fake_tpu_actors["killed"] == [(0, True)]
+
+
+def test_shard_consumer_binds_tpu_rank_with_world_size(monkeypatch):
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
+    bound = []
+    monkeypatch.setattr(
+        accelerator,
+        "bind_rank",
+        lambda local_rank, *, global_rank=None, world_size=None: bound.append(
+            (local_rank, global_rank, world_size)
+        )
+        or FAKE_GPU,
+    )
+    consumer_cls = driver._ShardConsumer.__ray_metadata__.modified_class
+    params = _params(split_by_node=True, world_size=4)
+
+    consumer = consumer_cls(2, 4, params, "split-2")
+
+    assert consumer._device == FAKE_GPU
+    assert bound == [(2, 2, 4)]
 
 
 def _write_labeled_shards(root, count):
@@ -569,6 +594,7 @@ def test_worker_multi_rank_tpu_sets_launch_env_before_ray_init_and_shuts_down(
     monkeypatch.setattr(accelerator, "local_device_count", lambda: 8)
     monkeypatch.setenv("TORCH_TPU_TOPOLOGY", "stale-topo")
     monkeypatch.setenv("TORCH_TPU_SLICEBUILDER_ADDRESSES", "stale-addr")
+    monkeypatch.setenv("TORCH_TPU_DEVICES_PER_HOST", "8")
     monkeypatch.delenv("RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS", raising=False)
 
     events = []
@@ -580,6 +606,7 @@ def test_worker_multi_rank_tpu_sets_launch_env_before_ray_init_and_shuts_down(
                 nproc_per_node,
                 os.environ.get("TORCH_TPU_TOPOLOGY"),
                 os.environ.get("TORCH_TPU_SLICEBUILDER_ADDRESSES"),
+                os.environ.get("TORCH_TPU_DEVICES_PER_HOST"),
                 os.environ.get("RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS"),
             )
         )
@@ -636,7 +663,7 @@ def test_worker_multi_rank_tpu_sets_launch_env_before_ray_init_and_shuts_down(
     _worker.main(["--spec-file", str(spec_file), "--result-file", str(result_file)])
 
     assert events == [
-        ("set_tpu_launch_env", 4, None, None, "1"),
+        ("set_tpu_launch_env", 4, None, None, None, "1"),
         (
             "ray_init",
             {
@@ -664,6 +691,7 @@ def test_worker_single_rank_tpu_skips_set_tpu_launch_env(tmp_path, monkeypatch):
     monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
     monkeypatch.setattr(accelerator, "local_device_count", lambda: 8)
     monkeypatch.setenv("TORCH_TPU_TOPOLOGY", "stale-topo")
+    monkeypatch.setenv("TORCH_TPU_DEVICES_PER_HOST", "8")
 
     tpu_env_calls = []
     fake_tpu_dist = types.ModuleType("torch.tpu.distributed")
@@ -694,6 +722,7 @@ def test_worker_single_rank_tpu_skips_set_tpu_launch_env(tmp_path, monkeypatch):
 
     assert tpu_env_calls == []
     assert "TORCH_TPU_TOPOLOGY" not in os.environ
+    assert "TORCH_TPU_DEVICES_PER_HOST" not in os.environ
     assert events == ["init", "run", "shutdown"]
     assert json.loads(result_file.read_text())["rows"] == [20]
 

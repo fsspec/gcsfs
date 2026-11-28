@@ -77,11 +77,14 @@ def test_rank_device_delegates_to_accelerator_bind_rank_on_tpu(on_tpu, monkeypat
     bound = []
     on_tpu(8)
     monkeypatch.setattr(
-        accelerator, "bind_rank", lambda rank: bound.append(rank) or FAKE_TPU
+        accelerator,
+        "bind_rank",
+        lambda rank, **kw: bound.append((rank, kw)) or FAKE_TPU,
     )
 
     assert device_lib.rank_device(2) == FAKE_TPU
-    assert bound == [2]
+    assert device_lib.rank_device(3, world_size=4) == FAKE_TPU
+    assert bound == [(2, {}), (3, {"global_rank": 3, "world_size": 4})]
 
 
 def test_pin_memory_matches_device_presence():

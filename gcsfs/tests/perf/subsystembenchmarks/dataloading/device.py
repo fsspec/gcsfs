@@ -13,14 +13,16 @@ no-op and loaders are used unwrapped.
 from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
 
 
-def rank_device(rank):
+def rank_device(rank, *, world_size=None):
     """Bind this rank to its accelerator device; return None on CPU.
 
     Also creates the device context before timed rounds start.
     """
     if accelerator.device_kind() == "cpu":
         return None
-    return accelerator.bind_rank(rank)
+    if world_size is None:
+        return accelerator.bind_rank(rank)
+    return accelerator.bind_rank(rank, global_rank=rank, world_size=world_size)
 
 
 def pin_memory(device) -> bool:

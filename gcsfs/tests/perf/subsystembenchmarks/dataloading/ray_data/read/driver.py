@@ -219,10 +219,10 @@ class _ShardConsumer:
     every round instead of repeating round 1's order.
     """
 
-    def __init__(self, rank: int, params, source):
+    def __init__(self, rank: int, world_size: int, params, source):
         self._params = params
         self._source = source
-        self._device = device_lib.rank_device(rank)
+        self._device = device_lib.rank_device(rank, world_size=world_size)
 
     def ready(self) -> bool:
         return True
@@ -242,7 +242,7 @@ def run_single_rank(dataset, params):
         resources = device_lib.ray_task_resources(1, False)
         actor = None
         try:
-            actor = _ShardConsumer.options(**resources).remote(0, params, dataset)
+            actor = _ShardConsumer.options(**resources).remote(0, 1, params, dataset)
             ray.get(actor.ready.remote())
             for epoch in range(params.rounds):
                 shuffle_seed = _epoch_shuffle_seed(params, epoch)
@@ -297,7 +297,7 @@ def run_multi_rank(dataset, params):
             for rank in range(world_size):
                 actors.append(
                     _ShardConsumer.options(**resources).remote(
-                        rank, params, splits[rank]
+                        rank, world_size, params, splits[rank]
                     )
                 )
             ray.get([actor.ready.remote() for actor in actors])
