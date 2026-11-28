@@ -1,9 +1,17 @@
 import math
-from types import SimpleNamespace
+import sys
+import types
 
 import pytest
 
+from gcsfs.tests.perf.subsystembenchmarks._common import launcher
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import driver
+from gcsfs.tests.perf.subsystembenchmarks.dataloading.tests import _worker_entries
+from gcsfs.tests.perf.subsystembenchmarks.dataloading.tests._worker_entries import (
+    RecordParams,
+)
+
+_WORKER_MODULE = "gcsfs.tests.perf.subsystembenchmarks.dataloading._worker"
 
 
 class _Barrier:
@@ -91,59 +99,163 @@ def test_assert_gcsfs_backed_rejects_non_pyfilesystem():
         driver.assert_gcsfs_backed(object())
 
 
-# Module-level probe functions for mp.spawn pickling.
+_ENTRY = "gcsfs.tests.perf.subsystembenchmarks.dataloading.tests._worker_entries:record"
+_RESULT = {"durations": [4.0, 3.5], "rows": [15, 15], "ttfb": 1.9, "build_seconds": 2.0}
 
 
-def _asymmetric_round_probe(rank, barrier, queue):
-    import time
-
-    for round_index in range(3):
-        driver.await_round(barrier)
-        begin = driver.timestamp()
-        # Vary rank sleep durations to test barrier synchronization across rounds.
-        time.sleep(0.05 * (rank + 1))
-        queue.put((round_index, begin, driver.timestamp()))
+@pytest.fixture
+def entry_calls():
+    _worker_entries.calls.clear()
+    yield _worker_entries.calls
+    _worker_entries.calls.clear()
 
 
-def test_round_barrier_keeps_every_rank_inside_its_own_round():
-    mp = pytest.importorskip("torch.multiprocessing")
+def _fake_launch(captured):
+    """Record a launch, read the spec it was given, and write a canned result."""
 
-    world_size = 3
-    ctx = mp.get_context("spawn")
-    with ctx.Manager() as manager:
-        queue = manager.Queue()
-        mp.spawn(
-            _asymmetric_round_probe,
-            args=(driver.round_barrier(ctx, world_size), queue),
-            nprocs=world_size,
-            join=True,
-        )
-        marks = [queue.get() for _ in range(world_size * 3)]
+    def launch(module, args, **kwargs):
+        captured.update(module=module, args=list(args), kwargs=kwargs)
+        spec_path = args[args.index("--spec-file") + 1]
+        captured["spec"] = driver.read_worker_spec(spec_path)
+        result_path = args[args.index("--result-file") + 1]
+        driver.write_worker_result(result_path, **_RESULT)
+        return True
 
-    for round_index in range(2):
-        latest_end = max(end for r, _, end in marks if r == round_index)
-        earliest_begin = min(begin for r, begin, _ in marks if r == round_index + 1)
-        assert (
-            earliest_begin >= latest_end
-        ), f"round {round_index + 1} started before round {round_index} finished"
+    return launch
 
 
-def _rank_result_probe(rank, world_size, prefix, params, barrier, queue):
-    assert world_size == params.world_size
-    assert prefix == "unused"
-    driver.await_round(barrier)
-    queue.put(
-        (
-            [(float(rank), float(2 + 2 * rank), 10 - 5 * rank)],
-            0.5 + 0.4 * rank,
-            1.0 + rank,
-        )
+@pytest.mark.parametrize("cpu_only", [False, True])
+def test_run_rank_epochs_distributed_launches_torchrun(monkeypatch, cpu_only):
+    captured = {}
+    monkeypatch.setattr(launcher, "run_torchrun", _fake_launch(captured))
+    params = RecordParams(world_size=4, rounds=2, batch_size=16)
+
+    result = driver.run_rank_epochs_distributed(
+        _worker_entries.record,
+        "gs://bucket/prefix",
+        params,
+        extra={"sample_count": 30},
+        cpu_only=cpu_only,
+    )
+
+    assert result == ([4.0, 3.5], [15, 15], 1.9, 2.0)
+    assert captured["module"] == _WORKER_MODULE
+    args = captured["args"]
+    assert args[args.index("--entry") + 1] == _ENTRY
+    assert "--distributed" in args
+    assert captured["kwargs"]["world_size"] == 4
+    assert captured["kwargs"]["rdzv_id"]
+    assert captured["kwargs"]["cpu_only"] is cpu_only
+    assert captured["spec"] == ("gs://bucket/prefix", params, {"sample_count": 30})
+
+
+def test_run_single_rank_isolated_launches_a_subprocess(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(launcher, "run_subprocess", _fake_launch(captured))
+    params = RecordParams(world_size=1, rounds=1, batch_size=4)
+
+    result = driver.run_single_rank_isolated(
+        _worker_entries.record,
+        "file:///tmp/data",
+        params,
+        extra={"cache_root": "/tmp/cache"},
+    )
+
+    assert result == ([4.0, 3.5], [15, 15], 1.9, 2.0)
+    assert captured["module"] == _WORKER_MODULE
+    assert "--distributed" not in captured["args"]
+    assert captured["args"][captured["args"].index("--entry") + 1] == _ENTRY
+    assert captured["kwargs"] == {}
+    assert captured["spec"] == (
+        "file:///tmp/data",
+        params,
+        {"cache_root": "/tmp/cache"},
     )
 
 
-def test_spawn_rank_epochs_reduces_results_and_uses_slowest_build():
-    params = SimpleNamespace(world_size=2, rounds=1)
+def test_worker_spec_round_trips_the_params_dataclass(tmp_path):
+    spec_file = str(tmp_path / "spec.json")
+    params = RecordParams(world_size=2, rounds=3, batch_size=5)
 
-    result = driver.spawn_rank_epochs(_rank_result_probe, "unused", params)
+    driver.write_worker_spec(spec_file, "gs://b/p/", params)
+    prefix, rebuilt, extra = driver.read_worker_spec(spec_file)
 
-    assert result == ([4.0], [15], 1.9, 2.0)
+    assert (prefix, rebuilt, extra) == ("gs://b/p/", params, {})
+    assert type(rebuilt) is RecordParams
+    assert rebuilt.total_rows == 15
+
+
+def test_write_worker_spec_rejects_non_dataclass_params(tmp_path):
+    with pytest.raises(TypeError, match="dataclass instance"):
+        driver.write_worker_spec(str(tmp_path / "spec.json"), "gs://b/p/", object())
+
+
+def test_qualified_names_resolve_module_level_objects_only():
+    assert driver.qualified_name(_worker_entries.record) == _ENTRY
+    assert driver.resolve_qualified_name(_ENTRY) is _worker_entries.record
+
+    def local():
+        pass
+
+    with pytest.raises(ValueError, match="module level"):
+        driver.qualified_name(local)
+    with pytest.raises(ValueError, match="module:qualname"):
+        driver.resolve_qualified_name("no_colon")
+
+
+def _worker_args(tmp_path, params, extra=None, *, distributed=False):
+    spec_file = tmp_path / "spec.json"
+    result_file = tmp_path / "result.json"
+    driver.write_worker_spec(str(spec_file), "file:///data", params, extra)
+    args = ["--entry", _ENTRY, "--spec-file", str(spec_file)]
+    args += ["--result-file", str(result_file)]
+    if distributed:
+        args.append("--distributed")
+    return args, result_file
+
+
+def test_worker_main_single_rank_runs_the_entry(tmp_path, entry_calls):
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import _worker
+
+    params = RecordParams(world_size=1, rounds=1, batch_size=20)
+    args, result_file = _worker_args(tmp_path, params, {"tag": "ok"})
+
+    _worker.main(args)
+
+    assert entry_calls == [(0, 1, "file:///data", params, None, {"tag": "ok"})]
+    assert type(entry_calls[0][3]) is RecordParams
+    assert driver.read_worker_result(str(result_file)) == ([1.5], [20], 0.25, 0.5)
+
+
+def test_worker_main_distributed_uses_gloo_barrier_and_gather(
+    tmp_path, monkeypatch, entry_calls
+):
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import _worker
+
+    events = []
+    rank1_result = ([(1.0, 4.0, 5)], 0.9, 2.0)
+    fake_dist = types.SimpleNamespace(
+        init_process_group=lambda **kw: events.append(("init", kw["backend"])),
+        get_rank=lambda: 0,
+        get_world_size=lambda: 2,
+        barrier=lambda: events.append(("barrier",)),
+        gather_object=lambda obj, out, dst=0: (
+            events.append(("gather", dst)),
+            out.__setitem__(0, obj),
+            out.__setitem__(1, rank1_result),
+        ),
+        destroy_process_group=lambda: events.append(("destroy",)),
+    )
+    monkeypatch.setitem(
+        sys.modules, "torch", types.SimpleNamespace(distributed=fake_dist)
+    )
+    monkeypatch.setitem(sys.modules, "torch.distributed", fake_dist)
+    params = RecordParams(world_size=2, rounds=1, batch_size=10)
+    args, result_file = _worker_args(tmp_path, params, distributed=True)
+
+    _worker.main(args)
+
+    assert [call[:2] for call in entry_calls] == [(0, 2)]
+    assert events == [("init", "gloo"), ("barrier",), ("gather", 0), ("destroy",)]
+    # Rank 0 spans 10.0-11.5 with first batch at 10.25; rank 1 spans 1.0-4.0.
+    assert driver.read_worker_result(str(result_file)) == ([10.5], [15], 9.25, 2.0)

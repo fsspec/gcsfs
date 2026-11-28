@@ -80,6 +80,9 @@ class CheckpointParameters:
         if self.setup_data_parallel_size is None:
             self.setup_data_parallel_size = self.data_parallel_size
 
+    def max_world_size(self) -> int:
+        return max(self.world_size, self.setup_world_size or self.world_size)
+
     def extra_columns(self):
         """Loader-specific CSV columns."""
         return {

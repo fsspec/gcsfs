@@ -2,9 +2,7 @@ import os
 
 import pytest
 
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.configs import (
-    case_params,
-)
+from gcsfs.tests.perf.subsystembenchmarks._common import placement
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_load import configs
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_load.configs import (
     PyTorchLoadConfigurator,
@@ -20,7 +18,11 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.mark.timeout(7200)
 @pytest.mark.parametrize(
-    "params", case_params(PyTorchLoadConfigurator, configs.__file__)
+    "params",
+    placement.select(
+        PyTorchLoadConfigurator(configs.__file__).generate_cases(),
+        group="checkpointing/pytorch_load",
+    ),
 )
 def test_checkpoint_load(benchmark, params, monitor):
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing.checkpoint_case import (

@@ -2,6 +2,7 @@ import os
 
 import pytest
 
+from gcsfs.tests.perf.subsystembenchmarks._common import placement
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.huggingface_datasets import (
     configs,
 )
@@ -18,7 +19,9 @@ pytestmark = pytest.mark.skipif(
 CASES = configs.HuggingFaceReadConfigurator(configs.__file__).generate_cases()
 
 
-@pytest.mark.parametrize("params", CASES, ids=lambda p: p.name)
+@pytest.mark.parametrize(
+    "params", placement.select(CASES, group="dataloading/huggingface_datasets")
+)
 def test_read(benchmark, params, monitor):
     from gcsfs.tests.perf.subsystembenchmarks.dataloading.huggingface_datasets.read.driver import (
         HFReadDriver,

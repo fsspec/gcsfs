@@ -19,6 +19,10 @@ __all__ = ["STRATEGY_MESH_DIMS", "PyTorchCheckpointParameters"]
 class PyTorchCheckpointParameters(CheckpointParameters):
     """Parameters for a native PyTorch checkpoint benchmark case."""
 
+    # DCP cases wider than one node run across `ceil(world_size / devices_per_node)`
+    # nodes with --nodes; other groups are single-node only.
+    MULTI_NODE = True
+
     data_parallel_replicate_size: int = 1
     pipeline_parallel_size: int = 1
     expert_parallel_size: int = 1

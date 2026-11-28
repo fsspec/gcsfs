@@ -6,6 +6,7 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("webdataset")
 pytest.importorskip("PIL")
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator  # noqa: E402
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.webdataset import (  # noqa: E402
     configs,
     imagegen,
@@ -55,7 +56,7 @@ def prefix(tmp_path):
 @pytest.fixture
 def sync_calls(monkeypatch):
     calls = []
-    monkeypatch.setattr(torch.cuda, "synchronize", calls.append)
+    monkeypatch.setattr(accelerator, "synchronize", calls.append)
     return calls
 
 
@@ -154,7 +155,7 @@ def test_resampled_rounds_still_synchronize_after_stopping_at_target(
 def test_run_rank_epochs_on_cpu_neither_pins_nor_synchronizes(
     prefix, monkeypatch, sync_calls, loader_kwargs
 ):
-    monkeypatch.setattr(driver.device_lib.env, "detect_accelerator", lambda: "cpu")
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "cpu")
 
     per_epoch, _, _ = driver.run_rank_epochs(
         0, 1, prefix, _params(rounds=1), sample_count=_FILES * _ROWS
@@ -163,3 +164,138 @@ def test_run_rank_epochs_on_cpu_neither_pins_nor_synchronizes(
     assert per_epoch[0][2] == _FILES * _ROWS
     assert loader_kwargs[0]["pin_memory"] is False
     assert sync_calls == []
+
+
+@pytest.mark.parametrize("decode", [False, True])
+def test_split_run_launches_undecoded_ranks_on_cpu(prefix, monkeypatch, decode):
+    seen = []
+
+    def fake_distributed(entry, pfx, params, *, extra=None, cpu_only=False):
+        seen.append((entry, pfx, params, extra, cpu_only))
+        return ([0.1], [_FILES * _ROWS], 0.05, 0.01)
+
+    monkeypatch.setattr(driver, "run_rank_epochs_distributed", fake_distributed)
+    params = _params(split_by_node=True, world_size=2, decode=decode, rounds=1)
+    result = driver.WebDatasetReadDriver().run_read(
+        prefix, params, {"sample_count": _FILES * _ROWS}
+    )
+
+    assert len(seen) == 1
+    entry, pfx, got_params, extra, cpu_only = seen[0]
+    assert entry is driver.worker_entry
+    assert pfx == prefix
+    assert got_params == params
+    assert extra == {"cache_root": None, "sample_count": _FILES * _ROWS}
+    assert cpu_only is not decode
+    assert result.rows_per_epoch == [_FILES * _ROWS]
+
+
+def test_tpu_single_rank_decoded_isolates_in_subprocess(prefix, monkeypatch):
+    """split_by_node=False decoded on TPU must not bind in parent."""
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
+    parent_binds = []
+    monkeypatch.setattr(
+        driver.device_lib, "rank_device", lambda r: parent_binds.append(r)
+    )
+    isolated = []
+
+    def fake_isolated(entry, pfx, params, *, extra=None):
+        isolated.append((entry, pfx, params.world_size, params.split_by_node, extra))
+        return ([0.1], [_FILES * _ROWS], 0.05, 0.01)
+
+    monkeypatch.setattr(driver, "run_single_rank_isolated", fake_isolated)
+    params = _params(split_by_node=False, world_size=4, decode=True, rounds=1)
+    res = driver.WebDatasetReadDriver().run_read(
+        prefix, params, {"sample_count": _FILES * _ROWS}
+    )
+
+    assert parent_binds == []
+    assert isolated == [
+        (
+            driver.worker_entry,
+            prefix,
+            1,
+            False,
+            {"cache_root": None, "sample_count": _FILES * _ROWS},
+        )
+    ]
+    assert res.rows_per_epoch == [_FILES * _ROWS]
+
+
+def test_tpu_single_rank_undecoded_stays_host_only(prefix, monkeypatch):
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
+    distributed, isolated, binds = [], [], []
+    monkeypatch.setattr(
+        driver, "run_rank_epochs_distributed", lambda *a, **kw: distributed.append(a)
+    )
+    monkeypatch.setattr(
+        driver, "run_single_rank_isolated", lambda *a, **kw: isolated.append(a)
+    )
+    monkeypatch.setattr(driver.device_lib, "rank_device", lambda r: binds.append(r))
+
+    res = driver.WebDatasetReadDriver().run_read(
+        prefix, _params(decode=False, rounds=1), {"sample_count": _FILES * _ROWS}
+    )
+
+    assert distributed == []
+    assert isolated == []
+    assert binds == []
+    assert res.rows_per_epoch == [_FILES * _ROWS]
+
+
+def test_wds_driver_consults_device_pin_memory(
+    prefix, monkeypatch, sync_calls, ranks_on_fake_gpu, loader_kwargs
+):
+    pin_calls = []
+    monkeypatch.setattr(
+        driver.device_lib,
+        "pin_memory",
+        lambda dev: pin_calls.append(dev) or False,
+    )
+
+    driver.run_rank_epochs(
+        0, 1, prefix, _params(decode=True, rounds=1), sample_count=_FILES * _ROWS
+    )
+
+    assert pin_calls == [FAKE_GPU]
+    assert loader_kwargs[0]["pin_memory"] is False
+
+
+def test_worker_runs_the_entry_with_rebuilt_params(
+    prefix, tmp_path, sync_calls, ranks_on_fake_gpu, loader_kwargs
+):
+    """The single-rank worker rebuilds the params dataclass, properties included."""
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import _worker
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import driver as dl_driver
+
+    spec_file = str(tmp_path / "spec.json")
+    result_file = str(tmp_path / "result.json")
+    params = _params(access="shuffled", decode=True, rounds=1)
+    dl_driver.write_worker_spec(
+        spec_file, prefix, params, {"cache_root": None, "sample_count": _FILES * _ROWS}
+    )
+
+    _worker.main(
+        [
+            "--entry",
+            dl_driver.qualified_name(driver.worker_entry),
+            "--spec-file",
+            spec_file,
+            "--result-file",
+            result_file,
+        ]
+    )
+
+    _, rows, _, _ = dl_driver.read_worker_result(result_file)
+    assert rows == [_FILES * _ROWS]
+    assert ranks_on_fake_gpu == [0]
+    assert sync_calls == [FAKE_GPU]
+
+
+def test_build_loader_spawns_workers_and_keeps_in_process_loading_unchanged(prefix):
+    params = _params()
+    dataset = driver.build_dataset(prefix, params, split_by_node=False)
+    assert driver.build_loader(dataset, params).multiprocessing_context is None
+    params.num_workers = 1
+    loader = driver.build_loader(dataset, params)
+    assert loader.multiprocessing_context.get_start_method() == "spawn"

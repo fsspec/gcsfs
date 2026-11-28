@@ -1,53 +1,9 @@
-import dataclasses
-from typing import Optional
-
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import MAX_RANKS
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.configurator import (
     OneFactorCheckpointConfigurator,
-)
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.device import (
-    device_capacity,
-    run_device,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parameters import (
     PyTorchCheckpointParameters,
 )
-
-
-@dataclasses.dataclass(frozen=True)
-class HostConfig:
-    nnodes: int = 1
-    nproc_per_node: int = MAX_RANKS
-
-
-def host_config(device: str) -> HostConfig:
-    return HostConfig(nnodes=1, nproc_per_node=device_capacity(device))
-
-
-def placement_skip_reason(
-    p: PyTorchCheckpointParameters, host: HostConfig
-) -> Optional[str]:
-    n = p.max_world_size()
-    if n > host.nnodes * host.nproc_per_node:
-        return f"needs {n} ranks, run has {host.nnodes}x{host.nproc_per_node}"
-    return None
-
-
-def case_params(
-    configurator_cls,
-    configs_file: str,
-    host: Optional[HostConfig] = None,
-) -> list:
-    import pytest
-
-    if host is None:
-        host = host_config(run_device())
-    params = []
-    for case in configurator_cls(configs_file).generate_cases():
-        reason = placement_skip_reason(case, host)
-        marks = [pytest.mark.skip(reason=reason)] if reason else []
-        params.append(pytest.param(case, id=case.name, marks=marks))
-    return params
 
 
 class PyTorchCheckpointConfigurator(OneFactorCheckpointConfigurator):

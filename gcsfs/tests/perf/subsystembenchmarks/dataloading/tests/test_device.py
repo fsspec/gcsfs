@@ -1,68 +1,88 @@
-"""Shared CPU/GPU device helpers for data-loading drivers.
+"""Shared CPU/GPU/TPU device helpers for data-loading drivers.
 
-The ``meta`` device stands in for a GPU so copy paths run on CPU-only hosts;
-``torch.cuda`` calls that need a real device are replaced with recorders.
+The ``meta`` device stands in for an accelerator so copy paths run on CPU-only hosts;
+``accelerator`` calls that need a real device are replaced with recorders.
 """
 
 import itertools
+import os
 
 import pytest
 
 torch = pytest.importorskip("torch")
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import device as device_lib
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import driver as dl_driver
 
 FAKE_GPU = torch.device("meta")
+FAKE_TPU = torch.device("meta")
+
+
+@pytest.fixture(autouse=True)
+def _clean_accelerator(monkeypatch):
+    accelerator.reset_cache()
+    monkeypatch.delenv(accelerator.DEVICE_ENV, raising=False)
+    monkeypatch.delenv("TORCH_DEVICE_BACKEND_AUTOLOAD", raising=False)
+    yield
+    accelerator.reset_cache()
 
 
 @pytest.fixture
 def sync_calls(monkeypatch):
     calls = []
-    monkeypatch.setattr(torch.cuda, "synchronize", calls.append)
+    monkeypatch.setattr(accelerator, "synchronize", calls.append)
     return calls
+
+
+@pytest.fixture
+def on_cpu(monkeypatch):
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "cpu")
 
 
 @pytest.fixture
 def on_gpu(monkeypatch):
     def configure(device_count):
-        monkeypatch.setattr(device_lib.env, "detect_accelerator", lambda: "gpu")
-        monkeypatch.setattr(torch.cuda, "device_count", lambda: device_count)
+        monkeypatch.setattr(accelerator, "device_kind", lambda: "cuda")
+        monkeypatch.setattr(accelerator, "local_device_count", lambda: device_count)
 
     return configure
 
 
 @pytest.fixture
-def warmups(monkeypatch):
-    """Record the context warm-up allocation instead of touching a real GPU."""
-    devices = []
-    monkeypatch.setattr(torch.cuda, "set_device", lambda index: None)
-    monkeypatch.setattr(
-        torch, "zeros", lambda *shape, device=None: devices.append(device)
-    )
-    return devices
+def on_tpu(monkeypatch):
+    def configure(device_count):
+        monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
+        monkeypatch.setattr(accelerator, "local_device_count", lambda: device_count)
+
+    return configure
 
 
-def test_rank_device_is_none_on_cpu(monkeypatch):
-    monkeypatch.setattr(device_lib.env, "detect_accelerator", lambda: "cpu")
+def test_rank_device_is_none_on_cpu(on_cpu):
     assert device_lib.rank_device(3) is None
 
 
-def test_rank_device_binds_rank_modulo_device_count(on_gpu, warmups, monkeypatch):
+@pytest.mark.parametrize("kind", ["cuda", "tpu"])
+def test_rank_device_delegates_to_accelerator_bind_rank(monkeypatch, kind):
     bound = []
-    on_gpu(4)
-    monkeypatch.setattr(torch.cuda, "set_device", bound.append)
+    monkeypatch.setattr(accelerator, "device_kind", lambda: kind)
+    monkeypatch.setattr(
+        accelerator,
+        "bind_rank",
+        lambda rank, **kw: bound.append((rank, kw)) or FAKE_GPU,
+    )
 
-    assert device_lib.rank_device(6) == torch.device("cuda", 2)
-    assert bound == [2]
+    assert device_lib.rank_device(2) == FAKE_GPU
+    assert device_lib.rank_device(3, world_size=4) == FAKE_GPU
+    assert bound == [
+        (2, {"global_rank": 2, "world_size": None}),
+        (3, {"global_rank": 3, "world_size": 4}),
+    ]
 
 
-def test_rank_device_creates_the_cuda_context_before_timed_rounds(on_gpu, warmups):
-    on_gpu(4)
-
-    device = device_lib.rank_device(6)
-
-    assert warmups == [device]
+def test_pin_memory_matches_device_presence():
+    assert device_lib.pin_memory(None) is False
+    assert device_lib.pin_memory(FAKE_GPU) is True
 
 
 def test_to_device_moves_nested_tensors_and_passes_other_values_through():
@@ -83,17 +103,18 @@ def test_to_device_moves_nested_tensors_and_passes_other_values_through():
     assert out[1]["ids"][1] == 7
 
 
-def test_synchronize_is_a_noop_on_cpu(sync_calls):
-    device_lib.synchronize(None)
-    assert sync_calls == []
+def test_to_device_keeps_tensors_already_on_the_device():
+    tensor = torch.ones(2, device=FAKE_GPU)
+    assert device_lib.to_device({"label": tensor}, FAKE_GPU)["label"] is tensor
 
 
-def test_feed_returns_loader_unchanged_on_cpu():
+def test_feed_returns_loader_unchanged_on_cpu(on_cpu):
     loader = [{"label": torch.tensor([1])}]
     assert device_lib.feed(loader, None) is loader
 
 
-def test_feed_moves_batches_and_synchronizes_once_per_pass(sync_calls):
+def test_feed_moves_batches_and_synchronizes_once_per_pass(on_gpu, sync_calls):
+    on_gpu(8)
     feed = device_lib.feed([{"label": torch.tensor([1])}] * 3, FAKE_GPU)
 
     first = list(feed)
@@ -103,12 +124,48 @@ def test_feed_moves_batches_and_synchronizes_once_per_pass(sync_calls):
     assert sync_calls == [FAKE_GPU, FAKE_GPU]
 
 
-def test_feed_synchronizes_when_a_pass_yields_no_batches(sync_calls):
+def test_feed_wraps_with_loader_worker_env_and_syncs_on_tpu(on_tpu, sync_calls):
+    on_tpu(8)
+    env_inside = []
+
+    class _Loader:
+        def __iter__(self):
+            env_inside.append(os.environ.get("TORCH_DEVICE_BACKEND_AUTOLOAD"))
+            yield {"label": torch.tensor([1])}
+            yield {"label": torch.tensor([2])}
+
+    feed = device_lib.feed(_Loader(), FAKE_TPU)
+    out = list(feed)
+    assert [b["label"].device for b in out] == [FAKE_TPU, FAKE_TPU]
+    assert env_inside == ["0"]
+    assert "TORCH_DEVICE_BACKEND_AUTOLOAD" not in os.environ
+    assert sync_calls == [FAKE_TPU]
+
+
+def test_feed_sets_worker_env_on_tpu_even_without_device(on_tpu, sync_calls):
+    on_tpu(8)
+    env_inside = []
+
+    class _Loader:
+        def __iter__(self):
+            env_inside.append(os.environ.get("TORCH_DEVICE_BACKEND_AUTOLOAD"))
+            yield {"raw": b"jpeg-bytes"}
+
+    feed = device_lib.feed(_Loader(), None)
+    assert list(feed) == [{"raw": b"jpeg-bytes"}]
+    assert env_inside == ["0"]
+    assert "TORCH_DEVICE_BACKEND_AUTOLOAD" not in os.environ
+    assert sync_calls == []
+
+
+def test_feed_synchronizes_when_a_pass_yields_no_batches(on_gpu, sync_calls):
+    on_gpu(8)
     assert list(device_lib.feed([], FAKE_GPU)) == []
     assert sync_calls == [FAKE_GPU]
 
 
-def test_feed_synchronizes_when_iterator_is_closed_early(sync_calls):
+def test_feed_synchronizes_when_iterator_is_closed_early(on_gpu, sync_calls):
+    on_gpu(8)
     iterator = iter(device_lib.feed([{"label": torch.tensor([1])}] * 3, FAKE_GPU))
 
     next(iterator)
@@ -119,15 +176,16 @@ def test_feed_synchronizes_when_iterator_is_closed_early(sync_calls):
 
 
 def test_rounds_stopped_at_a_target_synchronize_before_their_end_timestamp(
-    monkeypatch,
+    on_gpu, monkeypatch
 ):
     """measure_epochs breaks at the target; the feed must sync before the end
     timestamp (CPython closes the abandoned generator at the break)."""
+    on_gpu(8)
     clock = itertools.count()
     synced_at = []
     monkeypatch.setattr(dl_driver, "timestamp", lambda: next(clock))
     monkeypatch.setattr(
-        torch.cuda, "synchronize", lambda device: synced_at.append(next(clock))
+        accelerator, "synchronize", lambda device: synced_at.append(next(clock))
     )
     feed = device_lib.feed([{"label": torch.ones(2)}] * 10, FAKE_GPU)
 
@@ -137,26 +195,6 @@ def test_rounds_stopped_at_a_target_synchronize_before_their_end_timestamp(
     assert len(synced_at) == 2
     for (begin, end, _), sync in zip(per_epoch, synced_at):
         assert begin < sync < end
-
-
-def test_ray_task_num_gpus_is_zero_on_cpu(monkeypatch):
-    monkeypatch.setattr(device_lib.env, "detect_accelerator", lambda: "cpu")
-    assert device_lib.ray_task_num_gpus(8) == 0
-
-
-@pytest.mark.parametrize(
-    "gpus, world_size, expected",
-    [(8, 8, 1.0), (8, 4, 1.0), (4, 8, 0.5), (3, 8, 0.375), (2, 3, 0.6666)],
-)
-def test_ray_task_num_gpus_shares_gpus_in_ray_precision(
-    on_gpu, gpus, world_size, expected
-):
-    on_gpu(gpus)
-
-    share = device_lib.ray_task_num_gpus(world_size)
-
-    assert share == expected
-    assert share * world_size <= max(gpus, world_size)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA GPU")

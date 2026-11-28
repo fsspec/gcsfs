@@ -383,3 +383,43 @@ def test_loader_yields_list_batches_for_variable_shape_samples(tmp_path):
     assert all(isinstance(b, list) for b in batches)
     assert sorted(len(b) for b in batches) == [2, 5, 5]
     assert sum(len(batch) for batch in batches) == 12
+
+
+def test_run_split_epochs_live_torchrun_e2e(tmp_path):
+    """Run WebDatasetReadDriver end-to-end through real torchrun and dataloading._worker."""
+    file_count, rows_per_file = 4, 4
+    expected_samples = file_count * rows_per_file
+    prefix = str(tmp_path) + "/data/"
+    imagegen.ingest_tar_shards(
+        prefix,
+        fmt="image_tar",
+        file_count=file_count,
+        rows_per_file=rows_per_file,
+        pixel_budget=_TINY_PIXEL_BUDGET,
+        image_encoding="jpeg",
+        jpeg_quality=75,
+        sample_shape="pairs",
+    )
+
+    params = _case()
+    params.file_count = file_count
+    params.rows_per_file = rows_per_file
+    params.pixel_budget = _TINY_PIXEL_BUDGET
+    params.access = "shuffled"
+    params.split_by_node = True
+    params.world_size = 2
+    params.rounds = 2
+    params.batch_size = 4
+    params.num_workers = 0
+    params.decode = False
+    params.cache_dir_enabled = False
+
+    result = driver.WebDatasetReadDriver().run_read(
+        prefix, params, {"sample_count": expected_samples}
+    )
+
+    assert result.rows_per_epoch == [expected_samples, expected_samples]
+    assert len(result.durations) == 2
+    assert all(0.0 < d < 300.0 for d in result.durations)
+    assert result.ttfb_seconds >= 0.0
+    assert result.build_seconds > 0.0
