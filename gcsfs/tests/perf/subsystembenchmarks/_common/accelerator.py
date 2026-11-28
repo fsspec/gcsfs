@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 DEVICE_ENV = "GCSFS_SUBSYSTEM_DEVICE"
 DEVICES = ("auto", "cpu", "cuda", "tpu")
 ACCELERATOR_MODEL_ENV = "GCSFS_SUBSYSTEM_ACCELERATOR_MODEL"
+_PROBED_ACCELERATOR_ENV = "_GCSFS_SUBSYSTEM_PROBED_ACCELERATOR"
 CPU_MAX_RANKS = 16
 RAY_RESOURCE_SCALE = 10_000
 
@@ -56,8 +57,21 @@ print(json.dumps([kind, count, model]))
 @functools.lru_cache(maxsize=1)
 def _probe_accelerator() -> tuple[str, int, str]:
     """Probe torch.accelerator in a child process so the parent avoids TPU init."""
+    raw = os.environ.get(_PROBED_ACCELERATOR_ENV, "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                kind = str(parsed["kind"])
+                count = int(parsed["count"])
+                model = str(parsed["name"])
+                if kind in ("cpu", "cuda", "tpu") and count >= 0:
+                    return kind, count, model
+        except (ValueError, KeyError, TypeError):
+            pass
     env = dict(os.environ)
     env.pop("TORCH_DEVICE_BACKEND_AUTOLOAD", None)
+    env.pop(_PROBED_ACCELERATOR_ENV, None)
     proc = subprocess.run(
         [sys.executable, "-c", _PROBE_SNIPPET],
         capture_output=True,
@@ -69,6 +83,20 @@ def _probe_accelerator() -> tuple[str, int, str]:
     lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
     kind, count, model = json.loads(lines[-1])
     return str(kind), int(count), str(model)
+
+
+def child_probe_env(kind: str | None = None) -> dict[str, str]:
+    """Return env vars forwarding the parent's validated probe to child workers."""
+    resolved = device_kind() if kind is None else kind
+    if resolved == "cpu":
+        payload = {"kind": "cpu", "count": 0, "name": "none"}
+    else:
+        payload = {
+            "kind": resolved,
+            "count": local_device_count(),
+            "name": model_name(),
+        }
+    return {_PROBED_ACCELERATOR_ENV: json.dumps(payload)}
 
 
 @functools.lru_cache(maxsize=8)
@@ -88,7 +116,7 @@ def _resolve_device_kind(requested: str) -> str:
 
 def device_kind() -> str:
     """Return active device kind ('cpu', 'cuda', or 'tpu'), cached per mode."""
-    requested = os.environ.get(DEVICE_ENV, "auto")
+    requested = os.environ.get(DEVICE_ENV, "").strip() or "auto"
     if requested not in DEVICES:
         raise ValueError(f"Unsupported device {requested!r}; expected one of {DEVICES}")
     return _resolve_device_kind(requested)
@@ -170,7 +198,10 @@ def bind_rank(
     if kind == "cpu":
         return torch.device("cpu")
     if kind == "cuda":
-        idx = local_rank % local_device_count()
+        count = torch.cuda.device_count()
+        if count <= 0:
+            raise AcceleratorSetupError("cuda accelerator reported 0 devices")
+        idx = local_rank % count
         torch.cuda.set_device(idx)
         dev = torch.device("cuda", idx)
         torch.zeros(1, device=dev)

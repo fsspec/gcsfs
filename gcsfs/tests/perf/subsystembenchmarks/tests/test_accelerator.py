@@ -15,6 +15,7 @@ def _clean_env(monkeypatch):
     accelerator.device_kind.cache_clear()
     for key in (
         accelerator.DEVICE_ENV,
+        accelerator._PROBED_ACCELERATOR_ENV,
         getattr(
             accelerator, "ACCELERATOR_MODEL_ENV", "GCSFS_SUBSYSTEM_ACCELERATOR_MODEL"
         ),
@@ -198,3 +199,37 @@ def test_no_pci_or_dev_shm_hacks_in_accelerator():
         "AF_INET6",
     ):
         assert forbidden not in src, f"Forbidden token {forbidden!r} found"
+
+
+@pytest.mark.parametrize("raw_val", ["", "   "])
+def test_empty_device_env_treated_as_auto(monkeypatch, raw_val):
+    monkeypatch.setenv(accelerator.DEVICE_ENV, raw_val)
+    monkeypatch.setattr(accelerator, "_probe_accelerator", lambda: ("cuda", 4, "H200"))
+
+    assert accelerator.device_kind() == "cuda"
+
+
+def test_bind_rank_cuda_uses_torch_cuda_device_count_directly(monkeypatch):
+    monkeypatch.setattr(accelerator, "_probe_accelerator", lambda: ("cuda", 4, "H200"))
+    monkeypatch.setattr(
+        accelerator,
+        "local_device_count",
+        lambda: pytest.fail("bind_rank on CUDA must use torch.cuda.device_count()"),
+    )
+
+    set_devices: list[int] = []
+    fake_cuda = types.SimpleNamespace(
+        device_count=lambda: 4,
+        set_device=lambda idx: set_devices.append(idx),
+    )
+    fake_torch = types.SimpleNamespace(
+        cuda=fake_cuda,
+        device=lambda kind, idx=None: types.SimpleNamespace(type=kind, index=idx),
+        zeros=lambda *a, **kw: None,
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    dev = accelerator.bind_rank(5)
+    assert dev.type == "cuda"
+    assert dev.index == 1
+    assert set_devices == [1]

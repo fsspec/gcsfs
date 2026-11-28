@@ -117,6 +117,7 @@ def _build_child_env(
     child_env = os.environ.copy()
     child_env.pop(_TORCH_AUTOLOAD_ENV, None)
     child_env[accelerator.DEVICE_ENV] = device_kind
+    child_env.update(accelerator.child_probe_env(device_kind))
     if env:
         child_env.update(env)
     return child_env

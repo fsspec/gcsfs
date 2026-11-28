@@ -58,14 +58,13 @@ class ResourceMonitor:
     def _monitor(self):
         try:
             root = psutil.Process(self._pid)
-            root_key = (root.pid, root.create_time())
             root.cpu_percent(interval=None)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return
 
         while not self._stop_event.is_set():
             try:
-                if (root.pid, root.create_time()) != root_key:
+                if not root.is_running():
                     return
                 # CPU and Memory tracking for target process tree
                 total_cpu = 0.0

@@ -112,3 +112,26 @@ def test_resource_monitor_handles_access_denied_on_root_and_children(monkeypatch
 
     assert monitor.max_mem == 500
     assert monitor.max_cpu == 10.0
+
+
+def test_resource_monitor_stops_when_root_is_no_longer_running(monkeypatch):
+    root_proc = mock.MagicMock()
+    root_proc.pid = 222
+    root_proc.create_time.return_value = 1.0
+    root_proc.is_running.side_effect = [True, False]
+    root_proc.children.return_value = []
+    root_proc.memory_info.return_value = SimpleNamespace(rss=1500)
+    root_proc.cpu_percent.side_effect = [None, 50.0]
+
+    monkeypatch.setattr(psutil, "Process", lambda pid=None: root_proc)
+
+    monitor = ResourceMonitor(interval=0.01, pid=222)
+    monitor.vcpus = 2
+    monitor.start()
+    monitor._thread.join(timeout=2.0)
+    assert not monitor._thread.is_alive()
+    monitor.stop()
+
+    assert root_proc.is_running.call_count == 2
+    assert monitor.max_mem == 1500
+    assert monitor.max_cpu == 25.0

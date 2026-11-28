@@ -21,6 +21,7 @@ def _clean_env(monkeypatch):
     launcher.reset_rdzv_step()
     for key in (
         accelerator.DEVICE_ENV,
+        accelerator._PROBED_ACCELERATOR_ENV,
         "TORCH_DEVICE_BACKEND_AUTOLOAD",
         "TORCH_TPU_TOPOLOGY",
         "TORCH_TPU_SLICEBUILDER_ADDRESSES",
@@ -449,3 +450,54 @@ def test_tpu_torchrun_strips_env_sets_launch_env_and_execs(monkeypatch):
             "m",
         ],
     )
+
+
+@pytest.mark.parametrize(
+    "kind, count, model",
+    [
+        ("cuda", 8, "NVIDIA H200"),
+        ("tpu", 4, "v6e"),
+    ],
+)
+def test_child_env_skips_probe_subprocess_in_worker(monkeypatch, kind, count, model):
+    with monkeypatch.context() as mp:
+        mp.setattr(accelerator, "_probe_accelerator", lambda: (kind, count, model))
+        child_env = launcher._build_child_env(kind)
+
+    accelerator.device_kind.cache_clear()
+    monkeypatch.setenv(accelerator.DEVICE_ENV, child_env[accelerator.DEVICE_ENV])
+    monkeypatch.setenv(
+        accelerator._PROBED_ACCELERATOR_ENV,
+        child_env[accelerator._PROBED_ACCELERATOR_ENV],
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **kw: pytest.fail("child worker must not spawn probe subprocess"),
+    )
+
+    assert accelerator.device_kind() == kind
+    assert accelerator.local_device_count() == count
+    assert accelerator.model_name() == model
+
+
+def test_run_managed_raises_runtime_error_with_exit_code(monkeypatch):
+    class FailingPopen:
+        def __init__(self, cmd, *, env=None, start_new_session=False):
+            self.pid = 77777
+
+        def wait(self, timeout=None):
+            return 2
+
+    monkeypatch.setattr(subprocess, "Popen", FailingPopen)
+
+    with pytest.raises(RuntimeError, match="status 2"):
+        launcher._run_managed([sys.executable, "-m", "pkg.worker"], {})
+
+
+def test_run_torchrun_raises_when_local_nprocs_exceeds_device_count(
+    on_tpu_4, capture_popen
+):
+    with pytest.raises(accelerator.AcceleratorSetupError, match="local_nprocs=8"):
+        launcher.run_torchrun("pkg.worker", [], world_size=8, rdzv_id="too-many")
+    assert capture_popen == []
