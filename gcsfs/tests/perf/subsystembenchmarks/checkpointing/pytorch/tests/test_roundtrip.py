@@ -1,26 +1,29 @@
 import dataclasses
-import functools
+import json
+import os
 
 import fsspec
 import pytest
-from torch.distributed.checkpoint.fsspec_filesystem import FsspecReader
 from torch.distributed.checkpoint.metadata import TensorStorageMetadata
 from torch.distributed.checkpoint.planner import LoadItemType
-from torch.multiprocessing.spawn import ProcessRaisedException
 
 pytest.importorskip("transformers")
 
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (  # noqa: E402
+    ResourceSnapshot,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import (  # noqa: E402
+    _worker,
     common,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.planners import (  # noqa: E402
     RecordingLoadPlanner,
 )
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.read import (  # noqa: E402
-    driver as read_driver_mod,
-)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.read.driver import (  # noqa: E402
     PyTorchCheckpointReadDriver,
+)
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import (  # noqa: E402
+    load_weights,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny import (  # noqa: E402
     make_params,
@@ -45,11 +48,14 @@ def test_load_roundtrip(tmp_path, tiny_models, model_kind, sizes):
 
     driver.setup(prefix, params)
     result = driver.run(prefix, params)
-    result.verify()
+    assert result.verify is None
 
     cols = result.extra_columns
     assert len(result.durations) == 2
     assert all(d > 0 for d in result.durations)
+    assert result.window is not None and result.window[0] <= result.window[1]
+    assert isinstance(result.resource_metrics, ResourceSnapshot)
+    assert result.resource_metrics.vcpus >= 1
     assert cols.keys() == {
         "dcp_read_items_per_rank_max",
         "dcp_read_bytes_fetched_total",
@@ -152,6 +158,7 @@ _RESHARD_PAIRS = [
 
 @pytest.mark.parametrize("model_kind, source, target", _RESHARD_PAIRS)
 def test_reshard_roundtrip(tmp_path, tiny_models, model_kind, source, target):
+    FsspecReader, _ = common.import_fsspec_filesystem()
     params = make_params(tiny_models[model_kind], source=dict(source), **target)
     params.source_layout().validate()
     params.target_layout().validate()
@@ -166,8 +173,10 @@ def test_reshard_roundtrip(tmp_path, tiny_models, model_kind, source, target):
     assert len(distcp_files) == params.source_layout().world_size
 
     result = driver.run(prefix, params)
-    result.verify()
+    assert result.verify is None
     assert len(result.durations) == params.rounds
+    assert result.window is not None and result.window[0] <= result.window[1]
+    assert isinstance(result.resource_metrics, ResourceSnapshot)
 
     storage = FsspecReader(prefix).read_metadata().storage_data
     stored = sum(info.length for info in storage.values())
@@ -177,8 +186,8 @@ def test_reshard_roundtrip(tmp_path, tiny_models, model_kind, source, target):
     assert 0 < result.extra_columns["dcp_read_bytes_fetched_per_rank_max"] <= total
 
 
-def _drop_first_tensor_on_rank0_worker(
-    rank, world_size, port, prefix, params, q, *, inner_target
+def _drop_first_tensor_on_rank0(
+    rank, world_size, port, prefix, params, q, *, result_file
 ):
     orig_create_local_plan = RecordingLoadPlanner.create_local_plan
 
@@ -195,12 +204,33 @@ def _drop_first_tensor_on_rank0_worker(
 
     RecordingLoadPlanner.create_local_plan = _patched_create_local_plan
     try:
-        inner_target(rank, world_size, port, prefix, params, q)
+        os.environ.update(
+            RANK=str(rank),
+            LOCAL_RANK=str(rank),
+            WORLD_SIZE=str(world_size),
+            MASTER_PORT=str(port),
+        )
+        with common.rank_session() as device:
+            with load_weights(params.model_id) as weights:
+                _worker._run_load(
+                    prefix,
+                    params,
+                    weights=weights,
+                    device=device,
+                    result_file=result_file,
+                )
+        q.put(None)
     finally:
         RecordingLoadPlanner.create_local_plan = orig_create_local_plan
 
 
-def test_reshard_detects_skipped_item(tmp_path, tiny_models, monkeypatch):
+def test_reshard_detects_skipped_item(tmp_path, tiny_models):
+    import functools
+
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny import (
+        run_test_ranks,
+    )
+
     params = make_params(
         tiny_models["llama"],
         strategy="fsdp",
@@ -212,33 +242,31 @@ def test_reshard_detects_skipped_item(tmp_path, tiny_models, monkeypatch):
     driver = PyTorchCheckpointReadDriver()
     driver.setup(prefix, params)
 
-    orig_spawn_split = common.spawn_split
-
-    def _wrapped_spawn_split(prefix_, params_, target_fn, world_size_override=None):
-        return orig_spawn_split(
-            prefix_,
-            params_,
-            functools.partial(
-                _drop_first_tensor_on_rank0_worker, inner_target=target_fn
-            ),
-            world_size_override=world_size_override,
-        )
-
-    monkeypatch.setattr(common, "spawn_split", _wrapped_spawn_split)
-
-    result = driver.run(prefix, params)
+    result_file = tmp_path / "load_result.json"
     with pytest.raises(
-        (ProcessRaisedException, RuntimeError),
+        RuntimeError,
         match=(
             r"RuntimeError: rank 0: ("
             r"DCP requested \d+ tensor bytes, expected \d+|"
             r"value mismatch in \d+ entries, e\.g\. \S+)"
         ),
     ):
-        result.verify()
+        run_test_ranks(
+            prefix,
+            params,
+            functools.partial(
+                _drop_first_tensor_on_rank0, result_file=str(result_file)
+            ),
+            2,
+        )
+
+    # result.json is written BEFORE assert_loaded_state so monitor window excludes verify.
+    assert result_file.is_file()
+    assert json.loads(result_file.read_text())["durations"]
 
 
 def test_bytes_fetched_tp_to_fsdp(tmp_path, tiny_models):
+    FsspecReader, _ = common.import_fsspec_filesystem()
     world_size = 2
     driver = PyTorchCheckpointReadDriver()
 
@@ -258,7 +286,7 @@ def test_bytes_fetched_tp_to_fsdp(tmp_path, tiny_models):
     )
     driver.setup(reshard_prefix, reshard_params)
     reshard_result = driver.run(reshard_prefix, reshard_params)
-    reshard_result.verify()
+    assert reshard_result.verify is None
 
     # Hand-compute storage_data bytes touched across the 2 FSDP target ranks:
     # - Colwise TP tensors (Shard(0)): each saved chunk aligns with 1 FSDP rank -> 1x
@@ -315,7 +343,7 @@ def test_bytes_fetched_tp_to_fsdp(tmp_path, tiny_models):
     )
     driver.setup(fsdp_prefix, fsdp_params)
     fsdp_result = driver.run(fsdp_prefix, fsdp_params)
-    fsdp_result.verify()
+    assert fsdp_result.verify is None
 
     fsdp_meta = FsspecReader(fsdp_prefix).read_metadata()
     sharded_bytes = 0
@@ -341,97 +369,25 @@ def test_bytes_fetched_tp_to_fsdp(tmp_path, tiny_models):
     assert fsdp_total < reshard_total
 
 
-def test_setup_checks_both_layouts_and_releases_weights(
+def test_setup_checks_both_layouts_and_runs_save_source(
     tmp_path, tiny_models, monkeypatch
 ):
-    from unittest.mock import MagicMock
-
     fsdp8 = {"strategy": "fsdp", "data_parallel_size": 8, "world_size": 8}
-    params = make_params(tiny_models["llama"], dp=2, world_size=2, source=fsdp8)
+    params = make_params(
+        tiny_models["llama"], name="case-setup", dp=2, world_size=2, source=fsdp8
+    )
     driver = PyTorchCheckpointReadDriver()
     prepared = []
+    worker_calls = []
     monkeypatch.setattr(driver, "prepare", lambda p, *layouts: prepared.append(layouts))
+    monkeypatch.setattr(
+        common,
+        "run_worker",
+        lambda op, prefix, p, **kw: worker_calls.append(
+            (op, kw["world_size"], kw["rdzv_id"])
+        ),
+    )
 
-    weights_ok = {"w": 1}
-    monkeypatch.setattr(read_driver_mod, "load_weights", lambda mid: weights_ok)
-    monkeypatch.setattr(read_driver_mod, "run_split", lambda *a, **kw: None)
     driver.setup((tmp_path / "ckpt_ok").as_uri(), params)
     assert prepared == [(params.source_layout(), params.target_layout())]
-    assert weights_ok == {}
-
-    weights_err = {"w": 1}
-    monkeypatch.setattr(read_driver_mod, "load_weights", lambda mid: weights_err)
-    monkeypatch.setattr(
-        read_driver_mod,
-        "run_split",
-        MagicMock(side_effect=RuntimeError("source save failed")),
-    )
-    with pytest.raises(RuntimeError, match="source save failed"):
-        driver.setup((tmp_path / "ckpt_err").as_uri(), params)
-    assert weights_err == {}
-
-
-def test_read_driver_close_releases_ranks_and_weights_without_verify(
-    tmp_path, tiny_models, monkeypatch
-):
-    from unittest.mock import MagicMock
-
-    params = make_params(
-        tiny_models["llama"], strategy="fsdp", dp=2, world_size=2, rounds=1
-    )
-    prefix = (tmp_path / "ckpt_close").as_uri()
-    driver = PyTorchCheckpointReadDriver()
-    driver.setup(prefix, params)
-
-    captured_weights = []
-    orig_load_weights = read_driver_mod.load_weights
-
-    def spy_load_weights(mid):
-        w = orig_load_weights(mid)
-        captured_weights.append(w)
-        return w
-
-    spawned_procs = []
-    orig_spawn_split = common.spawn_split
-
-    def spy_spawn_split(*args, **kwargs):
-        ranks = orig_spawn_split(*args, **kwargs)
-        spawned_procs.extend(ranks._context.processes)
-        return ranks
-
-    monkeypatch.setattr(read_driver_mod, "load_weights", spy_load_weights)
-    monkeypatch.setattr(common, "spawn_split", spy_spawn_split)
-
-    result = driver.run(prefix, params)
-    try:
-        assert getattr(result, "close", None) is not None
-        assert len(captured_weights) == 1 and len(captured_weights[0]) > 0
-        assert len(spawned_procs) == 2
-        result.close()
-        result.close()
-        assert captured_weights == [{}]
-        assert all(not p.is_alive() for p in spawned_procs)
-    finally:
-        if getattr(result, "close", None) is not None:
-            result.close()
-        else:
-            result.verify()
-
-    # Errors after load_weights before CheckpointResult return also clear weights & close ranks.
-    for bad_stats, exc_type in (
-        ([{"corrupt": 1}], KeyError),
-        ([{"bytes_fetched": 10}], KeyError),
-        ([], ValueError),
-    ):
-        weights_err = {"w": 1}
-        fake_ranks = MagicMock()
-        monkeypatch.setattr(read_driver_mod, "load_weights", lambda mid: weights_err)
-        monkeypatch.setattr(
-            read_driver_mod,
-            "spawn_with_stats",
-            lambda *a, _ranks=fake_ranks, _stats=bad_stats, **kw: (_ranks, _stats),
-        )
-        with pytest.raises(exc_type):
-            driver.run(prefix, params)
-        fake_ranks.close.assert_called_once_with()
-        assert weights_err == {}
+    assert worker_calls == [("save_source", 8, "case-setup-setup")]

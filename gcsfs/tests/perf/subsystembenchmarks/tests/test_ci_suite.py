@@ -4,6 +4,7 @@ The CI suite exists to catch framework-lifecycle bugs (#1009, #1025, #1031, #110
 shrunken configs must keep the lifecycle features those bugs needed.
 """
 
+import glob
 import importlib
 import itertools
 import os
@@ -256,14 +257,6 @@ def test_cloudbuild_passes_the_ci_model_id_to_run_ci():
     assert "printf 'export CI_MODEL_ID=%q\\n' \"$${_CI_MODEL_ID}\"" in cb
     text = _run_ci_text()
     assert 'CI_MODEL_ID="${CI_MODEL_ID:-gs://huggingface-model-weights/gpt2}"' in text
-
-
-def test_run_ci_stages_the_model_under_its_own_basename():
-    # checkpointing/*/common.py loads a gs:// model id from /tmp/<basename>.
-    text = _run_ci_text()
-    assert 'MODEL_DIR=$(basename "${CI_MODEL_ID%/}")' in text
-    assert 'mv "$HOME/$MODEL_DIR" "/tmp/$MODEL_DIR"' in text
-    assert '"$HOME/gpt2"' not in text
 
 
 def test_upload_results_works_without_nightly_venv():
@@ -571,72 +564,41 @@ def test_cloudbuild_default_model_id_is_empty():
     assert subs["_MODEL_ID"] == ""
 
 
-def test_setup_stages_model_for_legacy_checkpoint_groups_only(tmp_path):
-    setup_path = os.path.join(
-        _REPO_ROOT, "cloudbuild", "subsystembenchmarks", "scripts", "setup.sh"
+def test_group_requirements_exclude_torch_pin_and_cpu_requirements_pins_torch():
+    ssb = os.path.join(_REPO_ROOT, "gcsfs", "tests", "perf", "subsystembenchmarks")
+    cpu_req = os.path.join(ssb, "requirements-cpu.txt")
+    assert os.path.isfile(cpu_req)
+    assert "torch==2.15.0" in open(cpu_req).read().splitlines()
+
+    req_files = glob.glob(os.path.join(ssb, "*", "*", "requirements*.txt"))
+    assert req_files
+    for path in req_files:
+        lines = [
+            line.strip().lower()
+            for line in open(path).read().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        assert not any(re.match(r"^torch\b", line) for line in lines), path
+
+
+def test_setup_and_run_ci_install_cpu_torch_and_gcsfs_last():
+    install_group = os.path.join(
+        _REPO_ROOT, "cloudbuild", "subsystembenchmarks", "scripts", "install-group.sh"
     )
-    subprocess.run(["bash", "-n", setup_path], check=True)
-    with open(setup_path) as f:
-        setup_text = f.read()
+    assert not os.path.exists(install_group)
 
-    stage_block = setup_text.split(
-        'pip install -r "gcsfs/tests/perf/subsystembenchmarks/$GROUP/requirements.txt" >/dev/null\n',
-        1,
-    )[1].split('\nread -r -a REQUIREMENT_SPECS <<< "$REQUIREMENTS_OVERRIDE"', 1)[0]
-
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    calls = tmp_path / "gcloud_calls"
-    (bin_dir / "curl").write_text(
-        "#!/bin/sh\ntouch google-cloud-cli-linux-x86_64.tar.gz\n"
-    )
-    (bin_dir / "curl").chmod(0o755)
-    (bin_dir / "tar").write_text(
-        "#!/bin/sh\n"
-        "mkdir -p google-cloud-sdk/bin\n"
-        f'printf "#!/bin/sh\\necho \\"\\$@\\" >> {calls}\\n" > google-cloud-sdk/bin/gcloud\n'
-        "chmod 0755 google-cloud-sdk/bin/gcloud\n"
-    )
-    (bin_dir / "tar").chmod(0o755)
-
-    py_bin = os.path.dirname(sys.executable)
-    env_path = f"{bin_dir}:{py_bin}:{os.environ['PATH']}"
-
-    def run_stage(group: str, model_id: str) -> tuple[list[str], str]:
-        calls.write_text("")
-        fake_tmp = tmp_path / f"tmp-{len(list(tmp_path.iterdir()))}"
-        fake_tmp.mkdir()
-        script = (
-            "set -euo pipefail\n"
-            + stage_block.replace("/tmp", str(fake_tmp))
-            + '\nprintf "FINAL_MODEL_ID=%s\\n" "${MODEL_ID:-}"\n'
+    setup_text = open(
+        os.path.join(
+            _REPO_ROOT, "cloudbuild", "subsystembenchmarks", "scripts", "setup.sh"
         )
-        proc = subprocess.run(
-            ["bash", "-c", script],
-            cwd=_REPO_ROOT,
-            env={"PATH": env_path, "GROUP": group, "MODEL_ID": model_id},
-            capture_output=True,
-            text=True,
-            check=True,
+    ).read()
+    assert "install-group.sh" not in setup_text
+    assert "requirements-cpu.txt" in setup_text
+    assert setup_text.index("requirements.txt") < setup_text.index("pip install -e .")
+
+    ci_text = open(
+        os.path.join(
+            _REPO_ROOT, "cloudbuild", "subsystembenchmarks", "scripts", "run-ci.sh"
         )
-        final_mid = re.findall(r"^FINAL_MODEL_ID=(.*)$", proc.stdout, re.M)[-1]
-        return calls.read_text().splitlines(), final_mid
-
-    # 1. Legacy checkpointing group with empty MODEL_ID stages common.model_id without mutating MODEL_ID.
-    pl_calls, pl_mid = run_stage("checkpointing/pytorch_lightning", "")
-    assert len(pl_calls) == 1
-    assert pl_calls[0].startswith(
-        "storage cp -r gs://huggingface-model-weights/Llama-3.1-8B "
-    )
-    assert pl_mid == ""
-
-    # 2. Legacy checkpointing group with explicit MODEL_ID override stages the override.
-    ray_calls, ray_mid = run_stage("checkpointing/ray_pytorch", "gs://custom/model/")
-    assert len(ray_calls) == 1
-    assert ray_calls[0].startswith("storage cp -r gs://custom/model ")
-    assert ray_mid == "gs://custom/model/"
-
-    # 3. DCP checkpointing groups stage via gcsfs in Python and never install standalone gcloud.
-    for dcp_group in ("checkpointing/pytorch", "checkpointing/pytorch_load"):
-        dcp_calls, _ = run_stage(dcp_group, "gs://custom/model")
-        assert dcp_calls == []
+    ).read()
+    assert '-r "$SSB/requirements-cpu.txt"' in ci_text

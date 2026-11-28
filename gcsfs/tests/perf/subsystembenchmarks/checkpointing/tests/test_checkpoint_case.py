@@ -701,3 +701,199 @@ def test_setup_process_tree_is_reaped_when_interrupted(tmp_path, monkeypatch):
             if pfile.exists():
                 with contextlib.suppress(ProcessLookupError, ValueError):
                     os.kill(int(pfile.read_text()), signal.SIGKILL)
+
+
+def test_multinode_leader_creates_deterministic_bucket_and_publishes(monkeypatch):
+    from gcsfs.tests.perf.subsystembenchmarks._common import nodes
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
+        CheckpointResult,
+        ResourceSnapshot,
+    )
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import bucket as bucket_mod
+
+    monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
+    monkeypatch.setattr(
+        nodes.NodeGroup,
+        "from_env",
+        classmethod(lambda cls: nodes.NodeGroup(0, 2, "leader", 29400)),
+    )
+    _memory_checkpoint(monkeypatch, 500)
+
+    events = []
+    bucket_calls = []
+
+    @contextlib.contextmanager
+    def fake_case_bucket(spec, case_id, *, fs=None, deterministic=False):
+        bucket_calls.append((spec, case_id, deterministic))
+        name = bucket_mod.case_bucket_name(
+            spec.prefix, case_id, deterministic=deterministic
+        )
+        events.append("bucket_enter")
+        try:
+            yield f"gs://{name}/data/"
+        finally:
+            events.append("bucket_exit")
+
+    monkeypatch.setattr(bucket_mod, "case_bucket", fake_case_bucket)
+
+    parent_pid = os.getpid()
+
+    class _LeaderDriver(CheckpointDriver):
+        def __init__(self, window=None, resource_metrics=None):
+            self.setup_pids = []
+            self.prefixes = []
+            self._window = window
+            self._resource_metrics = resource_metrics
+
+        def setup(self, prefix, params):
+            self.setup_pids.append(os.getpid())
+            self.prefixes.append(("setup", prefix))
+            events.append("setup")
+
+        def run(self, prefix, params):
+            self.prefixes.append(("run", prefix))
+            events.append("run")
+            return CheckpointResult(
+                durations=[2.0],
+                window=self._window,
+                resource_metrics=self._resource_metrics,
+                verify=lambda: events.append("verify"),
+                close=lambda: events.append("close"),
+            )
+
+    # Case 1: result.window and result.resource_metrics take precedence over outer monitor
+    snap = ResourceSnapshot(
+        max_cpu=50.0,
+        max_mem=4096.0,
+        net_recv=2000.0,
+        net_sent=1000.0,
+        duration=50.0,
+        vcpus=8,
+    )
+    bench1 = _Bench()
+    driver1 = _LeaderDriver(window=(1000.0, 1050.0), resource_metrics=snap)
+    checkpoint_case.run_checkpoint_case(
+        bench1, _Monitor(), _params(name="mn-case"), driver1
+    )
+
+    assert len(bucket_calls) == 1
+    assert bucket_calls[0][2] is True
+    assert driver1.setup_pids == [parent_pid]
+    assert events == ["bucket_enter", "setup", "run", "verify", "close", "bucket_exit"]
+    assert bench1.extra_info["measurement_window_start_unix_seconds"] == 1000
+    assert bench1.extra_info["measurement_window_end_unix_seconds"] == 1050
+    assert bench1.extra_info["cpu_usage_peak_cores"] == pytest.approx(4.0)
+    assert bench1.extra_info["memory_usage_peak_bytes"] == 4096
+    assert bench1.extra_info["network_received_bytes"] == 2000
+    assert bench1.extra_info["network_sent_bytes"] == 1000
+    assert bench1.extra_info["host_vcpu_count"] == 8
+
+    # Case 2: None falls back to outer monitor() and outer window
+    events.clear()
+    bench2 = _Bench()
+    driver2 = _LeaderDriver(window=None, resource_metrics=None)
+    checkpoint_case.run_checkpoint_case(
+        bench2, _Monitor(), _params(name="mn-case"), driver2
+    )
+
+    assert bench2.extra_info["memory_usage_peak_bytes"] == int(_Monitor.max_mem)
+    assert bench2.extra_info["network_received_bytes"] == int(_Monitor.net_recv)
+    assert bench2.extra_info["host_vcpu_count"] == _Monitor.vcpus
+    assert bench2.extra_info["measurement_window_start_unix_seconds"] > 1050
+
+
+def test_multinode_follower_derives_identical_bucket_and_publishes_nothing(monkeypatch):
+    from gcsfs.tests.perf.subsystembenchmarks._common import nodes
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
+        CheckpointResult,
+    )
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import bucket as bucket_mod
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
+
+    monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
+    monkeypatch.setattr(
+        nodes.NodeGroup,
+        "from_env",
+        classmethod(lambda cls: nodes.NodeGroup(1, 2, "leader", 29400)),
+    )
+
+    def _fail_case_bucket(*args, **kwargs):
+        raise AssertionError("follower must not call case_bucket")
+
+    monkeypatch.setattr(bucket_mod, "case_bucket", _fail_case_bucket)
+    monkeypatch.setattr(
+        checkpoint_case.rcu,
+        "assert_storage_class",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("follower must not check rcu")
+        ),
+    )
+    monkeypatch.setattr(
+        checkpoint_case.rcu,
+        "warm_if_needed",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("follower must not warm rcu")
+        ),
+    )
+    monkeypatch.setattr(
+        rapid_cache,
+        "warm_if_needed",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("follower must not warm rapid_cache")
+        ),
+    )
+    monkeypatch.setattr(
+        fsspec.core,
+        "url_to_fs",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("follower must not list GCS files")
+        ),
+    )
+
+    events = []
+    parent_pid = os.getpid()
+
+    class _FollowerDriver(CheckpointDriver):
+        def __init__(self):
+            self.setup_prefix = None
+            self.setup_pid = None
+            self.run_prefix = None
+
+        def setup(self, prefix, params):
+            self.setup_prefix = prefix
+            self.setup_pid = os.getpid()
+            events.append("setup")
+
+        def run(self, prefix, params):
+            self.run_prefix = prefix
+            events.append("run")
+            return CheckpointResult(
+                durations=[],
+                verify=lambda: events.append("verify"),
+                close=lambda: events.append("close"),
+            )
+
+    class _ForbiddenMonitor:
+        def __call__(self):
+            raise AssertionError("follower must not enter monitor")
+
+    class _ForbiddenBench(_Bench):
+        def pedantic(self, *args, **kwargs):
+            raise AssertionError("follower must not call benchmark.pedantic")
+
+    params = _params(name="mn-case", scenario="checkpoint_read")
+    expected_bucket = bucket_mod.case_bucket_name(
+        "test-prefix", params.name, deterministic=True
+    )
+    expected_prefix = f"gs://{expected_bucket}/checkpoint/"
+
+    bench = _ForbiddenBench()
+    driver = _FollowerDriver()
+    checkpoint_case.run_checkpoint_case(bench, _ForbiddenMonitor(), params, driver)
+
+    assert driver.setup_pid == parent_pid
+    assert driver.setup_prefix == expected_prefix
+    assert driver.run_prefix == expected_prefix
+    assert events == ["setup", "run", "verify", "close"]
+    assert bench.extra_info == {}
+    assert bench.group is None

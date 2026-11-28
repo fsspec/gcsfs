@@ -2,6 +2,7 @@ import os
 
 import pytest
 
+from gcsfs.tests.perf.subsystembenchmarks._common import placement
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.webdataset import configs
 
 pytest.importorskip("webdataset")
@@ -16,7 +17,9 @@ pytestmark = pytest.mark.skipif(
 CASES = configs.WebDatasetReadConfigurator(configs.__file__).generate_cases()
 
 
-@pytest.mark.parametrize("params", CASES, ids=lambda p: p.name)
+@pytest.mark.parametrize(
+    "params", placement.select(CASES, group="dataloading/webdataset")
+)
 def test_read(benchmark, params, monitor):
     from gcsfs.tests.perf.subsystembenchmarks.dataloading.read_case import run_read_case
     from gcsfs.tests.perf.subsystembenchmarks.dataloading.webdataset.read.driver import (

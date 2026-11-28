@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import bucket
@@ -92,6 +94,47 @@ def test_case_bucket_name_truncates_to_the_gcs_limit():
     name = bucket.case_bucket_name("a" * 40, "read-hf-" + "x" * 60)
     assert len(name) <= 63
     assert not name.startswith("-") and "--" not in name.strip("-")
+
+
+def test_case_bucket_name_deterministic_is_stable_and_disjoint_for_long_similar_ids():
+    p = "my-very-long-subsystem-benchmark-prefix-20261128"
+    a = bucket.case_bucket_name(
+        p, "load-llama_3_1_8b-pp2dp2tp2-from-fsdp-regional", deterministic=True
+    )
+    b = bucket.case_bucket_name(
+        p, "load-llama_3_1_8b-pp2dp2tp2-from-hsdp-regional", deterministic=True
+    )
+    assert a == bucket.case_bucket_name(
+        p, "load-llama_3_1_8b-pp2dp2tp2-from-fsdp-regional", deterministic=True
+    )
+    assert a != b
+    for name in (a, b):
+        assert len(name) <= 63
+        assert re.fullmatch(r"[a-z0-9][a-z0-9-]*[a-z0-9]", name)
+
+
+def test_case_bucket_name_default_stays_random():
+    a = bucket.case_bucket_name("pfx", "read-hf-ptpq-stream-seq")
+    b = bucket.case_bucket_name("pfx", "read-hf-ptpq-stream-seq", deterministic=False)
+    assert a != b
+
+
+@pytest.mark.parametrize("bad_prefix", ["a" * 55, "", "---"])
+def test_case_bucket_name_rejects_invalid_or_overlong_prefix(bad_prefix):
+    with pytest.raises(ValueError):
+        bucket.case_bucket_name(bad_prefix, "case-1", deterministic=True)
+
+
+def test_case_bucket_forwards_deterministic_flag():
+    fs1 = _FakeFS()
+    fs2 = _FakeFS()
+    spec = _spec()
+    with bucket.case_bucket(spec, "load-gpt2", fs=fs1, deterministic=True) as p1:
+        with bucket.case_bucket(spec, "load-gpt2", fs=fs2, deterministic=True) as p2:
+            assert p1 == p2
+            assert p1 == (
+                f"gs://{bucket.case_bucket_name(spec.prefix, 'load-gpt2', deterministic=True)}/data/"
+            )
 
 
 def test_bucket_name_of_reads_the_bucket_back_out_of_a_prefix():

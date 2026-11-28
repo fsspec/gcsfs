@@ -1,126 +1,51 @@
-import functools
+from __future__ import annotations
 
-import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint.fsspec_filesystem import FsspecReader, FsspecWriter
-
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import run_split
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import CheckpointResult
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.common import (
-    DCPDriver,
-    build_state,
-    rank_session,
-    spawn_with_stats,
-    timed,
-    warm_up,
-    write_stats,
+from gcsfs.tests.perf.subsystembenchmarks._common import nodes
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
+    CheckpointResult,
+    ResourceSnapshot,
 )
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.model import (
-    RUN_SEED,
-    SETUP_SEED,
-)
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.planners import (
-    RecordingLoadPlanner,
-)
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import (
-    load_weights,
-)
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.state import (
-    assert_loaded_state,
-    expected_bytes_requested,
-)
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import common
 
 
-def _rank_save_source(rank, world_size, port, prefix, params, q, *, weights):
-    with rank_session(rank, world_size, port) as device:
-        layout = params.source_layout()
-        state = build_state(params, layout, SETUP_SEED, weights, device)
-        dcp.save(state, storage_writer=FsspecWriter(prefix))
-        q.put(None)
-
-
-def _rank_load(rank, world_size, port, prefix, params, q, *, weights, stats_dir):
-    with rank_session(rank, world_size, port) as device:
-        layout = params.target_layout()
-        state = build_state(params, layout, RUN_SEED, weights, device)
-        bytes_expected = expected_bytes_requested(state)
-        warm_up(prefix, device)
-
-        durations = []
-        for _ in range(params.rounds):
-            planner = RecordingLoadPlanner()
-            reader = FsspecReader(prefix)
-            durations.append(
-                timed(device, dcp.load, state, storage_reader=reader, planner=planner)
-            )
-
-        write_stats(
-            stats_dir,
-            rank,
-            {"read_items": planner.read_items, "bytes_fetched": planner.bytes_fetched},
-        )
-        # Report before the checks below so the parent can close its timed
-        # and monitored window while the ranks verify the loaded bytes.
-        q.put(durations)
-        assert_loaded_state(
-            rank,
-            state,
-            planner.bytes_requested,
-            bytes_expected,
-            SETUP_SEED,
-            weights,
-            device,
-        )
-
-
-class PyTorchCheckpointReadDriver(DCPDriver):
+class PyTorchCheckpointReadDriver(common.DCPDriver):
     def setup(self, prefix, params):
         source = params.source_layout()
         self.prepare(params, source, params.target_layout())
-        weights = load_weights(params.model_id)
-        try:
-            run_split(
-                prefix,
-                params,
-                functools.partial(_rank_save_source, weights=weights),
-                world_size_override=source.world_size,
-            )
-        finally:
-            weights.clear()
+        common.run_worker(
+            "save_source",
+            prefix,
+            params,
+            world_size=source.world_size,
+            rdzv_id=f"{params.name}-setup",
+            node_group=nodes.NodeGroup.from_env(),
+        )
 
     def run(self, prefix, params):
-        weights = load_weights(params.model_id)
-        ranks = None
+        node_group = nodes.NodeGroup.from_env()
+        data = common.run_worker(
+            "load",
+            prefix,
+            params,
+            world_size=params.target_layout().world_size,
+            rdzv_id=f"{params.name}-load",
+            node_group=node_group,
+            expect_result=True,
+        )
+        if data is None:
+            return CheckpointResult(durations=[])
 
-        def _close() -> None:
-            try:
-                if ranks is not None:
-                    ranks.close()
-            finally:
-                weights.clear()
-
-        def _verify() -> None:
-            try:
-                ranks.join()
-            finally:
-                _close()
-
-        try:
-            ranks, stats = spawn_with_stats(
-                prefix, params, _rank_load, params.target_layout().world_size, weights
-            )
-            fetched = [s["bytes_fetched"] for s in stats]
-            total_fetched = sum(fetched)
-            return CheckpointResult(
-                durations=ranks.durations,
-                extra_columns={
-                    "dcp_read_items_per_rank_max": max(s["read_items"] for s in stats),
-                    "dcp_read_bytes_fetched_total": total_fetched,
-                    "dcp_read_bytes_fetched_per_rank_max": max(fetched),
-                },
-                verify=_verify,
-                close=_close,
-                bytes_transferred=total_fetched,
-            )
-        except BaseException:
-            _close()
-            raise
+        stats = data["stats"]
+        fetched = [s["bytes_fetched"] for s in stats]
+        total_fetched = sum(fetched)
+        return CheckpointResult(
+            durations=data["durations"],
+            extra_columns={
+                "dcp_read_items_per_rank_max": max(s["read_items"] for s in stats),
+                "dcp_read_bytes_fetched_total": total_fetched,
+                "dcp_read_bytes_fetched_per_rank_max": max(fetched),
+            },
+            bytes_transferred=total_fetched,
+            window=tuple(data["window"]),
+            resource_metrics=ResourceSnapshot(**data["resource_metrics"]),
+        )

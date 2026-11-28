@@ -1,7 +1,6 @@
 """Driver for Ray checkpoint load benchmark."""
 
 import contextlib
-import dataclasses
 import os
 import shutil
 import time
@@ -19,17 +18,23 @@ from torch.distributed.checkpoint.state_dict import (
     set_state_dict,
 )
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
-    find_free_port,
+    reduce_durations,
     setup_distributed_env,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
     CheckpointDriver,
     CheckpointResult,
 )
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import (
+    stage_gcs_model,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch.common import (
-    ensure_ray_initialized,
+    is_sharded_strategy,
     resolve_storage,
+    run_ray_workers,
+    run_subprocess_worker,
     setup_model_and_optimizer,
     stage_checkpoint_locally,
     upload_checkpoint,
@@ -50,8 +55,8 @@ class RayCheckpointSetupWorker:
     def setup_and_save(self):
         local_dir = None
         try:
-            setup_distributed_env(self.rank, self.world_size, self.port)
-            model, optimizer = setup_model_and_optimizer(self.params)
+            device = setup_distributed_env(self.rank, self.world_size, self.port)
+            model, optimizer = setup_model_and_optimizer(self.params, device)
             fs, arrow_fs, base_path = resolve_storage(self.prefix)
             destination_ckpt = f"{base_path.rstrip('/')}/model.ckpt"
 
@@ -80,7 +85,7 @@ class RayCheckpointSetupWorker:
 
 @ray.remote(num_cpus=1)
 class RayCheckpointLoadWorker:
-    """Ray Actor executing distributed checkpoint load operations on CPU."""
+    """Ray Actor executing distributed checkpoint load operations."""
 
     def __init__(self, rank, world_size, port, prefix, params):
         self.rank = rank
@@ -90,18 +95,15 @@ class RayCheckpointLoadWorker:
         self.params = params
 
     def setup(self):
-        setup_distributed_env(self.rank, self.world_size, self.port)
-        self.model, self.optimizer = setup_model_and_optimizer(self.params)
+        self.device = setup_distributed_env(self.rank, self.world_size, self.port)
+        self.model, self.optimizer = setup_model_and_optimizer(self.params, self.device)
         self.fs, self.arrow_fs, self.base_path = resolve_storage(self.prefix)
         self.destination_ckpt = f"{self.base_path.rstrip('/')}/model.ckpt"
 
     def load_rounds(self):
         try:
             durations = []
-            is_sharded = self.params.strategy in (
-                "fsdp_sharded",
-                "model_parallel_sharded",
-            )
+            is_sharded = is_sharded_strategy(self.params.strategy)
             for round_idx in range(self.params.rounds):
                 # Broadcast the Checkpoint instance from rank 0 so all workers on the host
                 # share the same Checkpoint and UUID. Ray's as_directory() uses this UUID to
@@ -153,12 +155,12 @@ class RayCheckpointLoadWorker:
                         options = StateDictOptions(
                             full_state_dict=True,
                             cpu_offload=False,
-                            broadcast_from_rank0=True,
+                            broadcast_from_rank0=self.world_size > 1,
                         )
                         if self.rank == 0:
                             ckpt_file = os.path.join(local_dir, "checkpoint.pt")
                             state = torch.load(
-                                ckpt_file, map_location="cpu", weights_only=False
+                                ckpt_file, map_location="cpu", weights_only=True
                             )
                             model_state = state["model"]
                             opt_state = state["optimizer"]
@@ -180,6 +182,7 @@ class RayCheckpointLoadWorker:
                         if self.rank == 0:
                             del state, model_state, opt_state
 
+                    accelerator.synchronize(self.device)
                     dist.barrier()
                     t_end = time.perf_counter()
                     durations.append((t_start, t_end))
@@ -191,23 +194,16 @@ class RayCheckpointLoadWorker:
 
 def run_ray_load(prefix, params):
     """Runs single or distributed checkpoint load benchmark across Ray actor workers."""
-    ensure_ray_initialized()
     world_size = params.world_size
-    port = find_free_port()
-
-    workers = [
-        RayCheckpointLoadWorker.remote(rank, world_size, port, prefix, params)
-        for rank in range(world_size)
-    ]
-    ray.get([w.setup.remote() for w in workers])
-    results = ray.get([w.load_rounds.remote() for w in workers])
-
-    durations = []
-    for r in range(params.rounds):
-        begins = [results[rank][r][0] for rank in range(world_size)]
-        ends = [results[rank][r][1] for rank in range(world_size)]
-        durations.append(max(ends) - min(begins))
-    return durations
+    results = run_ray_workers(
+        RayCheckpointLoadWorker,
+        world_size,
+        prefix,
+        params,
+        setup_method="setup",
+        run_method="load_rounds",
+    )
+    return reduce_durations(results, world_size, params.rounds)
 
 
 class RayCheckpointReadDriver(CheckpointDriver):
@@ -215,38 +211,13 @@ class RayCheckpointReadDriver(CheckpointDriver):
 
     def setup(self, prefix: str, params):
         """Generates the source checkpoint on storage using setup topology."""
-        ensure_ray_initialized()
-        setup_world_size = params.setup_world_size
-        setup_tp = params.setup_tensor_parallel_size
-        setup_dp = params.setup_data_parallel_size
-
-        setup_params = dataclasses.replace(
-            params,
-            world_size=setup_world_size,
-            tensor_parallel_size=setup_tp,
-            data_parallel_size=setup_dp,
-        )
-        port = find_free_port()
-        try:
-            workers = [
-                RayCheckpointSetupWorker.remote(
-                    rank, setup_world_size, port, prefix, setup_params
-                )
-                for rank in range(setup_world_size)
-            ]
-            ray.get([w.setup_and_save.remote() for w in workers])
-        finally:
-            if ray.is_initialized():
-                ray.shutdown()
+        stage_gcs_model(params.model_id)
+        run_subprocess_worker("setup_load", prefix, params)
 
     def run(self, prefix: str, params) -> CheckpointResult:
         """Executes the checkpoint load benchmark across Ray actor workers."""
-        try:
-            durations = run_ray_load(prefix, params)
-            return CheckpointResult(durations=durations)
-        finally:
-            if ray.is_initialized():
-                ray.shutdown()
+        data = run_subprocess_worker("load", prefix, params, expect_result=True)
+        return CheckpointResult(durations=data["durations"])
 
     def read_count(self, params) -> int:
         """Ray transfers a single copy of the checkpoint from storage per node."""

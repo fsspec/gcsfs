@@ -30,11 +30,7 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 pytest.importorskip("transformers")
 
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (  # noqa: E402
-    run_split,
     setup_distributed_env,
-)
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.device import (  # noqa: E402
-    rank_device,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.layout import (  # noqa: E402
     Layout,
@@ -52,6 +48,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.planners import 
     RecordingSavePlanner,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import (  # noqa: E402
+    ensure_canonical_weights,
     load_weights,
     local_slice,
     random_full,
@@ -104,9 +101,8 @@ _STRATEGIES_4RANK = [
 def _build_then_verify_rank(
     rank, world_size, port, prefix, params, q, *, models_and_weights
 ):
-    setup_distributed_env(rank, world_size, port)
+    cpu = setup_distributed_env(rank, world_size, port)
     try:
-        cpu = rank_device("cpu", rank)
         for kind, layout in _STRATEGIES_4RANK:
             model_path, weights = models_and_weights[kind]
             model, optim = build(model_path, layout, SETUP_SEED, weights, cpu)
@@ -156,15 +152,16 @@ def test_build_then_verify_passes(tiny_models):
     target = functools.partial(
         _build_then_verify_rank, models_and_weights=models_and_weights
     )
-    assert (
-        run_split(None, make_params(tiny_models["llama"], world_size=4), target, 4)
-        == []
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny import (
+        run_test_ranks,
     )
+
+    run_test_ranks(None, make_params(tiny_models["llama"], world_size=4), target, 4)
 
 
 def test_verify_names_corrupted_key(tmp_path):
     llama_dir = tiny_model_dir(tmp_path, kind="llama", num_layers=2)
-    weights = load_weights(llama_dir)
+    weights = load_weights(ensure_canonical_weights(llama_dir))
     layout = Layout("fsdp", world_size=4, data_parallel_size=4)
     cpu = torch.device("cpu")
     target_fqn = "model.layers.0.mlp.up_proj.weight"
@@ -228,9 +225,8 @@ def test_verify_names_corrupted_key(tmp_path):
 
 
 def _planners_roundtrip_rank(rank, world_size, port, prefix, params, q, *, weights):
-    setup_distributed_env(rank, world_size, port)
+    cpu = setup_distributed_env(rank, world_size, port)
     try:
-        cpu = rank_device("cpu", rank)
         layout = Layout("fsdp", world_size=world_size, data_parallel_size=world_size)
         model, optim = build(params, layout, SETUP_SEED, weights, cpu)
         save_state = get_fqn_state_dict(model, optim)
@@ -273,10 +269,14 @@ def _planners_roundtrip_rank(rank, world_size, port, prefix, params, q, *, weigh
 
 def test_recording_planners_and_dcp_roundtrip(tmp_path, monkeypatch):
     llama_dir = tiny_model_dir(tmp_path / "llama", kind="llama", num_layers=2)
-    weights = load_weights(llama_dir)
+    weights = load_weights(ensure_canonical_weights(llama_dir))
     prefix = (tmp_path / "ckpt").as_uri()
     target = functools.partial(_planners_roundtrip_rank, weights=weights)
-    assert run_split(prefix, make_params(llama_dir, world_size=2), target, 2) == []
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny import (
+        run_test_ranks,
+    )
+
+    run_test_ranks(prefix, make_params(llama_dir, world_size=2), target, 2)
 
     # Unit-check deduplicated storage_index accounting in RecordingLoadPlanner
     # and tensor-only accounting in RecordingSavePlanner.
@@ -363,7 +363,7 @@ def test_recording_planners_and_dcp_roundtrip(tmp_path, monkeypatch):
 
 def test_expected_local_matches_full_slice(tmp_path):
     llama_dir = tiny_model_dir(tmp_path, kind="llama", num_layers=2)
-    weights = load_weights(llama_dir)
+    weights = load_weights(ensure_canonical_weights(llama_dir))
     cpu = torch.device("cpu")
     layouts = [
         Layout("fsdp_tp", 4, data_parallel_size=2, tensor_parallel_size=2),

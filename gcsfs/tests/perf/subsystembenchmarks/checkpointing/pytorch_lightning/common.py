@@ -1,4 +1,9 @@
+from __future__ import annotations
+
+import dataclasses
+import json
 import os
+import tempfile
 
 import lightning.pytorch as L
 import torch
@@ -7,7 +12,13 @@ import transformers
 from lightning.pytorch.strategies import FSDPStrategy, ModelParallelStrategy
 from torch.utils.data import Dataset
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator, launcher
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._llama_tp import apply_llama_tp
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import model_dir
+
+_WORKER_MODULE = (
+    "gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_lightning._worker"
+)
 
 
 class DummyDataset(Dataset):
@@ -31,18 +42,9 @@ class DummyModel(L.LightningModule):
         super().__init__()
         self.params = params
 
-        model_id = params.model_id
-        use_local_files_only = False
-        if model_id.startswith("gs://"):
-            use_local_files_only = True
-            dir_name = os.path.basename(model_id.rstrip("/"))
-            model_id = os.path.join("/tmp", dir_name)
-
+        # setup() staged a gs:// model; model_dir() is its local copy.
         self.llama = transformers.AutoModelForCausalLM.from_pretrained(
-            model_id,
-            dtype=torch.bfloat16,
-            local_files_only=use_local_files_only,
-            use_cache=False,
+            model_dir(params.model_id), dtype=torch.bfloat16, use_cache=False
         )
 
         # Freeze the giant model's parameters to avoid CPU compute and OOMs.
@@ -58,10 +60,15 @@ class DummyModel(L.LightningModule):
         return x
 
     def training_step(self, batch, batch_idx):
-        # Discard batch to avoid CPU compute.
+        # Discard batch to avoid compute.
         del batch
         # Real loss with a real grad path so backward + DDP all-reduce run on the trainable layer.
-        zeros = torch.zeros(1, 8, dtype=self.trainable.weight.dtype)
+        zeros = torch.zeros(
+            1,
+            8,
+            dtype=self.trainable.weight.dtype,
+            device=self.trainable.weight.device,
+        )
         return (self.trainable(zeros) ** 2).sum()
 
     @staticmethod
@@ -88,7 +95,7 @@ class DummyModel(L.LightningModule):
         # Pass all parameters (including the frozen giant model) to the optimizer
         # so that it generates states for all of them, making the checkpoint realistic.
         optimizer = torch.optim.AdamW(self.parameters(), lr=1e-3)
-        # Eagerly materialize states on CPU
+        # Eagerly materialize states
         self._materialize_adamw_state(optimizer)
         return optimizer
 
@@ -126,20 +133,30 @@ class DummyModel(L.LightningModule):
                 fully_shard(self.llama, mesh=dp_mesh)
 
 
-class CPUModelParallelStrategy(ModelParallelStrategy):
+class HostAwareModelParallelStrategy(ModelParallelStrategy):
     @property
     def root_device(self) -> torch.device:
-        if not torch.cuda.is_available():
+        if accelerator.device_kind() == "cpu":
             return torch.device("cpu")
         return super().root_device
 
 
-class CPUFSDPStrategy(FSDPStrategy):
+class HostAwareFSDPStrategy(FSDPStrategy):
     @property
     def root_device(self) -> torch.device:
-        if not torch.cuda.is_available():
+        if accelerator.device_kind() == "cpu":
             return torch.device("cpu")
         return super().root_device
+
+
+def trainer_device_args(world_size: int) -> dict:
+    """Return Lightning Trainer device kwargs for CPU or CUDA GPU."""
+    kind = accelerator.device_kind()
+    if kind == "cpu":
+        return {"accelerator": "cpu", "devices": world_size}
+    if kind == "cuda":
+        return {"accelerator": "gpu", "devices": world_size}
+    raise ValueError(f"PyTorch Lightning does not support device kind {kind!r}")
 
 
 def is_distributed_strategy(strategy: str) -> bool:
@@ -147,8 +164,6 @@ def is_distributed_strategy(strategy: str) -> bool:
 
 
 def get_strategy(params, setup=False):
-    import torch
-
     strategy_name = params.strategy
     tp_size = params.tensor_parallel_size
     dp_size = params.data_parallel_size
@@ -157,12 +172,14 @@ def get_strategy(params, setup=False):
         tp_size = getattr(params, "setup_tensor_parallel_size", None) or tp_size
         dp_size = getattr(params, "setup_data_parallel_size", None) or dp_size
 
+    pg_backend = accelerator.backend_name()
+
     if strategy_name in ("fsdp_sharded", "fsdp_full"):
         from torch.distributed.fsdp.fully_sharded_data_parallel import MixedPrecision
 
         state_dict_type = "sharded" if strategy_name == "fsdp_sharded" else "full"
-        return CPUFSDPStrategy(
-            process_group_backend="gloo",
+        return HostAwareFSDPStrategy(
+            process_group_backend=pg_backend,
             state_dict_type=state_dict_type,
             mixed_precision=MixedPrecision(
                 param_dtype=torch.bfloat16,
@@ -171,18 +188,48 @@ def get_strategy(params, setup=False):
             ),
         )
     elif strategy_name in ("model_parallel_full", "model_parallel_sharded"):
-        return CPUModelParallelStrategy(
+        return HostAwareModelParallelStrategy(
             tensor_parallel_size=tp_size,
             data_parallel_size=dp_size,
             save_distributed_checkpoint=(strategy_name == "model_parallel_sharded"),
-            process_group_backend="gloo",
+            process_group_backend=pg_backend,
         )
     elif strategy_name == "ddp":
         from lightning.pytorch.strategies import DDPStrategy
 
         return DDPStrategy(
             find_unused_parameters=False,
-            process_group_backend="gloo",
+            process_group_backend=pg_backend,
         )
     else:
         raise ValueError(f"Unknown strategy: {strategy_name}")
+
+
+def run_worker(
+    op: str,
+    prefix: str,
+    params,
+    *,
+    world_size: int,
+    rdzv_id: str,
+    expect_result: bool = False,
+) -> dict | None:
+    """Launch ``pytorch_lightning._worker`` via single-node ``torchrun``."""
+    with tempfile.TemporaryDirectory(prefix="ssb-pl-") as tmp_dir:
+        spec_file = os.path.join(tmp_dir, "spec.json")
+        result_file = os.path.join(tmp_dir, "result.json")
+        with open(spec_file, "w", encoding="utf-8") as f:
+            json.dump({"prefix": prefix, "params": dataclasses.asdict(params)}, f)
+        args = ["--op", op, "--spec-file", spec_file]
+        if expect_result:
+            args.extend(["--result-file", result_file])
+        launcher.run_torchrun(
+            _WORKER_MODULE,
+            args,
+            world_size=world_size,
+            rdzv_id=rdzv_id,
+        )
+        if not expect_result:
+            return None
+        with open(result_file, encoding="utf-8") as f:
+            return json.load(f)

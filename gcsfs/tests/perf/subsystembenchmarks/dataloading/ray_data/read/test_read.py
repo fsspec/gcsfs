@@ -2,6 +2,7 @@ import os
 
 import pytest
 
+from gcsfs.tests.perf.subsystembenchmarks._common import placement
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.ray_data import configs
 
 pytest.importorskip("ray")
@@ -27,7 +28,9 @@ def shutdown_ray_after_cases():
     shutdown_ray()
 
 
-@pytest.mark.parametrize("params", CASES, ids=lambda p: p.name)
+@pytest.mark.parametrize(
+    "params", placement.select(CASES, group="dataloading/ray_data")
+)
 def test_read(benchmark, params, monitor):
     from gcsfs.tests.perf.subsystembenchmarks.dataloading.ray_data.read.driver import (
         RayDataReadDriver,

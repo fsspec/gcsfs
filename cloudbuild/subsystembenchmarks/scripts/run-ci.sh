@@ -76,7 +76,7 @@ for group in "${GROUP_LIST[@]}"; do
   (
     python3 -m venv "$venv"
     "$venv/bin/pip" install --quiet --upgrade pip
-    "$venv/bin/pip" install --quiet -r "$SSB/$group/requirements.txt"
+    "$venv/bin/pip" install --quiet -r "$SSB/requirements-cpu.txt" -r "$SSB/$group/requirements.txt"
   ) >"$CI_DIR/install-${group//\//-}.log" 2>&1 &
   INSTALL_PIDS+=("$!")
 done
@@ -121,13 +121,6 @@ EOF
 done
 cat "$VERSIONS"
 
-# Checkpoint code reads a gs:// model id from /tmp/<dir> (checkpointing/*/common.py).
-# Download into $HOME first: the image's snap-packaged gcloud has a private /tmp.
-MODEL_DIR=$(basename "${CI_MODEL_ID%/}")
-rm -rf "${HOME:?}/$MODEL_DIR" "/tmp/$MODEL_DIR"
-gcloud storage cp --recursive "${CI_MODEL_ID%/}" "$HOME/"
-mv "$HOME/$MODEL_DIR" "/tmp/$MODEL_DIR"
-
 # --- Run all cases concurrently ------------------------------------------------------
 export PYTHONPATH="$HOME/gcsfs"
 # On timeout, run_case_with_timeout SIGABRTs every process in the case (run.py, pytest,
@@ -136,9 +129,9 @@ export PYTHONFAULTHANDLER=1
 # Five Ray-based cases each start a local Ray cluster on this VM; keep each object store
 # small so they do not compete for /dev/shm.
 export RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION=0.05
-# Each case gets its own block of torch.distributed rendezvous ports
-# (checkpointing/_dist.py:find_free_port); probing OS-assigned free ports raced between
-# concurrent cases (EADDRINUSE). Above Ray's default worker ports (10002-19999), below the
+# Each case gets its own block of MASTER_PORTs for process groups it starts without
+# torchrun, e.g. Ray actors (checkpointing/_dist.py:find_free_port); probing OS-assigned
+# free ports raced between concurrent cases (EADDRINUSE). Above Ray's default worker ports (10002-19999), below the
 # kernel's ephemeral range (32768+).
 PORT_BLOCK_START=21000
 PORT_BLOCK_SIZE=16

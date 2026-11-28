@@ -25,6 +25,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parallelize impo
     split_stage,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import (  # noqa: E402
+    ensure_canonical_weights,
     load_weights,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.state import (  # noqa: E402
@@ -65,12 +66,18 @@ def test_build_model_meta_fp32(tmp_path):
 
 
 def test_resolve_model_config_staged(tmp_path, monkeypatch):
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import (
+        MODEL_CACHE_DIR_ENV,
+        model_dir,
+    )
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.model import (
         _resolve_model_config,
     )
 
-    staged_model_dir = tmp_path / "my_model"
-    staged_model_dir.mkdir()
+    monkeypatch.setenv(MODEL_CACHE_DIR_ENV, str(tmp_path))
+    model_id = "gs://my-bucket/models/my_model"
+    staged_model_dir = model_dir(model_id)
+    os.makedirs(staged_model_dir)
     config_data = {
         "model_type": "llama",
         "hidden_size": 32,
@@ -81,16 +88,9 @@ def test_resolve_model_config_staged(tmp_path, monkeypatch):
         "vocab_size": 128,
         "max_position_embeddings": 256,
     }
-    (staged_model_dir / "config.json").write_text(json.dumps(config_data))
-
-    orig_join = os.path.join
-    monkeypatch.setattr(
-        "os.path.join",
-        lambda *args: (
-            str(staged_model_dir) if args == ("/tmp", "my_model") else orig_join(*args)
-        ),
-    )
-    cfg = _resolve_model_config("gs://my-bucket/models/my_model")
+    with open(os.path.join(staged_model_dir, "config.json"), "w") as f:
+        json.dump(config_data, f)
+    cfg = _resolve_model_config(model_id)
     assert cfg.hidden_size == 32
 
 
@@ -269,7 +269,7 @@ def test_parallelize_rejects_moe_under_tp(tmp_path, fake_pg, layout):
 
 def _parallel_state(tmp_path, **sizes):
     model_path = tiny_model_dir(tmp_path, num_layers=2)
-    weights = load_weights(model_path)
+    weights = load_weights(ensure_canonical_weights(model_path))
     layout = _layout(**sizes)
     model, optim = build(model_path, layout, SETUP_SEED, weights, "cpu")
     return model, get_fqn_state_dict(model, optim)
@@ -340,7 +340,7 @@ _PP_STRATEGIES = [
 @pytest.mark.parametrize("sizes, world_size, q_placements", _PP_STRATEGIES)
 def test_pp_stages_partition_state(tmp_path, sizes, world_size, q_placements):
     model_path = tiny_model_dir(tmp_path, num_layers=8)
-    weights = load_weights(model_path)
+    weights = load_weights(ensure_canonical_weights(model_path))
     layout = _layout(world_size=world_size, **sizes)
     num_stages = sizes["pp"]
     layers_per_stage = 8 // num_stages
@@ -426,7 +426,7 @@ def test_fsdp_olmoe_slices_every_expert(tmp_path, fake_pg):
 
 def test_ep_ranks_own_disjoint_experts(tmp_path):
     model_path = tiny_model_dir(tmp_path, kind="olmoe", num_layers=2)
-    weights = load_weights(model_path)
+    weights = load_weights(ensure_canonical_weights(model_path))
     layout = _layout("ep", dp=8, ep=8)
     full = build_model(model_path)
     full_names = {n for n, _ in full.named_parameters()}

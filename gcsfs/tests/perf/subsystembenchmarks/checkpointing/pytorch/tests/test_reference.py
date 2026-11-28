@@ -19,83 +19,284 @@ from transformers import AutoModelForCausalLM  # noqa: E402
 
 import gcsfs  # noqa: E402
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (  # noqa: E402
-    MIN_OPEN_FILES,
-    run_split,
     setup_distributed_env,
 )
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import (  # noqa: E402
+    MODEL_CACHE_DIR_ENV,
+    model_dir,
+    stage_model,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.model import (  # noqa: E402
+    SETUP_SEED,
     build_model,
+    expected_local,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import (  # noqa: E402
+    MmapWeightStore,
+    ensure_canonical_weights,
     load_weights,
     local_slice,
-    model_dir,
     random_full,
     random_local,
-    stage_model,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny import (  # noqa: E402
     make_params,
+    run_test_ranks,
     tiny_model_dir,
 )
-
-
-def test_model_dir():
-    assert model_dir("gs://my-bucket/models/Llama-3.1-8B") == "/tmp/Llama-3.1-8B"
-    assert model_dir("gs://my-bucket/models/Llama-3.1-8B/") == "/tmp/Llama-3.1-8B"
-    assert model_dir("/var/tmp/local-model") == "/var/tmp/local-model"
-    assert model_dir("meta-llama/Llama-3.1-8B") == "meta-llama/Llama-3.1-8B"
-
-
-def test_stage_model_rejects_dot_and_traversal_segments(monkeypatch):
-    for bad_uri in (
-        "gs://",
-        "gs:///",
-        "gs://.",
-        "gs://..",
-        "gs://bucket/.",
-        "gs://bucket/..",
-    ):
-        with pytest.raises(ValueError, match="Invalid GCS model_id"):
-            model_dir(bad_uri)
-
-    name = f"test-stage-dot-{uuid.uuid4().hex}"
-    gcs_uri = f"gs://bucket/{name}"
-    target_dir = f"/tmp/{name}"
-
-    class _FakeFS:
-        def ls(self, prefix, detail=True):
-            return [
-                {"name": f"bucket/{name}/config.json", "type": "file"},
-                {"name": f"bucket/{name}/..", "type": "file"},
-            ]
-
-        def get(self, rpaths, lpaths):
-            raise AssertionError("fs.get must not run on traversal object keys")
-
-    monkeypatch.setattr(gcsfs, "GCSFileSystem", _FakeFS)
-    try:
-        with pytest.raises(ValueError, match="Invalid remote object key"):
-            stage_model(gcs_uri)
-        assert not os.path.exists(target_dir)
-        assert glob.glob(f"/tmp/.{name}.*") == []
-    finally:
-        shutil.rmtree(target_dir, ignore_errors=True)
 
 
 @pytest.mark.parametrize("kind", ["llama", "olmoe"])
 def test_load_weights_matches_model_fqns(tmp_path, kind):
     model_path = tiny_model_dir(tmp_path, kind=kind)
+    ensure_canonical_weights(model_path)
     weights = load_weights(model_path)
+    assert isinstance(weights, MmapWeightStore)
     model = build_model(model_path)
 
     param_shapes = {name: p.shape for name, p in model.named_parameters()}
     assert set(weights.keys()) == set(param_shapes.keys())
+    first_fqn = next(iter(param_shapes))
     for fqn, tensor in weights.items():
         assert tensor.shape == param_shapes[fqn], fqn
         assert tensor.dtype == torch.bfloat16, fqn
         assert tensor.device == torch.device("cpu"), fqn
-        assert tensor.is_shared(), fqn
+
+    weights.close()
+    # Second close is a no-op; reads after close raise ValueError.
+    weights.close()
+    with pytest.raises(ValueError, match="closed"):
+        _ = weights[first_fqn]
+
+
+def test_mmap_weight_store_slices_without_full_copy(tmp_path, monkeypatch):
+    from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
+
+    model_path = tiny_model_dir(tmp_path, kind="llama", num_layers=1)
+    fqn = "model.layers.0.self_attn.q_proj.weight"
+
+    with load_weights(model_path) as weights:
+        assert isinstance(weights, MmapWeightStore)
+        full = weights[fqn]
+        monkeypatch.setattr(
+            MmapWeightStore,
+            "__getitem__",
+            lambda self, k: (_ for _ in ()).throw(
+                AssertionError("expected_local must not materialize full tensor")
+            ),
+        )
+        for rank in range(4):
+            dist.init_process_group("fake", store=FakeStore(), rank=rank, world_size=4)
+            try:
+                mesh_1d = init_device_mesh("cpu", (4,))
+                mesh_2d = init_device_mesh("cpu", (2, 2), mesh_dim_names=("dp", "tp"))
+                for mesh, placements in (
+                    (mesh_1d, [Shard(0)]),
+                    (mesh_1d, [Shard(1)]),
+                    (mesh_2d, [Shard(0), Shard(1)]),
+                ):
+                    local_shape, offsets = compute_local_shape_and_global_offset(
+                        full.shape, mesh, placements
+                    )
+                    dt = DTensor.from_local(
+                        torch.empty(local_shape, dtype=torch.float32),
+                        mesh,
+                        placements,
+                        run_check=False,
+                    )
+                    slices = tuple(
+                        slice(o, o + s) for s, o in zip(local_shape, offsets)
+                    )
+                    got = weights.get_slice(fqn, slices)
+                    ref = local_slice(full, dt)
+                    assert got.dtype == torch.bfloat16
+                    assert torch.equal(got, ref)
+                    assert torch.equal(
+                        expected_local(
+                            fqn, dt, SETUP_SEED, weights, torch.device("cpu")
+                        ),
+                        ref.to(dtype=torch.float32),
+                    )
+            finally:
+                dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("kind", ["llama", "olmoe"])
+def test_canonical_safetensors_recovers_from_stale_or_corrupt_file(
+    tmp_path, monkeypatch, kind
+):
+    from safetensors import safe_open
+
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import (
+        reference as ref_mod,
+    )
+
+    model_path = tiny_model_dir(tmp_path, kind=kind, num_layers=1)
+    canonical = os.path.join(model_path, ".canonical.safetensors")
+    param_shapes = {
+        name: tuple(p.shape) for name, p in build_model(model_path).named_parameters()
+    }
+
+    # 1. Corrupt/truncated .canonical.safetensors is atomically regenerated.
+    with open(canonical, "wb") as f:
+        f.write(b"not-a-valid-safetensors-header")
+
+    assert ensure_canonical_weights(model_path) == model_path
+    assert os.path.isfile(canonical)
+    assert glob.glob(os.path.join(model_path, ".canonical.*.tmp")) == []
+    with safe_open(canonical, framework="pt", device="cpu") as sf:
+        assert set(sf.keys()) == set(param_shapes.keys())
+        for fqn, expected_shape in param_shapes.items():
+            sl = sf.get_slice(fqn)
+            assert tuple(sl.get_shape()) == expected_shape
+            assert sl.get_dtype() == "BF16"
+
+    # 2. Fresh valid .canonical.safetensors is reused without re-loading HF model.
+    monkeypatch.setattr(
+        ref_mod.AutoModelForCausalLM,
+        "from_pretrained",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("unexpected reload")),
+    )
+    assert ensure_canonical_weights(model_path) == model_path
+
+    # 3. Stale mtime (older than source shard) triggers regeneration.
+    monkeypatch.undo()
+    src_shard = os.path.join(model_path, "model.safetensors")
+    src_mtime = os.path.getmtime(src_shard)
+    os.utime(canonical, (src_mtime - 60, src_mtime - 60))
+
+    reloads = []
+    orig_from_pretrained = ref_mod.AutoModelForCausalLM.from_pretrained
+
+    def spy_from_pretrained(*args, **kwargs):
+        reloads.append((args, kwargs))
+        return orig_from_pretrained(*args, **kwargs)
+
+    monkeypatch.setattr(
+        ref_mod.AutoModelForCausalLM, "from_pretrained", spy_from_pretrained
+    )
+    assert ensure_canonical_weights(model_path) == model_path
+    assert len(reloads) == 1
+    assert os.path.getmtime(canonical) >= src_mtime
+    assert glob.glob(os.path.join(model_path, ".canonical.*.tmp")) == []
+    with safe_open(canonical, framework="pt", device="cpu") as sf:
+        assert set(sf.keys()) == set(param_shapes.keys())
+        for fqn, expected_shape in param_shapes.items():
+            sl = sf.get_slice(fqn)
+            assert tuple(sl.get_shape()) == expected_shape
+            assert sl.get_dtype() == "BF16"
+
+
+def test_ensure_canonical_weights_skips_conversion_for_matching_bf16_shards(
+    tmp_path, monkeypatch
+):
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import (
+        reference as ref_mod,
+    )
+
+    src_dir = tiny_model_dir(tmp_path / "src", kind="llama", num_layers=1)
+    bf16_dir = tmp_path / "bf16"
+    AutoModelForCausalLM.from_pretrained(
+        src_dir, dtype=torch.bfloat16, local_files_only=True
+    ).save_pretrained(bf16_dir)
+
+    monkeypatch.setattr(
+        ref_mod.AutoModelForCausalLM,
+        "from_pretrained",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("unexpected reload")),
+    )
+    assert ensure_canonical_weights(str(bf16_dir)) == str(bf16_dir)
+    assert not os.path.exists(bf16_dir / ".canonical.safetensors")
+    with load_weights(str(bf16_dir)) as weights:
+        assert isinstance(weights, MmapWeightStore)
+        assert len(weights) > 0
+
+
+def test_ensure_canonical_weights_filters_buffers_and_dedups_offset_views(
+    tmp_path, monkeypatch
+):
+    from safetensors import safe_open
+
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import (
+        reference as ref_mod,
+    )
+
+    model_path = tiny_model_dir(tmp_path / "src", kind="llama", num_layers=1)
+    canonical = os.path.join(model_path, ".canonical.safetensors")
+    meta_model = build_model(model_path)
+    param_shapes = {name: tuple(p.shape) for name, p in meta_model.named_parameters()}
+    del meta_model
+
+    # Build a synthetic state_dict that:
+    # (a) includes a persistent buffer absent from named_parameters(), and
+    # (b) backs two parameters as non-overlapping views at different offsets into
+    #     the same underlying storage (different data_ptr, identical untyped_storage().data_ptr()).
+    orig_state = AutoModelForCausalLM.from_pretrained(
+        model_path, dtype=torch.bfloat16, local_files_only=True
+    ).state_dict()
+    keys = list(param_shapes)
+    k0, k1 = keys[0], keys[1]
+    n0, n1 = orig_state[k0].numel(), orig_state[k1].numel()
+    shared_storage = torch.arange(n0 + n1, dtype=torch.bfloat16)
+    view0 = shared_storage[:n0].view(param_shapes[k0])
+    view1 = shared_storage[n0 : n0 + n1].view(param_shapes[k1])
+    assert view0.data_ptr() != view1.data_ptr()
+    assert view0.untyped_storage().data_ptr() == view1.untyped_storage().data_ptr()
+
+    synthetic_state = dict(orig_state)
+    synthetic_state[k0] = view0
+    synthetic_state[k1] = view1
+    synthetic_state["model.rotary_emb.inv_freq"] = torch.ones(8, dtype=torch.bfloat16)
+
+    class _FakeModel:
+        def state_dict(self):
+            return synthetic_state
+
+    load_calls = []
+
+    def _fake_from_pretrained(*args, **kwargs):
+        load_calls.append((args, kwargs))
+        return _FakeModel()
+
+    monkeypatch.setattr(
+        ref_mod.AutoModelForCausalLM, "from_pretrained", _fake_from_pretrained
+    )
+
+    assert ensure_canonical_weights(model_path) == model_path
+    assert len(load_calls) == 1
+    assert os.path.isfile(canonical)
+
+    with safe_open(canonical, framework="pt", device="cpu") as sf:
+        assert set(sf.keys()) == set(param_shapes.keys())
+        assert "model.rotary_emb.inv_freq" not in sf.keys()
+
+    # Subsequent load_weights() reuses .canonical.safetensors without reloading HF model.
+    monkeypatch.setattr(
+        ref_mod.AutoModelForCausalLM,
+        "from_pretrained",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("unexpected reload")),
+    )
+    with load_weights(model_path) as weights:
+        assert set(weights.keys()) == set(param_shapes.keys())
+        assert torch.equal(weights[k0], view0)
+        assert torch.equal(weights[k1], view1)
+
+    # Missing expected parameter raises a clear KeyError.
+    os.unlink(canonical)
+    incomplete_state = dict(orig_state)
+    incomplete_state.pop(k0)
+
+    class _IncompleteModel:
+        def state_dict(self):
+            return incomplete_state
+
+    monkeypatch.setattr(
+        ref_mod.AutoModelForCausalLM,
+        "from_pretrained",
+        lambda *a, **kw: _IncompleteModel(),
+    )
+    with pytest.raises(KeyError, match=re.escape(k0)):
+        ensure_canonical_weights(model_path)
 
 
 def test_random_full_deterministic_and_seed_dependent():
@@ -152,14 +353,22 @@ def _local_slice_rank(rank, world_size, port, prefix, params, q):
 
 
 def test_local_slice_reassembles_full():
-    assert run_split(None, make_params(world_size=4), _local_slice_rank, 4) == []
+    run_test_ranks(None, make_params(world_size=4), _local_slice_rank, 4)
 
 
-def test_stage_model_downloads_missing_weights(tmp_path, monkeypatch):
+@pytest.fixture
+def cache_dir(tmp_path, monkeypatch):
+    path = tmp_path / "cache"
+    path.mkdir()
+    monkeypatch.setenv(MODEL_CACHE_DIR_ENV, str(path))
+    return path
+
+
+def test_stage_model_downloads_missing_weights(tmp_path, cache_dir, monkeypatch):
     src_dir = tiny_model_dir(tmp_path / "src", num_layers=2)
     name = f"test-stage-model-{uuid.uuid4().hex}"
     gcs_uri = f"gs://bucket/{name}"
-    target_dir = f"/tmp/{name}"
+    target_dir = model_dir(gcs_uri)
 
     mem_fs = fsspec.filesystem("memory")
     remote_prefix = f"bucket/{name}"
@@ -194,12 +403,11 @@ def test_stage_model_downloads_missing_weights(tmp_path, monkeypatch):
         )
         assert stage_model(gcs_uri) == target_dir
     finally:
-        shutil.rmtree(target_dir, ignore_errors=True)
         if mem_fs.exists(remote_prefix):
             mem_fs.rm(remote_prefix, recursive=True)
 
 
-def test_stage_model_restages_incomplete_sharded_dir(tmp_path, monkeypatch):
+def test_stage_model_restages_incomplete_sharded_dir(tmp_path, cache_dir, monkeypatch):
     src_dir = tiny_model_dir(tmp_path / "src", num_layers=2)
     sharded = tmp_path / "sharded"
     AutoModelForCausalLM.from_pretrained(src_dir).save_pretrained(
@@ -210,7 +418,7 @@ def test_stage_model_restages_incomplete_sharded_dir(tmp_path, monkeypatch):
 
     name = f"test-stage-sharded-{uuid.uuid4().hex}"
     gcs_uri = f"gs://bucket/{name}"
-    target_dir = f"/tmp/{name}"
+    target_dir = model_dir(gcs_uri)
     mem_fs = fsspec.filesystem("memory")
     remote_prefix = f"bucket/{name}"
     try:
@@ -227,16 +435,17 @@ def test_stage_model_restages_incomplete_sharded_dir(tmp_path, monkeypatch):
         assert sorted(os.listdir(target_dir)) == sorted(os.listdir(sharded))
         assert len(load_weights(gcs_uri)) > 0
     finally:
-        shutil.rmtree(target_dir, ignore_errors=True)
         if mem_fs.exists(remote_prefix):
             mem_fs.rm(remote_prefix, recursive=True)
 
 
-def test_stage_model_failed_copy_leaves_target_untouched(tmp_path, monkeypatch):
+def test_stage_model_failed_copy_leaves_target_untouched(
+    tmp_path, cache_dir, monkeypatch
+):
     src_dir = tiny_model_dir(tmp_path / "src", num_layers=2)
     name = f"test-stage-fail-{uuid.uuid4().hex}"
     gcs_uri = f"gs://bucket/{name}"
-    target_dir = f"/tmp/{name}"
+    target_dir = model_dir(gcs_uri)
     mem_fs = fsspec.filesystem("memory")
     remote_prefix = f"bucket/{name}"
     try:
@@ -267,11 +476,8 @@ def test_stage_model_failed_copy_leaves_target_untouched(tmp_path, monkeypatch):
         with pytest.raises(OSError, match="boom"):
             stage_model(gcs_uri)
         assert os.listdir(target_dir) == ["config.json"]
-        assert glob.glob(f"/tmp/.{name}.*") == []
+        assert glob.glob(str(cache_dir / ".*")) == []
     finally:
-        shutil.rmtree(target_dir, ignore_errors=True)
-        for p in glob.glob(f"/tmp/.{name}.*"):
-            shutil.rmtree(p, ignore_errors=True)
         if mem_fs.exists(remote_prefix):
             mem_fs.rm(remote_prefix, recursive=True)
 
@@ -291,9 +497,9 @@ def test_stage_model_local_without_weights_raises(tmp_path):
 def _shared_weights_rank(rank, world_size, port, prefix, params, q, *, weights):
     setup_distributed_env(rank, world_size, port)
     try:
+        assert isinstance(weights, MmapWeightStore)
         assert len(weights) > 0
         for fqn, tensor in weights.items():
-            assert tensor.is_shared(), fqn
             assert tensor.dtype == torch.bfloat16, fqn
 
         fresh = AutoModelForCausalLM.from_pretrained(
@@ -303,14 +509,16 @@ def _shared_weights_rank(rank, world_size, port, prefix, params, q, *, weights):
         assert torch.equal(weights[key], fresh[key])
         q.put(None)
     finally:
+        weights.close()
         dist.destroy_process_group()
 
 
 def test_weights_shared_with_spawned_ranks(tmp_path):
     model_path = tiny_model_dir(tmp_path, num_layers=2)
-    weights = load_weights(model_path)
-    target = functools.partial(_shared_weights_rank, weights=weights)
-    assert run_split(None, make_params(model_path, world_size=2), target, 2) == []
+    ensure_canonical_weights(model_path)
+    with load_weights(model_path) as weights:
+        target = functools.partial(_shared_weights_rank, weights=weights)
+        run_test_ranks(None, make_params(model_path, world_size=2), target, 2)
 
 
 def test_random_local_matches_full_slice_with_local_storage():
@@ -363,28 +571,8 @@ def test_random_local_matches_full_slice_with_local_storage():
         )
 
 
-def test_load_weights_raises_soft_nofile_limit(tmp_path):
-    import resource
-
-    model_path = tiny_model_dir(tmp_path, num_layers=1)
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    low = min(1024, hard)
-    try:
-        resource.setrlimit(resource.RLIMIT_NOFILE, (low, hard))
-        load_weights(model_path)
-        new_soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
-        expected = (
-            MIN_OPEN_FILES
-            if hard == resource.RLIM_INFINITY
-            else min(hard, MIN_OPEN_FILES)
-        )
-        assert new_soft >= expected
-    finally:
-        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
-
-
 def test_model_and_reference_from_pretrained_use_local_files_only(
-    tmp_path, monkeypatch
+    tmp_path, cache_dir, monkeypatch
 ):
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import (
         model as model_mod,
@@ -418,18 +606,13 @@ def test_model_and_reference_from_pretrained_use_local_files_only(
     # 1. Local directory path in build_model
     build_model(local_dir)
 
-    # 2. Pre-staged /tmp/<name>/config.json branch in build_model
-    staged_name = f"test-local-only-staged-{uuid.uuid4().hex}"
-    staged_tmp = f"/tmp/{staged_name}"
-    os.makedirs(staged_tmp, exist_ok=True)
-    try:
-        shutil.copyfile(
-            os.path.join(local_dir, "config.json"),
-            os.path.join(staged_tmp, "config.json"),
-        )
-        build_model(f"gs://bucket/{staged_name}")
-    finally:
-        shutil.rmtree(staged_tmp, ignore_errors=True)
+    # 2. Pre-staged config.json branch in build_model
+    staged_dir = model_dir("gs://bucket/staged")
+    os.makedirs(staged_dir)
+    shutil.copyfile(
+        os.path.join(local_dir, "config.json"), os.path.join(staged_dir, "config.json")
+    )
+    build_model("gs://bucket/staged")
 
     # 3. Unstaged GCS config.json fetch branch in build_model
     unstaged_name = f"test-local-only-unstaged-{uuid.uuid4().hex}"
@@ -442,9 +625,8 @@ def test_model_and_reference_from_pretrained_use_local_files_only(
     monkeypatch.setattr(gcsfs, "GCSFileSystem", _FakeConfigFS)
     build_model(f"gs://bucket/{unstaged_name}")
 
-    # 4. Reference weight load in load_weights
-    weights = load_weights(local_dir)
-    weights.clear()
+    # 4. Reference weight canonicalization
+    ensure_canonical_weights(local_dir)
 
     assert len(config_calls) >= 3
     for path, kwargs in config_calls:

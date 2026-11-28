@@ -1,9 +1,11 @@
+import contextlib
 import logging
 import time
 
 import fsspec
 import psutil
 
+from gcsfs.tests.perf.subsystembenchmarks._common import nodes
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import CheckpointDriver
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import rcu
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import assert_fsspec_gcsfs
@@ -32,6 +34,31 @@ def _terminate_process_tree(
     psutil.wait_procs(alive, timeout=grace_s)
 
 
+def _run_setup_process(driver: CheckpointDriver, prefix: str, params) -> None:
+    """Runs driver.setup in an isolated OS process so single-node RAM is reclaimed."""
+    # Checkpoint generation uses ~400 GB of RAM. PyTorch's allocators and the gloo
+    # multiprocessing backend leak memory and semaphores back to the parent process.
+    # If we ran setup() natively, the leaked memory combined with the ~400 GB needed
+    # for the subsequent read benchmark (driver.run) would exceed the VM's 732 GB limit
+    # and cause an OOM crash. The OS forcefully reclaims all memory when this process joins.
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    p = ctx.Process(target=driver.setup, args=(prefix, params))
+    p.start()
+    try:
+        p.join()
+    finally:
+        if p.is_alive():
+            _terminate_process_tree(p.pid, reap_root=False)
+            p.join(timeout=10.0)
+            if p.is_alive():
+                p.kill()
+                p.join()
+    if p.exitcode != 0:
+        raise RuntimeError(f"driver.setup failed with exitcode {p.exitcode}")
+
+
 def run_checkpoint_case(
     benchmark, monitor, params, driver: CheckpointDriver, *, bucket_ctx=None
 ):
@@ -43,48 +70,45 @@ def run_checkpoint_case(
     )
     from gcsfs.tests.perf.subsystembenchmarks.dataloading.bucket import (
         BucketSpec,
+        bucket_name_of,
         case_bucket,
+        case_bucket_name,
     )
 
-    spec = BucketSpec.from_env() if bucket_ctx is None else None
-    bucket_ctx = bucket_ctx or case_bucket
+    node_group = nodes.NodeGroup.from_env()
+    is_multinode = node_group is not None
+    is_leader = node_group is None or node_group.is_leader
 
-    with bucket_ctx(spec, params.name) as bucket:
-        # bucket_ctx may yield a raw name or a full URI depending on the branch/version.
-        # Extract just the bucket name so we can safely construct our own prefix.
-        bucket_name = (
-            bucket[len("gs://") :].split("/", 1)[0]
-            if bucket.startswith("gs://")
-            else bucket
+    if is_leader:
+        spec = BucketSpec.from_env() if bucket_ctx is None else None
+        ctx_fn = bucket_ctx or case_bucket
+        bucket_cm = (
+            ctx_fn(spec, params.name, deterministic=True)
+            if is_multinode
+            else ctx_fn(spec, params.name)
         )
+    else:
+        spec = BucketSpec.from_env()
+        bucket_cm = contextlib.nullcontext(
+            case_bucket_name(spec.prefix, params.name, deterministic=True)
+        )
+
+    with bucket_cm as bucket:
+        # bucket_ctx may yield a bucket name or a gs:// URI.
+        bucket_name = bucket_name_of(bucket) or bucket
         params.bucket_name = bucket_name
         prefix = f"gs://{bucket_name}/checkpoint/"
         assert_fsspec_gcsfs(prefix)
 
-        # We run the setup phase (which generates the checkpoint) in an isolated OS process.
-        # Checkpoint generation uses ~400 GB of RAM. PyTorch's allocators and the gloo
-        # multiprocessing backend leak memory and semaphores back to the parent process.
-        # If we ran setup() natively, the leaked memory combined with the ~400 GB needed
-        # for the subsequent read benchmark (driver.run) would exceed the VM's 732 GB limit
-        # and cause an OOM crash. The OS forcefully reclaims all memory when this process joins.
-        import multiprocessing as mp
+        if is_multinode:
+            # Multi-node setups delegate heavy work to launcher.run_torchrun (separate OS
+            # subprocess tree) and must run in-parent so launcher.next_rdzv_port() stays in
+            # lockstep across setup, run, and verify on every pod.
+            driver.setup(prefix, params)
+        else:
+            _run_setup_process(driver, prefix, params)
 
-        ctx = mp.get_context("spawn")
-        p = ctx.Process(target=driver.setup, args=(prefix, params))
-        p.start()
-        try:
-            p.join()
-        finally:
-            if p.is_alive():
-                _terminate_process_tree(p.pid, reap_root=False)
-                p.join(timeout=10.0)
-                if p.is_alive():
-                    p.kill()
-                    p.join()
-        if p.exitcode != 0:
-            raise RuntimeError(f"driver.setup failed with exitcode {p.exitcode}")
-
-        if "read" in params.scenario:
+        if is_leader and "read" in params.scenario:
             from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
 
             rcu.assert_storage_class(prefix, params.bucket_type)
@@ -92,16 +116,26 @@ def run_checkpoint_case(
             rcu.warm_if_needed(prefix, params.bucket_type)
 
         result = None
+        m = None
+        window_start = 0.0
+        window_end = 0.0
         try:
-            window_start = time.time()
-            with monitor() as m:
+            if is_leader:
+                window_start = time.time()
+                with monitor() as m:
+                    result = driver.run(prefix, params)
+                window_end = time.time()
+            else:
                 result = driver.run(prefix, params)
-            window_end = time.time()
             if getattr(result, "verify", None) is not None:
                 result.verify()
         finally:
             if result is not None and getattr(result, "close", None) is not None:
                 result.close()
+
+        if not is_leader:
+            return
+
         if "write" in params.scenario:
             # Saves run on *_rcu_z only, where run.py turns on RAPID writes.
             rcu.assert_storage_class(prefix, params.bucket_type)
@@ -126,6 +160,10 @@ def run_checkpoint_case(
         except Exception as e:
             logging.error("Could not measure physical checkpoint size: %s", e)
             raise
+
+        result_window = getattr(result, "window", None)
+        if result_window is not None:
+            window_start, window_end = result_window
 
         # Publish metrics to pytest-benchmark extra_info
         publish_case_metadata(benchmark, params, window_start, window_end)
@@ -173,5 +211,8 @@ def run_checkpoint_case(
         else:
             raise ValueError(f"Unknown scenario {params.scenario}")
         publish_round_stats(benchmark, durations)
-        publish_resource_metrics(benchmark, m)
+        resource_metrics = getattr(result, "resource_metrics", None)
+        publish_resource_metrics(
+            benchmark, resource_metrics if resource_metrics is not None else m
+        )
         benchmark.pedantic(lambda: None, rounds=1, iterations=1, warmup_rounds=0)

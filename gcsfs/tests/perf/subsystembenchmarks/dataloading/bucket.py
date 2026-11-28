@@ -5,6 +5,7 @@ bucket-level grid) accurately partition per case window. Teardown deletes the bu
 """
 
 import contextlib
+import hashlib
 import logging
 import os
 import re
@@ -102,11 +103,27 @@ def bucket_kwargs(spec):
     return body
 
 
-def case_bucket_name(prefix, case_id):
-    """`<prefix>-<case-slug>-<rand>`, always a legal (<=63 char, lowercase) bucket name."""
-    slug = re.sub(r"[^a-z0-9-]+", "-", case_id.lower()).strip("-")
-    suffix = uuid.uuid4().hex[:_SUFFIX_LEN]
-    head = f"{prefix}-{slug}"[: _MAX_BUCKET_NAME - _SUFFIX_LEN - 1].rstrip("-")
+def case_bucket_name(prefix: str, case_id: str, *, deterministic: bool = False) -> str:
+    """`<prefix>-<case-slug>-<suffix>`, always a legal (<=63 char, lowercase) bucket name."""
+    max_head = _MAX_BUCKET_NAME - _SUFFIX_LEN - 1
+    if len(prefix) > max_head:
+        raise ValueError(
+            f"bucket prefix {prefix!r} is too long ({len(prefix)} > {max_head})"
+        )
+    prefix_slug = re.sub(r"[^a-z0-9-]+", "-", prefix.lower()).strip("-")
+    case_slug = re.sub(r"[^a-z0-9-]+", "-", case_id.lower()).strip("-")
+    parts = [part for part in (prefix_slug, case_slug) if part]
+    head = "-".join(parts)[:max_head].strip("-")
+    if not prefix_slug or not head:
+        raise ValueError(
+            f"bucket prefix {prefix!r} and case_id {case_id!r} leave no valid bucket head"
+        )
+    if deterministic:
+        suffix = hashlib.sha256(f"{prefix}/{case_id}".encode()).hexdigest()[
+            :_SUFFIX_LEN
+        ]
+    else:
+        suffix = uuid.uuid4().hex[:_SUFFIX_LEN]
     return f"{head}-{suffix}"
 
 
@@ -130,14 +147,14 @@ def _delete(fs, name, spec=None):
 
 
 @contextlib.contextmanager
-def case_bucket(spec, case_id, *, fs=None):
+def case_bucket(spec, case_id, *, fs=None, deterministic: bool = False):
     """Create this case's bucket, yield its corpus prefix, delete it on the way out."""
     is_rapid_cache = rapid_cache.is_rapid_cache_bucket_type(spec.bucket_type)
     if fs is None:
         import gcsfs
 
         fs = gcsfs.GCSFileSystem(project=spec.project)
-    name = case_bucket_name(spec.prefix, case_id)
+    name = case_bucket_name(spec.prefix, case_id, deterministic=deterministic)
     fs.mkdir(name, location=spec.location, **bucket_kwargs(spec))
     try:
         if is_rapid_cache:

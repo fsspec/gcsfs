@@ -64,3 +64,55 @@ def tiny_model_dir(
     model = AutoModelForCausalLM.from_config(cfg, dtype=torch.float32)
     model.save_pretrained(tmp_path)
     return str(tmp_path)
+
+
+def _rank_entry(target_fn, rank, world_size, port, prefix, params, q, err_q):
+    import traceback
+
+    try:
+        target_fn(rank, world_size, port, prefix, params, q)
+    except BaseException as exc:
+        err_q.put((rank, type(exc).__name__, str(exc), traceback.format_exc()))
+        raise
+
+
+def run_test_ranks(prefix, params, target_fn, world_size: int) -> None:
+    """Run ``target_fn`` across ``world_size`` spawned CPU test processes."""
+    import multiprocessing as mp
+
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
+        find_free_port,
+    )
+
+    ctx = mp.get_context("spawn")
+    port = find_free_port()
+    q = ctx.Queue()
+    err_q = ctx.Queue()
+    procs = [
+        ctx.Process(
+            target=_rank_entry,
+            args=(target_fn, rank, world_size, port, prefix, params, q, err_q),
+        )
+        for rank in range(world_size)
+    ]
+    for p in procs:
+        p.start()
+    try:
+        for p in procs:
+            p.join()
+    except BaseException:
+        for p in procs:
+            if p.is_alive():
+                p.terminate()
+        for p in procs:
+            p.join(timeout=5)
+        raise
+
+    if not err_q.empty():
+        rank, exc_type, exc_msg, tb = err_q.get()
+        raise RuntimeError(f"rank {rank} raised {exc_type}: {exc_msg}\n{tb}")
+    failed = [p for p in procs if p.exitcode != 0]
+    if failed:
+        raise RuntimeError(
+            f"test ranks exited non-zero: {[p.exitcode for p in failed]}"
+        )
