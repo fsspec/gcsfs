@@ -30,7 +30,6 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 pytest.importorskip("transformers")
 
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (  # noqa: E402
-    run_split,
     setup_distributed_env,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.layout import (  # noqa: E402
@@ -152,10 +151,11 @@ def test_build_then_verify_passes(tiny_models):
     target = functools.partial(
         _build_then_verify_rank, models_and_weights=models_and_weights
     )
-    assert (
-        run_split(None, make_params(tiny_models["llama"], world_size=4), target, 4)
-        == []
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny import (
+        run_test_ranks,
     )
+
+    run_test_ranks(None, make_params(tiny_models["llama"], world_size=4), target, 4)
 
 
 def test_verify_names_corrupted_key(tmp_path):
@@ -271,7 +271,11 @@ def test_recording_planners_and_dcp_roundtrip(tmp_path, monkeypatch):
     weights = load_weights(llama_dir)
     prefix = (tmp_path / "ckpt").as_uri()
     target = functools.partial(_planners_roundtrip_rank, weights=weights)
-    assert run_split(prefix, make_params(llama_dir, world_size=2), target, 2) == []
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny import (
+        run_test_ranks,
+    )
+
+    run_test_ranks(prefix, make_params(llama_dir, world_size=2), target, 2)
 
     # Unit-check deduplicated storage_index accounting in RecordingLoadPlanner
     # and tensor-only accounting in RecordingSavePlanner.

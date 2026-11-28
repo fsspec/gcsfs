@@ -30,14 +30,20 @@ to select `cuda`, `tpu`, or `cpu`; passing an explicit `--device=cuda` or
 Data-loading groups detect CUDA automatically. On a GPU host, each round
 includes copying batches to the GPU. The exceptions are WebDataset with
 `decode: false` and Ray Data cases with feature columns, where there is nothing to copy.
-`checkpointing/pytorch_{save,load,reshard}` run on the device that `--device`
-resolves (`gloo` on CPU, `cpu:gloo,cuda:nccl` on GPU; TPU DCP support is pending);
-`checkpointing/pytorch_lightning` and `checkpointing/ray_pytorch` run on CPU (`gloo`).
+Checkpointing groups run on the device that `--device` resolves (`gloo` on CPU,
+`cpu:gloo,cuda:nccl` / `nccl` on CUDA GPU, `tpu_dist` on TPU), placing models,
+optimizer states, and meshes on the active accelerator and synchronizing before
+each round's end timestamp. Cases whose `world_size` exceeds one node (such as
+the 16-rank DCP cases on 8-device nodes) run SPMD across
+`ceil(world_size / devices_per_node)` nodes via `torchrun` when launched with
+`--nodes`.
 
 - **Skip rules:** without `--nodes`, a case that needs more devices than the host
   has skips (`needs W devices; host has D`; CPU hosts allow up to 16 ranks).
   Ranks own one device each, except data loading on GPU, where ranks share GPUs
-  and any host with a GPU runs every case. Known
+  and any host with a GPU runs every case. Only
+  `checkpointing/pytorch_{save,load,reshard}` cases span nodes; every other case
+  needs one node. Known
   framework limitations on a specific accelerator are declared explicitly in
   `_common/limitations.py` and documented with repros in
   [`limitations.md`](limitations.md) (for example, `checkpointing/pytorch_lightning`
@@ -188,14 +194,9 @@ For checkpointing groups:
   `gs://gcs-aiml-huggingface-model-weights/Llama-3.1-8B` for
   `checkpointing/pytorch_{save,load,reshard}`).
 - A `gs://.../<name>` model is staged under `/tmp/<name>` (with
-  `*.safetensors` weights). `checkpointing/pytorch_{save,load,reshard}`
-  download a `gs://.../<name>` model into `/tmp/<name>` during `setup()` if
-  safetensors are missing; `checkpointing/pytorch_lightning` and
-  `checkpointing/ray_pytorch` require copying it there beforehand:
-
-  ```bash
-  gcloud storage cp -r gs://huggingface-model-weights/Llama-3.1-8B /tmp/
-  ```
+  `*.safetensors` weights). All checkpointing groups lazily download a
+  `gs://.../<name>` model into `/tmp/<name>` during `setup()` (via
+  `checkpointing/model_staging.py`) if safetensors are missing.
 
 - For `checkpointing/pytorch_{save,load,reshard}`, `--model-id` accepts a
   `gs://` URI or a local directory containing `*.safetensors`;
@@ -304,14 +305,15 @@ subsystembenchmarks/
 │   ├── checkpoint_case.py  # shared write/read case lifecycle
 │   ├── driver.py           # checkpoint-driver interface
 │   ├── configurator.py     # config loading for checkpoint groups
-│   ├── _dist.py            # shared gloo/nccl spawn and round reduction
+│   ├── _dist.py            # shared distributed env setup and round reduction
 │   ├── _llama_tp.py        # shared LLaMA tensor-parallel plan
-│   ├── pytorch/            # shared DCP library (device, layout, model, parallelize, planners, reference, state, read/, write/)
+│   ├── model_staging.py    # lazy atomic GCS-to-/tmp model weight staging
+│   ├── pytorch/            # shared DCP library (_worker, layout, model, parallelize, planners, reference, state, read/, write/)
 │   ├── pytorch_save/       # runnable DCP save group
 │   ├── pytorch_load/       # runnable same-layout DCP load group
 │   ├── pytorch_reshard/    # runnable cross-layout DCP reshard group
-│   ├── pytorch_lightning/  # also common.py
-│   └── ray_pytorch/        # also common.py
+│   ├── pytorch_lightning/  # also common.py, _worker.py
+│   └── ray_pytorch/        # also common.py, _worker.py
 └── tests/
 ```
 

@@ -19,7 +19,6 @@ from transformers import AutoModelForCausalLM  # noqa: E402
 
 import gcsfs  # noqa: E402
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (  # noqa: E402
-    run_split,
     setup_distributed_env,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.model import (  # noqa: E402
@@ -39,6 +38,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny import (  # noqa: E402
     make_params,
+    run_test_ranks,
     tiny_model_dir,
 )
 
@@ -305,7 +305,7 @@ def _local_slice_rank(rank, world_size, port, prefix, params, q):
 
 
 def test_local_slice_reassembles_full():
-    assert run_split(None, make_params(world_size=4), _local_slice_rank, 4) == []
+    run_test_ranks(None, make_params(world_size=4), _local_slice_rank, 4)
 
 
 def test_stage_model_downloads_missing_weights(tmp_path, monkeypatch):
@@ -464,7 +464,7 @@ def test_weights_shared_with_spawned_ranks(tmp_path):
     model_path = tiny_model_dir(tmp_path, num_layers=2)
     with load_weights(model_path) as weights:
         target = functools.partial(_shared_weights_rank, weights=weights)
-        assert run_split(None, make_params(model_path, world_size=2), target, 2) == []
+        run_test_ranks(None, make_params(model_path, world_size=2), target, 2)
 
 
 def test_random_local_matches_full_slice_with_local_storage():

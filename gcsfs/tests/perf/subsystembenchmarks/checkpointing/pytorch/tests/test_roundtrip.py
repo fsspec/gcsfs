@@ -220,9 +220,9 @@ def _drop_first_tensor_on_rank0(
 def test_reshard_detects_skipped_item(tmp_path, tiny_models):
     import functools
 
-    from torch.multiprocessing.spawn import ProcessRaisedException
-
-    from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import run_split
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny import (
+        run_test_ranks,
+    )
 
     params = make_params(
         tiny_models["llama"],
@@ -237,20 +237,20 @@ def test_reshard_detects_skipped_item(tmp_path, tiny_models):
 
     result_file = tmp_path / "load_result.json"
     with pytest.raises(
-        (ProcessRaisedException, RuntimeError),
+        RuntimeError,
         match=(
             r"RuntimeError: rank 0: ("
             r"DCP requested \d+ tensor bytes, expected \d+|"
             r"value mismatch in \d+ entries, e\.g\. \S+)"
         ),
     ):
-        run_split(
+        run_test_ranks(
             prefix,
             params,
             functools.partial(
                 _drop_first_tensor_on_rank0, result_file=str(result_file)
             ),
-            world_size_override=2,
+            2,
         )
 
     # result.json is written BEFORE assert_loaded_state so monitor window excludes verify.

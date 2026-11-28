@@ -7,17 +7,22 @@ import time
 import ray
 import torch.distributed as dist
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
-    find_free_port,
     setup_distributed_env,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
     CheckpointDriver,
     CheckpointResult,
 )
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import (
+    stage_gcs_model,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch.common import (
-    ensure_ray_initialized,
+    reduce_ray_durations,
     resolve_storage,
+    run_ray_workers,
+    run_subprocess_worker,
     setup_model_and_optimizer,
     stage_checkpoint_locally,
     upload_checkpoint,
@@ -26,7 +31,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch.common impor
 
 @ray.remote(num_cpus=1)
 class RayCheckpointSaveWorker:
-    """Ray Actor executing distributed checkpoint save operations on CPU."""
+    """Ray Actor executing distributed checkpoint save operations."""
 
     def __init__(self, rank, world_size, port, prefix, params):
         self.rank = rank
@@ -36,8 +41,8 @@ class RayCheckpointSaveWorker:
         self.params = params
 
     def setup(self):
-        setup_distributed_env(self.rank, self.world_size, self.port)
-        self.model, self.optimizer = setup_model_and_optimizer(self.params)
+        self.device = setup_distributed_env(self.rank, self.world_size, self.port)
+        self.model, self.optimizer = setup_model_and_optimizer(self.params, self.device)
         self.fs, self.arrow_fs, self.base_path = resolve_storage(self.prefix)
         self.destination_ckpt = f"{self.base_path.rstrip('/')}/model.ckpt"
 
@@ -70,6 +75,7 @@ class RayCheckpointSaveWorker:
                         self.fs,
                         self.destination_ckpt,
                     )
+                    accelerator.synchronize(self.device)
                     t_end = time.perf_counter()
                     durations.append((t_start, t_end))
                 finally:
@@ -82,37 +88,27 @@ class RayCheckpointSaveWorker:
 
 def run_ray_save(prefix, params):
     """Runs single or distributed checkpoint save benchmark across Ray actor workers."""
-    ensure_ray_initialized()
     world_size = params.world_size
-    port = find_free_port()
-
-    workers = [
-        RayCheckpointSaveWorker.remote(rank, world_size, port, prefix, params)
-        for rank in range(world_size)
-    ]
-    ray.get([w.setup.remote() for w in workers])
-    results = ray.get([w.save_rounds.remote() for w in workers])
-
-    durations = []
-    for r in range(params.rounds):
-        begins = [results[rank][r][0] for rank in range(world_size)]
-        ends = [results[rank][r][1] for rank in range(world_size)]
-        durations.append(max(ends) - min(begins))
-    return durations
+    results = run_ray_workers(
+        RayCheckpointSaveWorker,
+        world_size,
+        prefix,
+        params,
+        setup_method="setup",
+        run_method="save_rounds",
+    )
+    return reduce_ray_durations(results, world_size, params.rounds)
 
 
 class RayCheckpointWriteDriver(CheckpointDriver):
     """Driver for Ray checkpoint save benchmarks."""
 
     def setup(self, prefix: str, params):
-        """No-op for checkpoint save; setup is handled per-round in run()."""
-        pass
+        """Stage GCS model weights outside the timed/monitored save window."""
+        stage_gcs_model(getattr(params, "model_id", ""))
 
     def run(self, prefix: str, params) -> CheckpointResult:
         """Executes the checkpoint save benchmark across Ray actor workers."""
-        try:
-            durations = run_ray_save(prefix, params)
-            return CheckpointResult(durations=durations)
-        finally:
-            if ray.is_initialized():
-                ray.shutdown()
+        stage_gcs_model(getattr(params, "model_id", ""))
+        data = run_subprocess_worker("save", prefix, params, expect_result=True)
+        return CheckpointResult(durations=data["durations"])
