@@ -692,6 +692,7 @@ def test_worker_single_rank_tpu_skips_set_tpu_launch_env(tmp_path, monkeypatch):
     monkeypatch.setattr(accelerator, "local_device_count", lambda: 8)
     monkeypatch.setenv("TORCH_TPU_TOPOLOGY", "stale-topo")
     monkeypatch.setenv("TORCH_TPU_DEVICES_PER_HOST", "8")
+    monkeypatch.setenv("RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS", "1")
 
     tpu_env_calls = []
     fake_tpu_dist = types.ModuleType("torch.tpu.distributed")
@@ -723,6 +724,7 @@ def test_worker_single_rank_tpu_skips_set_tpu_launch_env(tmp_path, monkeypatch):
     assert tpu_env_calls == []
     assert "TORCH_TPU_TOPOLOGY" not in os.environ
     assert "TORCH_TPU_DEVICES_PER_HOST" not in os.environ
+    assert "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS" not in os.environ
     assert events == ["init", "run", "shutdown"]
     assert json.loads(result_file.read_text())["rows"] == [20]
 

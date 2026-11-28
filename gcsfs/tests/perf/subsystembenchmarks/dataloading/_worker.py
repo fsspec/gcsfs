@@ -6,6 +6,7 @@ import argparse
 import datetime
 import importlib
 import json
+import os
 from collections.abc import Callable, Sequence
 from types import SimpleNamespace
 from typing import Any
@@ -87,6 +88,9 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+_TPU_ENV_PREFIX = "TORCH_TPU_"
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
     worker_fn = _resolve_worker(args.kind)
@@ -98,6 +102,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     extra = spec.get("extra", {})
 
     if not args.distributed:
+        for key in [k for k in os.environ if k.startswith(_TPU_ENV_PREFIX)]:
+            os.environ.pop(key, None)
         per_epoch, ttfb, build_seconds = worker_fn(0, 1, prefix, params, None, extra)
         durations = [end - begin for begin, end, _ in per_epoch]
         rows = [count for _, _, count in per_epoch]

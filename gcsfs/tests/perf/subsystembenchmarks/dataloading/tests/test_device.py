@@ -199,10 +199,7 @@ def test_rounds_stopped_at_a_target_synchronize_before_their_end_timestamp(
         assert begin < sync < end
 
 
-def test_ray_task_resources_delegates_and_skips_feature_cases(
-    on_cpu, on_gpu, on_tpu, monkeypatch
-):
-    monkeypatch.setattr(accelerator, "device_kind", lambda: "cpu")
+def test_ray_task_resources_delegates_and_skips_feature_cases(on_cpu, on_gpu, on_tpu):
     assert device_lib.ray_task_resources(8, has_features=False) == {}
     assert device_lib.ray_task_resources(8, has_features=True) == {}
 

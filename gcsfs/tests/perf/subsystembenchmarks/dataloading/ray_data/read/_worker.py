@@ -37,6 +37,7 @@ def _prepare_tpu_env(effective_ws: int) -> None:
         )
     for key in [k for k in os.environ if k.startswith(_TPU_ENV_PREFIX)]:
         os.environ.pop(key, None)
+    os.environ.pop(_RAY_NOSET_TPU_ENV, None)
     if effective_ws > 1:
         os.environ[_RAY_NOSET_TPU_ENV] = "1"
         from torch.tpu import distributed as tpu_distributed

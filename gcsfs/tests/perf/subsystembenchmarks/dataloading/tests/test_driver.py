@@ -1,6 +1,7 @@
 import dataclasses
 import json
 import math
+import os
 import sys
 import types
 
@@ -241,6 +242,52 @@ def test_worker_main_single_rank_executes_registered_kind(tmp_path, monkeypatch)
         "ttfb": 0.25,
         "build_seconds": 0.5,
     }
+
+
+def test_worker_main_single_rank_clears_inherited_torch_tpu_env(tmp_path, monkeypatch):
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import _worker
+
+    monkeypatch.setenv("TORCH_TPU_TOPOLOGY", "stale-topo")
+    monkeypatch.setenv("TORCH_TPU_SLICEBUILDER_ADDRESSES", "stale-addr")
+    monkeypatch.setenv("TORCH_TPU_DEVICES_PER_HOST", "8")
+    monkeypatch.setenv("KEEP_NON_TPU_ENV", "keep")
+
+    seen = {}
+
+    def fake_worker(rank, world_size, prefix, params, barrier, extra):
+        seen["tpu_keys"] = sorted(k for k in os.environ if k.startswith("TORCH_TPU_"))
+        seen["keep"] = os.environ.get("KEEP_NON_TPU_ENV")
+        return ([(1.0, 2.0, 4)], 0.1, 0.2)
+
+    monkeypatch.setitem(_worker._WORKERS, "mock_tpu_single", fake_worker)
+
+    spec_file = tmp_path / "spec.json"
+    result_file = tmp_path / "result.json"
+    spec_file.write_text(
+        json.dumps(
+            {
+                "prefix": "file:///data",
+                "params": {"world_size": 1, "rounds": 1},
+                "extra": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _worker.main(
+        [
+            "--kind",
+            "mock_tpu_single",
+            "--spec-file",
+            str(spec_file),
+            "--result-file",
+            str(result_file),
+        ]
+    )
+
+    assert seen["tpu_keys"] == []
+    assert seen["keep"] == "keep"
+    assert [k for k in os.environ if k.startswith("TORCH_TPU_")] == []
 
 
 def test_worker_main_distributed_uses_gloo_barrier_and_gather(tmp_path, monkeypatch):
