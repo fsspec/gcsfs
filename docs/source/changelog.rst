@@ -7,6 +7,12 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
+* ``get()`` / ``get_file()`` on Zonal and RCU buckets now honours ``consistency``
+  (``"size"``, ``"md5"`` or ``"crc32c"``, from the call or the filesystem default)
+  on single-stream gRPC downloads. A hash mismatch raises ``ChecksumError`` and
+  the local file is removed. If the object metadata has no such hash,
+  ``NotImplementedError`` is raised instead of skipping the check; this is always
+  the case for ``"md5"`` on Zonal buckets, whose objects have no MD5.
 * **gcsfs now requires** ``requests>=2.33.0`` (released 2026-03-25). Older
   releases have known security advisories (CVE-2024-35195, CVE-2024-47081 and
   CVE-2026-25645), and ``google-api-core>=2.31.0`` already requires this

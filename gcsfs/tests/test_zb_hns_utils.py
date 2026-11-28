@@ -1541,6 +1541,7 @@ async def test_extended_gcsfs_mrd_downloads_forward_accepts_memoryview(tmp_path)
         ExtendedGcsFileSystem.MIN_CHUNK_SIZE_FOR_CONCURRENCY
     )
     fs.version_aware = False
+    fs.consistency = "none"
     fs._uses_grpc_data_path = mock.AsyncMock(return_value=True)
     fs._mrd_pool_cache = mock.Mock(get=mock.AsyncMock())
 
