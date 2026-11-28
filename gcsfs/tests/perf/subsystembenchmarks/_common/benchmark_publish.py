@@ -8,17 +8,18 @@ pytest registers them.
 import os
 import statistics
 
-from gcsfs.tests.perf.subsystembenchmarks._common import env
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator, env, placement
 
 
 def pytest_benchmark_update_machine_info(config, machine_info):
     """Stamp the general environment facts attached to benchmark output."""
-    machine_info["compute_accelerator_type"] = env.detect_accelerator()
-    machine_info["distributed_backend"] = env.detect_backend()
-    machine_info["gpu_model"] = env.gpu_model()
+    machine_info["compute_accelerator_type"] = accelerator.accelerator_type()
+    machine_info["distributed_backend"] = accelerator.backend_name()
+    machine_info["gpu_model"] = accelerator.model_name()
     machine_info["machine_type"] = env.machine_type()
     machine_info["python_version"] = env.python_version()
-    machine_info["group"] = os.environ.get("GCSFS_SUBSYSTEM_GROUP", "")
+    machine_info["group"] = os.environ.get(placement.GROUP_ENV, "")
+    machine_info["nodes"] = placement.job_nodes() or 1
 
 
 def publish_round_stats(benchmark, round_durations):
@@ -56,7 +57,7 @@ def publish_resource_metrics(benchmark, monitor):
     )
 
 
-def publish_environment_metadata(benchmark):
+def publish_environment_metadata(benchmark, *, world_size=None):
     """Publish general environment facts and requirements onto benchmark extra_info."""
     from gcsfs.tests.perf.subsystembenchmarks._common.config_loader import (
         requested_sweep_axes,
@@ -65,8 +66,8 @@ def publish_environment_metadata(benchmark):
     sweep_axes = " ".join(requested_sweep_axes()) or "all"
     benchmark.extra_info.update(
         {
-            "distributed_backend": env.detect_backend(),
-            "compute_accelerator_type": env.detect_accelerator(),
+            "distributed_backend": accelerator.backend_name(world_size),
+            "compute_accelerator_type": accelerator.accelerator_type(),
             "machine_type": env.machine_type(),
             "benchmark_source_commit_sha": env.benchmark_source_commit_sha(),
             "requirements_override": os.environ.get(
@@ -82,7 +83,10 @@ def publish_environment_metadata(benchmark):
 
 def publish_case_metadata(benchmark, params, window_start, window_end):
     """Publish shared environment facts and common benchmark case parameters."""
-    publish_environment_metadata(benchmark)
+    world_size = getattr(params, "world_size", None)
+    if world_size is None and hasattr(params, "target_layout"):
+        world_size = params.target_layout().world_size
+    publish_environment_metadata(benchmark, world_size=world_size)
 
     benchmark.group = params.scenario
     benchmark.extra_info.update(

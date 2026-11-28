@@ -2,9 +2,7 @@ import os
 
 import pytest
 
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.configs import (
-    case_params,
-)
+from gcsfs.tests.perf.subsystembenchmarks._common import placement
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_reshard import configs
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_reshard.configs import (
     PyTorchReshardConfigurator,
@@ -20,7 +18,11 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.mark.timeout(7200)
 @pytest.mark.parametrize(
-    "params", case_params(PyTorchReshardConfigurator, configs.__file__)
+    "params",
+    placement.select(
+        PyTorchReshardConfigurator(configs.__file__).generate_cases(),
+        group="checkpointing/pytorch_reshard",
+    ),
 )
 def test_checkpoint_reshard(benchmark, params, monitor):
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing.checkpoint_case import (

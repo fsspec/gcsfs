@@ -142,7 +142,7 @@ def test_scrape_amplification_skips_write_only_csv(tmp_path, monkeypatch):
     monkeypatch.setattr(
         time,
         "sleep",
-        lambda s: (_ for _ in ()).throw(AssertionError(f"unexpected sleep({s})")),
+        lambda s: pytest.fail(f"unexpected sleep({s})"),
     )
 
     assert run._scrape_amplification(csv_path, args) is None
@@ -368,20 +368,21 @@ def test_parse_args_device_sets_env(monkeypatch, capsys):
         monkeypatch.delenv(key, raising=False)
 
     default_args = run.parse_args(["--group=checkpointing/pytorch_load"] + _REQUIRED)
-    assert default_args.device == "cpu"
+    assert default_args.device == "auto"
     run._setup_environment(default_args)
-    assert os.environ["GCSFS_SUBSYSTEM_DEVICE"] == "cpu"
+    assert os.environ["GCSFS_SUBSYSTEM_DEVICE"] == "auto"
 
-    cuda_args = run.parse_args(
-        ["--group=checkpointing/pytorch_load", "--device=cuda"] + _REQUIRED
-    )
-    assert cuda_args.device == "cuda"
-    run._setup_environment(cuda_args)
-    assert os.environ["GCSFS_SUBSYSTEM_DEVICE"] == "cuda"
+    for dev in ("cpu", "cuda", "tpu"):
+        dev_args = run.parse_args(
+            ["--group=checkpointing/pytorch_load", f"--device={dev}"] + _REQUIRED
+        )
+        assert dev_args.device == dev
+        run._setup_environment(dev_args)
+        assert os.environ["GCSFS_SUBSYSTEM_DEVICE"] == dev
 
     with pytest.raises(SystemExit):
         run.parse_args(
-            ["--group=checkpointing/pytorch_load", "--device=tpu"] + _REQUIRED
+            ["--group=checkpointing/pytorch_load", "--device=xpu"] + _REQUIRED
         )
     assert "--device" in capsys.readouterr().err
 
@@ -497,3 +498,403 @@ def test_parse_args_allows_read_and_mixed_groups_on_rcu_warm_and_cold(
         + _REQUIRED
     )
     assert args.group == group
+
+
+def test_run_exits_nonzero_when_nodes_selects_nothing(monkeypatch, tmp_path):
+    monkeypatch.setattr(run.cli, "run_suite", lambda *a, **kw: (5, None))
+    with mock.patch.dict(os.environ, {}, clear=False):
+        with pytest.raises(SystemExit) as exc:
+            run.main(
+                [
+                    "--group=dataloading/huggingface_datasets",
+                    "--nodes=2",
+                    "--devices-per-node=8",
+                    f"--results-dir={tmp_path}",
+                ]
+                + _REQUIRED
+            )
+    assert exc.value.code == 2
+
+
+def test_main_all_skipped_exits_zero(monkeypatch, tmp_path):
+    monkeypatch.setattr(run.cli, "run_suite", lambda *a, **kw: (0, None))
+    with mock.patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("GCSFS_SUBSYSTEM_NODES", None)
+        with pytest.raises(SystemExit) as exc:
+            run.main(
+                [
+                    "--group=checkpointing/pytorch_lightning",
+                    f"--results-dir={tmp_path}",
+                ]
+                + _REQUIRED
+            )
+    assert exc.value.code == 0
+
+
+def test_list_node_counts_prints_json_without_bucket_args(monkeypatch, capsys):
+    monkeypatch.setattr(
+        run.cli, "collect_node_counts", lambda suite_dir, filter_expr=None: [1, 2]
+    )
+    with mock.patch.dict(os.environ, {}, clear=False):
+        with pytest.raises(SystemExit) as exc:
+            run.main(
+                [
+                    "--group=checkpointing/pytorch_save",
+                    "--list-node-counts",
+                    "--devices-per-node=8",
+                ]
+            )
+    assert exc.value.code == 0
+    assert json.loads(capsys.readouterr().out) == [1, 2]
+
+
+def test_main_follower_skips_amplification_and_table(monkeypatch, tmp_path):
+    from gcsfs.tests.perf.subsystembenchmarks._common import nodes
+
+    monkeypatch.setattr(run.cli, "run_suite", lambda *a, **kw: (0, None))
+    monkeypatch.setattr(
+        run,
+        "_scrape_amplification",
+        lambda *a, **kw: pytest.fail("follower scraped amp"),
+    )
+    monkeypatch.setattr(
+        run.report,
+        "print_csv_to_shell",
+        lambda *a, **kw: pytest.fail("follower printed csv"),
+    )
+    with mock.patch.dict(
+        os.environ,
+        {nodes.NODE_RANK_ENV: "1", nodes.LEADER_ADDR_ENV: "pod-0.svc"},
+        clear=False,
+    ):
+        with pytest.raises(SystemExit) as exc:
+            run.main(
+                [
+                    "--group=checkpointing/pytorch_save",
+                    "--nodes=2",
+                    "--devices-per-node=8",
+                    f"--results-dir={tmp_path}",
+                ]
+                + _REQUIRED
+            )
+    assert exc.value.code == 0
+
+
+def test_run_exits_nonzero_when_nodes_selects_nothing_end_to_end(tmp_path, caplog):
+    """Real pytest collection with zero matching cases must exit 2."""
+    from gcsfs.tests.perf.subsystembenchmarks._common import nodes, placement
+
+    with caplog.at_level("ERROR"):
+        with mock.patch.dict(
+            os.environ,
+            {nodes.NODE_RANK_ENV: "0", nodes.LEADER_ADDR_ENV: "127.0.0.1"},
+            clear=False,
+        ):
+            os.environ.pop(placement.COLLECTED_CASES_FILE_ENV, None)
+            with pytest.raises(SystemExit) as exc:
+                run.main(
+                    [
+                        "--group=dataloading/huggingface_datasets",
+                        "--nodes=99",
+                        "--devices-per-node=8",
+                        f"--results-dir={tmp_path}",
+                    ]
+                    + _REQUIRED
+                )
+    assert exc.value.code == 2
+    assert "no cases need 99 node(s)" in caplog.text
+    assert not (tmp_path / "results.csv").exists()
+
+
+def test_list_node_counts_respects_bucket_type_and_rcu_write_check(capsys):
+    with mock.patch.dict(os.environ, {}, clear=False):
+        with pytest.raises(SystemExit) as exc:
+            run.main(
+                [
+                    "--group=dataloading/webdataset",
+                    "--list-node-counts",
+                    "--devices-per-node=8",
+                    "--bucket-type=zonal",
+                    "--filter=zon",
+                ]
+            )
+    assert exc.value.code == 0
+    assert json.loads(capsys.readouterr().out) == [1]
+
+    with pytest.raises(SystemExit) as exc:
+        run.main(
+            [
+                "--group=checkpointing/pytorch_save",
+                "--list-node-counts",
+                "--devices-per-node=8",
+                "--bucket-type=standard_rcu_warm",
+            ]
+        )
+    assert exc.value.code != 0
+    assert "only write scenarios" in capsys.readouterr().err
+
+
+def test_list_cases_reports_id_and_nodes(capsys):
+    pytest.importorskip("torch")
+    with mock.patch.dict(os.environ, {}, clear=False):
+        with pytest.raises(SystemExit) as exc:
+            run.main(
+                [
+                    "--group=checkpointing/pytorch_save",
+                    "--list-cases",
+                    "--devices-per-node=8",
+                ]
+            )
+    assert exc.value.code == 0
+    entries = json.loads(capsys.readouterr().out)
+    assert entries
+    assert all(isinstance(e["id"], str) and e["nodes"] in (1, 2) for e in entries)
+    ws16 = [e for e in entries if e["nodes"] == 2]
+    assert len(ws16) == 1
+    assert "ws16" in ws16[0]["id"]
+
+
+def test_cases_selects_exact_ids_only(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run_suite(suite_dir, results_dir, filter_expr=None):
+        seen["cases"] = os.environ.get("GCSFS_SUBSYSTEM_CASES")
+        return 0, None
+
+    monkeypatch.setattr(run.cli, "run_suite", fake_run_suite)
+    with mock.patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("GCSFS_SUBSYSTEM_NODES", None)
+        with pytest.raises(SystemExit) as exc:
+            run.main(
+                [
+                    "--group=dataloading/webdataset",
+                    "--cases",
+                    "idA idB",
+                    f"--results-dir={tmp_path}",
+                ]
+                + _REQUIRED
+            )
+    assert exc.value.code == 0
+    assert seen["cases"] == "idA idB"
+
+
+def test_cases_unknown_id_is_usage_error():
+    suite_dir = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "dataloading", "webdataset"
+    )
+    collect_cmd = [sys.executable, "-m", "pytest"] + run.cli.build_collect_args(
+        suite_dir
+    )
+    env = os.environ.copy()
+    env["GCSFS_SUBSYSTEM_CASES"] = "no-such-case"
+    env["GCSFS_SUBSYSTEM_BUCKET_PREFIX"] = "listing"
+    proc = subprocess.run(
+        collect_cmd,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 4
+    assert "unknown case id(s): no-such-case" in (proc.stdout + proc.stderr)
+
+    # Positive check: selecting one exact case id keeps only that case.
+    all_cases = run.cli.collect_cases(suite_dir)
+    assert len(all_cases) > 1
+    first_id = all_cases[0]["id"]
+    env["GCSFS_SUBSYSTEM_CASES"] = first_id
+    proc_ok = subprocess.run(
+        collect_cmd,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc_ok.returncode == 0, proc_ok.stdout + proc_ok.stderr
+    collected = [line for line in proc_ok.stdout.splitlines() if "::test_" in line]
+    assert len(collected) == 1 and f"[{first_id}]" in collected[0], collected
+
+
+def test_collect_node_counts_derived_from_cases(monkeypatch):
+    monkeypatch.setattr(
+        run.cli,
+        "collect_cases",
+        lambda suite_dir, filter_expr=None: [
+            {"id": "a", "nodes": 1},
+            {"id": "b", "nodes": 2},
+            {"id": "c", "nodes": 1},
+        ],
+    )
+    assert run.cli.collect_node_counts("unused") == [1, 2]
+
+
+def test_collect_cases_raises_on_unmatched_filter():
+    suite_dir = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "dataloading", "webdataset"
+    )
+    with pytest.raises(RuntimeError, match="rc=5"):
+        run.cli.collect_cases(suite_dir, filter_expr="no_such_case_xyz")
+
+
+def test_collect_cases_returns_empty_when_all_cases_skipped_by_limitation():
+    pytest.importorskip("lightning")
+    pl_dir = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "checkpointing",
+        "pytorch_lightning",
+    )
+    with mock.patch.dict(
+        os.environ,
+        {
+            "GCSFS_SUBSYSTEM_DEVICE": "tpu",
+            "GCSFS_SUBSYSTEM_DEVICES_PER_NODE": "8",
+        },
+        clear=False,
+    ):
+        assert run.cli.collect_cases(pl_dir) == []
+
+
+def _fake_pytest_run(outcome, monkeypatch, *, write_json=False):
+    """Stub the pytest subprocess in cli.run_suite, writing ``outcome`` like conftest."""
+    from gcsfs.tests.perf.subsystembenchmarks._common import placement
+
+    def fake_run(cmd, env=None, text=None):
+        with open(env[placement.OUTCOME_FILE_ENV], "w") as f:
+            json.dump(outcome, f)
+        if write_json:
+            json_arg = next(a for a in cmd if a.startswith("--benchmark-json="))
+            with open(json_arg.split("=", 1)[1], "w") as f:
+                json.dump({"benchmarks": [{"name": "c", "stats": {}}]}, f)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(run.cli.subprocess, "run", fake_run)
+
+
+_LIMITED = {"passed": 0, "failed": 0, "limitation_skipped": 3, "other_skipped": 0}
+
+
+@pytest.mark.parametrize(
+    "outcome, expected_rc",
+    [
+        (_LIMITED, 0),
+        ({**_LIMITED, "limitation_skipped": 0, "other_skipped": 3}, 1),
+        ({**_LIMITED, "other_skipped": 1}, 1),
+        ({**_LIMITED, "limitation_skipped": 0, "passed": 2}, 1),
+    ],
+)
+def test_run_suite_fails_clean_exit_without_rows_unless_limited(
+    monkeypatch, tmp_path, outcome, expected_rc
+):
+    from gcsfs.tests.perf.subsystembenchmarks._common import placement
+
+    monkeypatch.delenv(placement.NODES_ENV, raising=False)
+    _fake_pytest_run(outcome, monkeypatch)
+    assert run.cli.run_suite("suite", str(tmp_path)) == (expected_rc, None)
+    assert not (tmp_path / "outcome.json").exists()
+
+
+def test_run_suite_keeps_rc_when_rows_written(monkeypatch, tmp_path):
+    from gcsfs.tests.perf.subsystembenchmarks._common import placement
+
+    monkeypatch.delenv(placement.NODES_ENV, raising=False)
+    _fake_pytest_run({**_LIMITED, "passed": 1}, monkeypatch, write_json=True)
+    rc, csv_path = run.cli.run_suite("suite", str(tmp_path))
+    assert rc == 0 and csv_path == str(tmp_path / "results.csv")
+
+
+def test_build_pytest_args_exitfirst():
+    from gcsfs.tests.perf.subsystembenchmarks._common.cli import build_pytest_args
+
+    default_args = build_pytest_args("/path/to/suite", "/path/to/results.json")
+    assert "-x" not in default_args
+
+    exitfirst_args = build_pytest_args(
+        "/path/to/suite", "/path/to/results.json", exitfirst=True
+    )
+    assert "-x" in exitfirst_args
+
+
+@pytest.mark.parametrize(
+    "env_vars, expect_exitfirst, expect_benchmark_disable",
+    [
+        ({}, False, False),
+        (
+            {
+                "GCSFS_SUBSYSTEM_NODES": "2",
+                "GCSFS_SUBSYSTEM_NODE_RANK": "0",
+                "GCSFS_SUBSYSTEM_LEADER_ADDR": "pod-0.svc",
+            },
+            True,
+            False,
+        ),
+        (
+            {
+                "GCSFS_SUBSYSTEM_NODES": "2",
+                "GCSFS_SUBSYSTEM_NODE_RANK": "1",
+                "GCSFS_SUBSYSTEM_LEADER_ADDR": "pod-0.svc",
+            },
+            True,
+            True,
+        ),
+    ],
+)
+def test_run_suite_passes_exitfirst_only_on_multi_node(
+    monkeypatch, tmp_path, env_vars, expect_exitfirst, expect_benchmark_disable
+):
+    from gcsfs.tests.perf.subsystembenchmarks._common import nodes, placement
+
+    for key in (
+        placement.NODES_ENV,
+        nodes.NODE_RANK_ENV,
+        nodes.LEADER_ADDR_ENV,
+    ):
+        monkeypatch.delenv(key, raising=False)
+    for key, val in env_vars.items():
+        monkeypatch.setenv(key, val)
+
+    seen_cmds = []
+
+    def fake_run(cmd, env=None, text=None):
+        seen_cmds.append(cmd)
+        with open(env[placement.OUTCOME_FILE_ENV], "w") as f:
+            json.dump({**_LIMITED, "passed": 1}, f)
+        if not expect_benchmark_disable:
+            json_arg = next(a for a in cmd if a.startswith("--benchmark-json="))
+            with open(json_arg.split("=", 1)[1], "w") as f:
+                json.dump({"benchmarks": [{"name": "c", "stats": {}}]}, f)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(run.cli.subprocess, "run", fake_run)
+    rc, _ = run.cli.run_suite("suite", str(tmp_path))
+    assert rc == 0
+    assert len(seen_cmds) == 1
+    assert ("-x" in seen_cmds[0]) is expect_exitfirst
+    assert ("--benchmark-disable" in seen_cmds[0]) is expect_benchmark_disable
+
+
+def test_run_suite_follower_without_rows_is_not_a_failure(monkeypatch, tmp_path):
+    from gcsfs.tests.perf.subsystembenchmarks._common import nodes, placement
+
+    monkeypatch.setenv(placement.NODES_ENV, "2")
+    monkeypatch.setenv(nodes.NODE_RANK_ENV, "1")
+    monkeypatch.setenv(nodes.LEADER_ADDR_ENV, "pod-0.svc")
+    _fake_pytest_run({**_LIMITED, "limitation_skipped": 0, "passed": 1}, monkeypatch)
+    assert run.cli.run_suite("suite", str(tmp_path)) == (0, None)
+
+
+def test_main_fails_when_every_case_is_skipped_for_capacity(tmp_path, caplog):
+    """Real pytest run: a host too small for every case must not exit 0."""
+    pytest.importorskip("webdataset")
+    with caplog.at_level("ERROR"), mock.patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("GCSFS_SUBSYSTEM_NODES", None)
+        with pytest.raises(SystemExit) as exc:
+            run.main(
+                [
+                    "--group=dataloading/webdataset",
+                    "--device=cpu",
+                    "--devices-per-node=1",
+                    "--sweep-axes=baseline",
+                    f"--results-dir={tmp_path}",
+                ]
+                + _REQUIRED
+            )
+    assert exc.value.code == 1
+    assert "no benchmark rows written" in caplog.text

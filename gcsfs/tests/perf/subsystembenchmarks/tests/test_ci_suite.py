@@ -4,6 +4,7 @@ The CI suite exists to catch framework-lifecycle bugs (#1009, #1025, #1031, #110
 shrunken configs must keep the lifecycle features those bugs needed.
 """
 
+import glob
 import importlib
 import itertools
 import os
@@ -580,9 +581,11 @@ def test_setup_stages_model_for_legacy_checkpoint_groups_only(tmp_path):
         setup_text = f.read()
 
     stage_block = setup_text.split(
-        'pip install -r "gcsfs/tests/perf/subsystembenchmarks/$GROUP/requirements.txt" >/dev/null\n',
+        "pip install -e . >/dev/null\n",
         1,
-    )[1].split('\nread -r -a REQUIREMENT_SPECS <<< "$REQUIREMENTS_OVERRIDE"', 1)[0]
+    )[1].split(
+        '\nread -r -a REQUIREMENT_SPECS <<< "$REQUIREMENTS_OVERRIDE"', 1
+    )[0]
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -640,3 +643,43 @@ def test_setup_stages_model_for_legacy_checkpoint_groups_only(tmp_path):
     for dcp_group in ("checkpointing/pytorch", "checkpointing/pytorch_load"):
         dcp_calls, _ = run_stage(dcp_group, "gs://custom/model")
         assert dcp_calls == []
+
+
+def test_group_requirements_exclude_torch_pin_and_cpu_requirements_pins_torch():
+    ssb = os.path.join(_REPO_ROOT, "gcsfs", "tests", "perf", "subsystembenchmarks")
+    cpu_req = os.path.join(ssb, "requirements-cpu.txt")
+    assert os.path.isfile(cpu_req)
+    assert "torch==2.15.0" in open(cpu_req).read().splitlines()
+
+    req_files = glob.glob(os.path.join(ssb, "*", "*", "requirements*.txt"))
+    assert req_files
+    for path in req_files:
+        lines = [
+            line.strip().lower()
+            for line in open(path).read().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        assert not any(re.match(r"^torch\b", line) for line in lines), path
+
+
+def test_setup_and_run_ci_install_cpu_torch_and_gcsfs_last():
+    install_group = os.path.join(
+        _REPO_ROOT, "cloudbuild", "subsystembenchmarks", "scripts", "install-group.sh"
+    )
+    assert not os.path.exists(install_group)
+
+    setup_text = open(
+        os.path.join(
+            _REPO_ROOT, "cloudbuild", "subsystembenchmarks", "scripts", "setup.sh"
+        )
+    ).read()
+    assert "install-group.sh" not in setup_text
+    assert "requirements-cpu.txt" in setup_text
+    assert setup_text.index("requirements.txt") < setup_text.index("pip install -e .")
+
+    ci_text = open(
+        os.path.join(
+            _REPO_ROOT, "cloudbuild", "subsystembenchmarks", "scripts", "run-ci.sh"
+        )
+    ).read()
+    assert '-r "$SSB/requirements-cpu.txt"' in ci_text

@@ -2,6 +2,7 @@ import os
 
 import pytest
 
+from gcsfs.tests.perf.subsystembenchmarks._common import placement
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_lightning import configs
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_lightning.configs import (
     PyTorchLightningCheckpointConfigurator,
@@ -23,7 +24,9 @@ CASES = [
 
 
 @pytest.mark.timeout(7200)
-@pytest.mark.parametrize("params", CASES, ids=lambda p: p.name)
+@pytest.mark.parametrize(
+    "params", placement.select(CASES, group="checkpointing/pytorch_lightning")
+)
 def test_checkpoint_save(benchmark, params, monitor):
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing.checkpoint_case import (
         run_checkpoint_case,

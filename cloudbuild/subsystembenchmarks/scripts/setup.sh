@@ -15,8 +15,10 @@ pip install --upgrade pip >/dev/null
 if [[ ! -d .git ]]; then
   export SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0"
 fi
+pip install -r "gcsfs/tests/perf/subsystembenchmarks/requirements-cpu.txt" \
+  -r "gcsfs/tests/perf/subsystembenchmarks/$GROUP/requirements.txt" >/dev/null
+# Install local editable gcsfs last so its fsspec floor wins over framework caps.
 pip install -e . >/dev/null
-pip install -r "gcsfs/tests/perf/subsystembenchmarks/$GROUP/requirements.txt" >/dev/null
 
 if [[ "${GROUP}" == "checkpointing/pytorch_lightning" || "${GROUP}" == "checkpointing/ray_pytorch" ]]; then
   STAGE_MODEL_ID="${MODEL_ID:-}"

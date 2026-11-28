@@ -39,6 +39,9 @@ class ReadParameters:
     LOADER_TAG = "base"
     # Format to case ID token mapping for loader-supported formats.
     FMT_TAGS = {}
+    # GPU ranks share devices (rank % gpu_count, fractional Ray GPUs), so placement
+    # never skips a dataloading case for having more ranks than GPUs.
+    GPU_RANKS_SHARE_DEVICES = True
 
     name: str
     bucket_name: str
@@ -85,6 +88,9 @@ class ReadParameters:
     def extra_columns(self):
         """Loader-specific CSV columns (merged onto shared columns by runner)."""
         return {}
+
+    def max_world_size(self) -> int:
+        return self.world_size
 
     def benchmark_name(self):
         """Stable, param-encoding pytest-benchmark id using swept values."""

@@ -1,11 +1,26 @@
 import argparse
 import glob
+import json
 import logging
 import os
 from datetime import datetime
 
-from gcsfs.tests.perf.subsystembenchmarks._common import cli, report
-from gcsfs.tests.perf.subsystembenchmarks.dataloading.bucket import BUCKET_TYPES
+import pytest
+
+from gcsfs.tests.perf.subsystembenchmarks._common import (
+    accelerator,
+    cli,
+    config_loader,
+    nodes,
+    placement,
+    preflight,
+    report,
+)
+from gcsfs.tests.perf.subsystembenchmarks.dataloading.bucket import (
+    BUCKET_TYPES,
+    BucketSpec,
+    bucket_kwargs,
+)
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.rapid_cache import (
     RAPID_CACHE_BUCKET_TYPES,
 )
@@ -25,18 +40,32 @@ def discover_groups():
 
 
 def _setup_environment(args):
-    """Export the per-case bucket configuration consumed by dataloading."""
-    os.environ["GCSFS_SUBSYSTEM_BUCKET_PREFIX"] = args.bucket_prefix
-    os.environ["GCSFS_SUBSYSTEM_BUCKET_TYPE"] = args.bucket_type
-    os.environ["GCSFS_SUBSYSTEM_PROJECT"] = args.project
-    os.environ["GCSFS_SUBSYSTEM_LOCATION"] = args.location
-    os.environ["GCSFS_SUBSYSTEM_ZONE"] = args.zone or ""
+    """Export the per-case bucket and placement configuration consumed by benchmarks."""
     os.environ["GCSFS_SUBSYSTEM_SWEEP_AXES"] = args.sweep_axes
-    os.environ["GCSFS_SUBSYSTEM_DEVICE"] = args.device
+    os.environ[accelerator.DEVICE_ENV] = args.device
     if args.model_id:
         os.environ["GCSFS_SUBSYSTEM_MODEL_ID"] = args.model_id
     else:
         os.environ.pop("GCSFS_SUBSYSTEM_MODEL_ID", None)
+    if args.nodes is not None:
+        os.environ[placement.NODES_ENV] = str(args.nodes)
+    else:
+        os.environ.pop(placement.NODES_ENV, None)
+    if args.devices_per_node is not None:
+        os.environ[placement.DEVICES_PER_NODE_ENV] = str(args.devices_per_node)
+    else:
+        os.environ.pop(placement.DEVICES_PER_NODE_ENV, None)
+    if args.cases:
+        os.environ[placement.CASES_ENV] = args.cases
+    else:
+        os.environ.pop(placement.CASES_ENV, None)
+    os.environ["GCSFS_SUBSYSTEM_BUCKET_TYPE"] = args.bucket_type
+    if args.list_node_counts or args.list_cases:
+        return
+    os.environ["GCSFS_SUBSYSTEM_BUCKET_PREFIX"] = args.bucket_prefix
+    os.environ["GCSFS_SUBSYSTEM_PROJECT"] = args.project
+    os.environ["GCSFS_SUBSYSTEM_LOCATION"] = args.location
+    os.environ["GCSFS_SUBSYSTEM_ZONE"] = args.zone or ""
     os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
     os.environ["STORAGE_EMULATOR_HOST"] = "https://storage.googleapis.com"
     if rcu_state(args.bucket_type) == "z":
@@ -63,16 +92,16 @@ def _build_parser():
         help="pytest -k filter expression to limit case execution",
     )
     parser.add_argument(
+        "--cases",
+        default="",
+        help="whitespace-separated exact case IDs to execute",
+    )
+    parser.add_argument(
         "--bucket-prefix",
-        required=True,
         help="name prefix for the per-case buckets this run creates",
     )
-    parser.add_argument(
-        "--project", required=True, help="GCP project owning buckets and metrics"
-    )
-    parser.add_argument(
-        "--location", required=True, help="bucket region, e.g. us-central1"
-    )
+    parser.add_argument("--project", help="GCP project owning buckets and metrics")
+    parser.add_argument("--location", help="bucket region, e.g. us-central1")
     parser.add_argument(
         "--bucket-type",
         choices=BUCKET_TYPES,
@@ -91,9 +120,36 @@ def _build_parser():
     )
     parser.add_argument(
         "--device",
-        choices=("cpu", "cuda"),
-        default="cpu",
-        help="execution device for benchmarks that support CPU/CUDA selection",
+        choices=accelerator.DEVICES,
+        default="auto",
+        help="execution device (auto detects gpu/tpu/cpu)",
+    )
+    parser.add_argument(
+        "--nodes",
+        type=int,
+        default=None,
+        help="number of nodes in the job (>= 1); selects only cases needing this count",
+    )
+    parser.add_argument(
+        "--devices-per-node",
+        type=int,
+        default=None,
+        help="accelerators per node (>= 1) used for case sizing and node selection",
+    )
+    parser.add_argument(
+        "--list-node-counts",
+        action="store_true",
+        help="print JSON list of distinct node counts needed by the group and exit",
+    )
+    parser.add_argument(
+        "--list-cases",
+        action="store_true",
+        help="print JSON list of enabled cases ({id, nodes}) and exit",
+    )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="verify GCS bucket create/delete and model read permissions before running",
     )
     parser.add_argument(
         "--amplification-wait",
@@ -124,6 +180,35 @@ def _build_parser():
 def parse_args(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.nodes is not None and args.nodes < 1:
+        parser.error("--nodes must be >= 1")
+    if args.devices_per_node is not None and args.devices_per_node < 1:
+        parser.error("--devices-per-node must be >= 1")
+    groups = discover_groups()
+    if args.group not in groups:
+        parser.error(f"unknown --group {args.group!r}; available: {', '.join(groups)}")
+    if rcu_state(args.bucket_type) in ("warm", "cold"):
+        group_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), args.group)
+        scenarios = config_loader.load_group_config(group_dir).get("scenarios") or []
+        if scenarios and all("write" in s.get("scenario", "") for s in scenarios):
+            parser.error(
+                f"--group={args.group} has only write scenarios, which are "
+                f"skipped on --bucket-type={args.bucket_type} "
+                "(use *_rcu_z for RCU checkpoint saves)"
+            )
+    if args.list_node_counts or args.list_cases:
+        return args
+    missing = [
+        flag
+        for flag, val in (
+            ("--bucket-prefix", args.bucket_prefix),
+            ("--project", args.project),
+            ("--location", args.location),
+        )
+        if not val
+    ]
+    if missing:
+        parser.error(f"the following arguments are required: {', '.join(missing)}")
     zone_types = ("zonal", *RAPID_CACHE_BUCKET_TYPES, *RCU_BUCKET_TYPES)
     if args.bucket_type in zone_types and not args.zone:
         parser.error(f"--zone is required when --bucket-type={args.bucket_type}")
@@ -131,25 +216,6 @@ def parse_args(argv=None):
         parser.error("--amplification-wait must be >= 0")
     if args.amplification_retry_wait < 0:
         parser.error("--amplification-retry-wait must be >= 0")
-    groups = discover_groups()
-    if args.group not in groups:
-        parser.error(f"unknown --group {args.group!r}; available: {', '.join(groups)}")
-    if rcu_state(args.bucket_type) in ("warm", "cold"):
-        import yaml
-
-        config_name = os.environ.get("GCSFS_SUBSYSTEM_CONFIG") or "configs.yaml"
-        config_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), args.group, config_name
-        )
-        if os.path.isfile(config_path):
-            with open(config_path) as f:
-                scenarios = (yaml.safe_load(f) or {}).get("scenarios") or []
-            if scenarios and all("write" in s.get("scenario", "") for s in scenarios):
-                parser.error(
-                    f"--group={args.group} has only write scenarios, which are "
-                    f"skipped on --bucket-type={args.bucket_type} "
-                    "(use *_rcu_z for RCU checkpoint saves)"
-                )
     return args
 
 
@@ -216,8 +282,29 @@ def _scrape_amplification(csv_path, args):
 def main(argv=None):
     args = parse_args(argv)
     _setup_environment(args)
-    os.environ["GCSFS_SUBSYSTEM_GROUP"] = args.group
+    os.environ[placement.GROUP_ENV] = args.group
     suite_dir = os.path.join(os.path.dirname(__file__), args.group)
+    if args.list_cases:
+        cases = cli.collect_cases(suite_dir, filter_expr=args.filter)
+        print(json.dumps(cases))
+        raise SystemExit(0)
+    if args.list_node_counts:
+        counts = cli.collect_node_counts(suite_dir, filter_expr=args.filter)
+        print(json.dumps(counts))
+        raise SystemExit(0)
+    if args.preflight:
+        node_group = nodes.NodeGroup.from_env()
+        if node_group is None or node_group.is_leader:
+            model_ids = preflight.config_model_ids(
+                suite_dir, model_id_override=args.model_id
+            )
+            preflight.check(
+                args.project,
+                args.location,
+                args.bucket_prefix,
+                model_ids,
+                bucket_kwargs=bucket_kwargs(BucketSpec.from_env()),
+            )
     if args.results_dir:
         results_dir = args.results_dir
     else:
@@ -226,9 +313,32 @@ def main(argv=None):
     os.makedirs(results_dir, exist_ok=True)
 
     rc, csv_path = cli.run_suite(suite_dir, results_dir, filter_expr=args.filter)
+    if rc == pytest.ExitCode.NO_TESTS_COLLECTED:
+        if args.nodes is not None:
+            logging.error("no cases need %s node(s) in %s", args.nodes, args.group)
+        else:
+            logging.error("no benchmark cases collected by group %s", args.group)
+        raise SystemExit(2)
+    node_group = nodes.NodeGroup.from_env()
+    if node_group is not None and not node_group.is_leader:
+        logging.info(
+            "subsystembenchmarks follower node_rank=%s finished rc=%s",
+            node_group.node_rank,
+            rc,
+        )
+        raise SystemExit(rc)
     if csv_path is None:
+        if rc == 0:
+            # cli.run_suite fails a clean exit without rows unless every case was
+            # skipped by a known limitation (_common/limitations.py).
+            logging.info(
+                "every selected case in group %s is skipped by a known limitation; "
+                "exiting cleanly",
+                args.group,
+            )
+            raise SystemExit(0)
         logging.error("no benchmark results produced by group %s", args.group)
-        raise SystemExit(rc or 1)
+        raise SystemExit(rc)
     _scrape_amplification(csv_path, args)
     report.print_csv_to_shell(csv_path)
     logging.info("subsystembenchmarks run rc=%s csv=%s", rc, csv_path)
