@@ -270,7 +270,8 @@ def _location(use_mtls_endpoint=False):
     _emulator_location = os.getenv("STORAGE_EMULATOR_HOST", "")
     if _emulator_location not in {"default", "", None}:
         if not any(
-            _emulator_location.startswith(scheme) for scheme in ("http://", "https://")
+            _emulator_location.lower().startswith(scheme)
+            for scheme in ("http://", "https://")
         ):
             _emulator_location = f"http://{_emulator_location}"
         return _emulator_location

@@ -1957,9 +1957,14 @@ async def test_async_grpc_client_init_quota_project(
     Verifies that ExtendedGcsFileSystem initializes AsyncGrpcClient
     with the correct quota_project_id in ClientOptions derived from requester_pays.
     """
-    project = "dummy-billing-project"
+    from google.auth.credentials import Credentials
 
-    fs = ExtendedGcsFileSystem(project=project, requester_pays=requester_pays)
+    project = "dummy-billing-project"
+    creds = mock.Mock(spec=Credentials)
+
+    fs = ExtendedGcsFileSystem(
+        project=project, token=creds, requester_pays=requester_pays
+    )
 
     with mock.patch("gcsfs.extended_gcsfs.AsyncGrpcClient") as mock_grpc_client:
         # Trigger client initialization
@@ -1970,6 +1975,169 @@ async def test_async_grpc_client_init_quota_project(
         client_options = kwargs.get("client_options")
         assert client_options is not None
         assert client_options.quota_project_id == expected_quota_project
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "token, endpoint_url, env_updates, expected_endpoint",
+    [
+        ("anon", None, {}, "storage.googleapis.com"),
+        (
+            "anon",
+            None,
+            {"GOOGLE_CLOUD_UNIVERSE_DOMAIN": "example.com"},
+            "storage.example.com",
+        ),
+        (
+            "anon",
+            "https://custom-gcs.example.com:8443/v1",
+            {},
+            "custom-gcs.example.com:8443",
+        ),
+        (
+            "anon",
+            "HTTPS://custom-gcs.example.com:8443",
+            {},
+            "custom-gcs.example.com:8443",
+        ),
+        ("anon", "localhost:9000", {}, "localhost:9000"),
+        (None, None, {}, "storage.googleapis.com"),
+        (
+            "anon",
+            None,
+            {"STORAGE_EMULATOR_HOST": "https://localhost:4443"},
+            "localhost:4443",
+        ),
+        (
+            "anon",
+            None,
+            {"STORAGE_EMULATOR_HOST": "HTTPS://localhost:4443"},
+            "localhost:4443",
+        ),
+    ],
+)
+async def test_anon_grpc_client_uses_secure_channel_on_non_http(
+    monkeypatch, token, endpoint_url, env_updates, expected_endpoint
+):
+    """Anonymous gRPC clients must use TLS for https:// and scheme-less endpoints."""
+    import grpc
+    from google.cloud.storage.asyncio.async_grpc_client import AsyncGrpcClient
+
+    monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", raising=False)
+    for key, val in env_updates.items():
+        monkeypatch.setenv(key, val)
+    if token is None:
+        monkeypatch.setattr(
+            "gcsfs.credentials.GoogleCredentials._connect_google_default",
+            mock.Mock(side_effect=ValueError("no default")),
+        )
+        monkeypatch.setattr(
+            "gcsfs.credentials.GoogleCredentials._connect_cache",
+            mock.Mock(side_effect=ValueError("no cache")),
+        )
+        monkeypatch.setattr(
+            "gcsfs.credentials.GoogleCredentials._connect_cloud",
+            mock.Mock(side_effect=ValueError("no cloud")),
+        )
+
+    fs_kwargs = {"token": token, "skip_instance_cache": True}
+    if endpoint_url is not None:
+        fs_kwargs["endpoint_url"] = endpoint_url
+
+    mock_ssl_creds = object()
+    mock_channel = mock.MagicMock(spec=grpc.aio.Channel)
+    mock_channel.close = mock.AsyncMock()
+    mock_channel._unary_unary_interceptors = []
+
+    with (
+        mock.patch(
+            "gcsfs.extended_gcsfs.grpc.ssl_channel_credentials",
+            return_value=mock_ssl_creds,
+        ) as ssl_creds_fn,
+        mock.patch(
+            "gcsfs.extended_gcsfs.grpc.aio.secure_channel",
+            return_value=mock_channel,
+        ) as secure_channel_fn,
+        mock.patch(
+            "grpc.aio.insecure_channel",
+            side_effect=AssertionError("insecure_channel must not be called"),
+        ),
+        mock.patch.object(
+            AsyncGrpcClient,
+            "__init__",
+            side_effect=AssertionError("AsyncGrpcClient insecure path must not run"),
+        ),
+    ):
+        fs = ExtendedGcsFileSystem(**fs_kwargs)
+        client = await fs._get_grpc_client()
+
+        assert isinstance(client, AsyncGrpcClient)
+        ssl_creds_fn.assert_called_once_with()
+        secure_channel_fn.assert_called_once()
+        args, kwargs = secure_channel_fn.call_args
+        assert args == (expected_endpoint, mock_ssl_creds)
+        options = dict(kwargs["options"])
+        assert "python-gcsfs/" in options["grpc.primary_user_agent"]
+        assert options["grpc.max_send_message_length"] == -1
+        assert options["grpc.max_receive_message_length"] == -1
+        assert client.grpc_client.transport.grpc_channel is mock_channel
+
+        await fs._close_resources()
+        mock_channel.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint_url, env_updates, expected_endpoint",
+    [
+        (None, {"STORAGE_EMULATOR_HOST": "http://localhost:4443"}, "localhost:4443"),
+        (None, {"STORAGE_EMULATOR_HOST": "localhost:4443"}, "localhost:4443"),
+        ("http://localhost:9000", {}, "localhost:9000"),
+        ("HTTP://localhost:9000", {}, "localhost:9000"),
+    ],
+)
+async def test_anon_grpc_client_uses_emulator_path_on_http(
+    monkeypatch, endpoint_url, env_updates, expected_endpoint
+):
+    """Explicit http:// emulator endpoints continue to use AsyncGrpcClient."""
+    monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+    for key, val in env_updates.items():
+        monkeypatch.setenv(key, val)
+
+    fs_kwargs = {"token": "anon", "skip_instance_cache": True}
+    if endpoint_url is not None:
+        fs_kwargs["endpoint_url"] = endpoint_url
+
+    with (
+        mock.patch(
+            "gcsfs.extended_gcsfs.grpc.aio.secure_channel",
+            side_effect=AssertionError("secure_channel must not be called for http://"),
+        ),
+        mock.patch("gcsfs.extended_gcsfs.AsyncGrpcClient") as mock_grpc_client,
+    ):
+        fs = ExtendedGcsFileSystem(**fs_kwargs)
+        await fs._get_grpc_client()
+
+        mock_grpc_client.assert_called_once()
+        kwargs = mock_grpc_client.call_args.kwargs
+        assert isinstance(
+            kwargs["credentials"],
+            gcsfs.extended_gcsfs.AnonymousCredentials,
+        )
+        assert kwargs["client_options"].api_endpoint == expected_endpoint
+
+
+@pytest.mark.asyncio
+async def test_anon_grpc_client_empty_endpoint_raises(monkeypatch):
+    fs = ExtendedGcsFileSystem(token="anon", skip_instance_cache=True)
+    monkeypatch.setattr(
+        ExtendedGcsFileSystem,
+        "_grpc_location",
+        property(lambda self: ""),
+    )
+    with pytest.raises(ValueError, match="without an endpoint"):
+        await fs._get_grpc_client()
 
 
 @pytest.mark.asyncio
