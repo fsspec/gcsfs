@@ -137,17 +137,17 @@ def _run_save(
             durations.append(
                 timed(device, dcp.save, state, storage_writer=writer, planner=planner)
             )
-            if r > 0:
-                if rank == 0:
-                    prev_fs, prev_root = fsspec.core.url_to_fs(
-                        step_prefix(prefix, r - 1)
-                    )
-                    prev_fs.rm(prev_root, recursive=True)
-                dist.barrier()
     finally:
         if monitor is not None:
             window_end = time.time()
             monitor.__exit__(None, None, None)
+
+    # Keep only the last step (verified and sized by the runner). Deleting after the
+    # monitored window keeps the DELETE traffic out of the resource metrics.
+    if rank == 0:
+        for r in range(params.rounds - 1):
+            fs, root = fsspec.core.url_to_fs(step_prefix(prefix, r))
+            fs.rm(root, recursive=True)
 
     assert planner is not None
     payload = (_node_rank(), durations, {"bytes_written": planner.bytes_written})

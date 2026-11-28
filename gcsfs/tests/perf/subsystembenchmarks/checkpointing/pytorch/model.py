@@ -12,6 +12,7 @@ from torch.distributed.tensor._utils import compute_local_shape_and_global_offse
 from transformers import AutoConfig, AutoModelForCausalLM
 
 import gcsfs
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import model_dir
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.layout import Layout
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parallelize import (
     build_mesh,
@@ -20,7 +21,6 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parallelize impo
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import (
     MmapWeightStore,
     local_slice,
-    model_dir,
     random_local,
 )
 

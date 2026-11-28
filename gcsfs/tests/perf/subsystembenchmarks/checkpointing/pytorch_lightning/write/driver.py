@@ -82,10 +82,9 @@ class PLCheckpointWriteDriver(CheckpointDriver):
     """Driver for PyTorch Lightning checkpoint save benchmarks."""
 
     def setup(self, prefix: str, params):
-        stage_gcs_model(getattr(params, "model_id", ""))
+        stage_gcs_model(params.model_id)
 
     def run(self, prefix, params):
-        stage_gcs_model(getattr(params, "model_id", ""))
         if is_distributed_strategy(params.strategy):
             data = run_worker(
                 "save",

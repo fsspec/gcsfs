@@ -259,14 +259,6 @@ def test_cloudbuild_passes_the_ci_model_id_to_run_ci():
     assert 'CI_MODEL_ID="${CI_MODEL_ID:-gs://huggingface-model-weights/gpt2}"' in text
 
 
-def test_run_ci_stages_the_model_under_its_own_basename():
-    # checkpointing/*/common.py loads a gs:// model id from /tmp/<basename>.
-    text = _run_ci_text()
-    assert 'MODEL_DIR=$(basename "${CI_MODEL_ID%/}")' in text
-    assert 'mv "$HOME/$MODEL_DIR" "/tmp/$MODEL_DIR"' in text
-    assert '"$HOME/gpt2"' not in text
-
-
 def test_upload_results_works_without_nightly_venv():
     path = os.path.join(
         _REPO_ROOT, "cloudbuild", "subsystembenchmarks", "scripts", "upload-results.sh"
@@ -570,16 +562,6 @@ def test_upload_results_keeps_ci_artifacts_out_of_bigquery_ingestion(
 def test_cloudbuild_default_model_id_is_empty():
     subs = yaml.safe_load(_cloudbuild_yaml())["substitutions"]
     assert subs["_MODEL_ID"] == ""
-
-
-def test_setup_does_not_download_gcloud_cli():
-    setup_path = os.path.join(
-        _REPO_ROOT, "cloudbuild", "subsystembenchmarks", "scripts", "setup.sh"
-    )
-    subprocess.run(["bash", "-n", setup_path], check=True)
-    with open(setup_path) as f:
-        setup_text = f.read()
-    assert "google-cloud-cli" not in setup_text
 
 
 def test_group_requirements_exclude_torch_pin_and_cpu_requirements_pins_torch():

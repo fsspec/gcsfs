@@ -7,8 +7,8 @@ import time
 import ray
 import torch.distributed as dist
 
-from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
+    reduce_durations,
     setup_distributed_env,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
@@ -19,7 +19,6 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import (
     stage_gcs_model,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch.common import (
-    reduce_ray_durations,
     resolve_storage,
     run_ray_workers,
     run_subprocess_worker,
@@ -75,7 +74,6 @@ class RayCheckpointSaveWorker:
                         self.fs,
                         self.destination_ckpt,
                     )
-                    accelerator.synchronize(self.device)
                     t_end = time.perf_counter()
                     durations.append((t_start, t_end))
                 finally:
@@ -97,7 +95,7 @@ def run_ray_save(prefix, params):
         setup_method="setup",
         run_method="save_rounds",
     )
-    return reduce_ray_durations(results, world_size, params.rounds)
+    return reduce_durations(results, world_size, params.rounds)
 
 
 class RayCheckpointWriteDriver(CheckpointDriver):
@@ -105,10 +103,9 @@ class RayCheckpointWriteDriver(CheckpointDriver):
 
     def setup(self, prefix: str, params):
         """Stage GCS model weights outside the timed/monitored save window."""
-        stage_gcs_model(getattr(params, "model_id", ""))
+        stage_gcs_model(params.model_id)
 
     def run(self, prefix: str, params) -> CheckpointResult:
         """Executes the checkpoint save benchmark across Ray actor workers."""
-        stage_gcs_model(getattr(params, "model_id", ""))
         data = run_subprocess_worker("save", prefix, params, expect_result=True)
         return CheckpointResult(durations=data["durations"])

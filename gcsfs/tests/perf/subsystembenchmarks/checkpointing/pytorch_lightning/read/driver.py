@@ -9,7 +9,6 @@ from lightning.pytorch.trainer.states import TrainerFn
 from torch.utils.data import DataLoader
 
 from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import MAX_RANKS
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
     CheckpointDriver,
     CheckpointResult,
@@ -85,7 +84,7 @@ def _load_step(trainer, ckpt_path):
 
 class PLCheckpointReadDriver(CheckpointDriver):
     def setup(self, prefix, params):
-        stage_gcs_model(getattr(params, "model_id", ""))
+        stage_gcs_model(params.model_id)
         if is_distributed_strategy(params.strategy):
             setup_world_size = (
                 getattr(params, "setup_world_size", None) or params.world_size
@@ -111,7 +110,6 @@ class PLCheckpointReadDriver(CheckpointDriver):
             )
 
     def run(self, prefix, params):
-        stage_gcs_model(getattr(params, "model_id", ""))
         if is_distributed_strategy(params.strategy):
             data = run_worker(
                 "load",
@@ -139,7 +137,5 @@ class PLCheckpointReadDriver(CheckpointDriver):
 
     def read_count(self, params) -> int:
         if params.strategy in ("ddp", "fsdp_full", "model_parallel_full"):
-            if accelerator.device_kind() == "cpu":
-                return min(params.world_size, MAX_RANKS)
             return params.world_size
         return 1

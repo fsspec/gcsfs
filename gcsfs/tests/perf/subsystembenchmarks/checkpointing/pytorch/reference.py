@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import glob
 import hashlib
-import json
 import os
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
@@ -15,41 +13,14 @@ from transformers import AutoModelForCausalLM
 
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import (
     model_dir,
-    stage_model,
+    safetensors_files,
 )
-
-__all__ = [
-    "CANONICAL_FILENAME",
-    "MmapWeightStore",
-    "ensure_canonical_weights",
-    "load_weights",
-    "local_slice",
-    "model_dir",
-    "random_full",
-    "random_local",
-    "stage_model",
-]
 
 CANONICAL_FILENAME = ".canonical.safetensors"
 
 
 def _source_safetensors(staged_dir: str) -> list[str]:
-    index_file = os.path.join(staged_dir, "model.safetensors.index.json")
-    if os.path.isfile(index_file):
-        try:
-            with open(index_file) as f:
-                weight_map = json.load(f)["weight_map"]
-            shards = sorted(set(weight_map.values()))
-            paths = [os.path.join(staged_dir, s) for s in shards]
-            if paths and all(os.path.isfile(p) for p in paths):
-                return paths
-        except Exception:
-            pass
-    paths = sorted(
-        p
-        for p in glob.glob(os.path.join(staged_dir, "*.safetensors"))
-        if not os.path.basename(p).startswith(".")
-    )
+    paths = safetensors_files(staged_dir)
     if not paths:
         raise FileNotFoundError(f"no safetensors in {staged_dir}")
     return paths
@@ -264,7 +235,12 @@ def ensure_canonical_weights(model_id: str) -> str:
 
 
 def load_weights(model_id: str) -> MmapWeightStore:
-    staged_dir = ensure_canonical_weights(model_id)
+    """Open the staged weights read-only, preferring the canonical copy.
+
+    Ranks only open files: the benchmark parent runs ``ensure_canonical_weights``
+    once (``DCPDriver.prepare``) before launching them.
+    """
+    staged_dir = model_dir(model_id)
     canonical_path = os.path.join(staged_dir, CANONICAL_FILENAME)
     if os.path.isfile(canonical_path):
         return MmapWeightStore([canonical_path])

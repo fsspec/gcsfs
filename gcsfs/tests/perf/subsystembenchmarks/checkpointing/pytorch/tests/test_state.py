@@ -48,6 +48,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.planners import 
     RecordingSavePlanner,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import (  # noqa: E402
+    ensure_canonical_weights,
     load_weights,
     local_slice,
     random_full,
@@ -160,7 +161,7 @@ def test_build_then_verify_passes(tiny_models):
 
 def test_verify_names_corrupted_key(tmp_path):
     llama_dir = tiny_model_dir(tmp_path, kind="llama", num_layers=2)
-    weights = load_weights(llama_dir)
+    weights = load_weights(ensure_canonical_weights(llama_dir))
     layout = Layout("fsdp", world_size=4, data_parallel_size=4)
     cpu = torch.device("cpu")
     target_fqn = "model.layers.0.mlp.up_proj.weight"
@@ -268,7 +269,7 @@ def _planners_roundtrip_rank(rank, world_size, port, prefix, params, q, *, weigh
 
 def test_recording_planners_and_dcp_roundtrip(tmp_path, monkeypatch):
     llama_dir = tiny_model_dir(tmp_path / "llama", kind="llama", num_layers=2)
-    weights = load_weights(llama_dir)
+    weights = load_weights(ensure_canonical_weights(llama_dir))
     prefix = (tmp_path / "ckpt").as_uri()
     target = functools.partial(_planners_roundtrip_rank, weights=weights)
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny import (
@@ -362,7 +363,7 @@ def test_recording_planners_and_dcp_roundtrip(tmp_path, monkeypatch):
 
 def test_expected_local_matches_full_slice(tmp_path):
     llama_dir = tiny_model_dir(tmp_path, kind="llama", num_layers=2)
-    weights = load_weights(llama_dir)
+    weights = load_weights(ensure_canonical_weights(llama_dir))
     cpu = torch.device("cpu")
     layouts = [
         Layout("fsdp_tp", 4, data_parallel_size=2, tensor_parallel_size=2),

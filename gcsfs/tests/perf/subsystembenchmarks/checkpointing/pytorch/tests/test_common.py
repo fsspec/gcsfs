@@ -89,7 +89,7 @@ def test_rank_session_binds_device_and_tears_down(monkeypatch):
     monkeypatch.setattr(
         common,
         "setup_distributed_env",
-        lambda *a, **kw: (setattr(calls, "setup", (a, kw)), torch.device("cpu"))[1],
+        lambda: (setattr(calls, "setup", True), torch.device("cpu"))[1],
     )
     monkeypatch.setattr(
         common.dist,
@@ -100,10 +100,10 @@ def test_rank_session_binds_device_and_tears_down(monkeypatch):
         common.torch, "set_num_threads", lambda n: calls.threads.append(n)
     )
     with pytest.raises(RuntimeError, match="boom"):
-        with common.rank_session(1, 2, 1234) as device:
+        with common.rank_session() as device:
             assert device == torch.device("cpu")
             raise RuntimeError("boom")
-    assert calls.setup == ((1, 2, 1234), {})
+    assert calls.setup is True
     assert calls.destroyed == 1
     assert len(calls.threads) == 1
 
@@ -113,7 +113,7 @@ def test_rank_session_skips_set_num_threads_on_accelerator(monkeypatch):
     monkeypatch.setattr(
         common,
         "setup_distributed_env",
-        lambda *a, **kw: torch.device("cuda", 0),
+        lambda: torch.device("cuda", 0),
     )
     monkeypatch.setattr(
         common.dist,

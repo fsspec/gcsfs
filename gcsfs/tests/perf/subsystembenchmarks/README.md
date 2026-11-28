@@ -193,10 +193,11 @@ For checkpointing groups:
 - The default model is `gs://huggingface-model-weights/Llama-3.1-8B` (or
   `gs://gcs-aiml-huggingface-model-weights/Llama-3.1-8B` for
   `checkpointing/pytorch_{save,load,reshard}`).
-- A `gs://.../<name>` model is staged under `/tmp/<name>` (with
-  `*.safetensors` weights). All checkpointing groups lazily download a
-  `gs://.../<name>` model into `/tmp/<name>` during `setup()` (via
-  `checkpointing/model_staging.py`) if safetensors are missing.
+- All checkpointing groups stage a `gs://` model during `setup()` (via
+  `checkpointing/model_staging.py`): it is downloaded once per host into
+  `$GCSFS_SUBSYSTEM_MODEL_CACHE_DIR` (default: the system temp dir, such as
+  `/tmp`) as `<name>-<hash of bucket/path>`, unless its `*.safetensors`
+  weights are already there. Concurrent cases share it through a lock file.
 
 - For `checkpointing/pytorch_{save,load,reshard}`, `--model-id` accepts a
   `gs://` URI or a local directory containing `*.safetensors`;
@@ -307,7 +308,7 @@ subsystembenchmarks/
 │   ├── configurator.py     # config loading for checkpoint groups
 │   ├── _dist.py            # shared distributed env setup and round reduction
 │   ├── _llama_tp.py        # shared LLaMA tensor-parallel plan
-│   ├── model_staging.py    # lazy atomic GCS-to-/tmp model weight staging
+│   ├── model_staging.py    # lazy, locked, atomic GCS model weight staging
 │   ├── pytorch/            # shared DCP library (_worker, layout, model, parallelize, planners, reference, state, read/, write/)
 │   ├── pytorch_save/       # runnable DCP save group
 │   ├── pytorch_load/       # runnable same-layout DCP load group

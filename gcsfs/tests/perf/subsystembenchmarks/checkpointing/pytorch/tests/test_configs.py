@@ -145,11 +145,10 @@ def test_ws16_rows_skip_on_8_rank_host(monkeypatch):
 
 
 def test_placement_select_default_host_follows_cuda_device_count(monkeypatch):
-    from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import MAX_RANKS
 
     monkeypatch.setenv("GCSFS_SUBSYSTEM_DEVICE", "cpu")
     accelerator.reset_cache()
-    assert placement.devices_per_node() == MAX_RANKS
+    assert placement.devices_per_node() == accelerator.CPU_MAX_RANKS
 
     monkeypatch.setenv("GCSFS_SUBSYSTEM_DEVICE", "cuda")
     monkeypatch.setattr(

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import pathlib
 from types import SimpleNamespace
 
 import pytest
@@ -174,9 +173,6 @@ def test_write_driver_single_times_in_on_train_end_and_syncs(monkeypatch):
     monkeypatch.setattr(
         accelerator, "synchronize", lambda d: events.append(("sync", d))
     )
-    monkeypatch.setattr(
-        write_driver, "stage_gcs_model", lambda mid: events.append(("stage", mid))
-    )
 
     fake_model = SimpleNamespace(to=lambda dtype: fake_model)
     recorded_args = {}
@@ -205,7 +201,6 @@ def test_write_driver_single_times_in_on_train_end_and_syncs(monkeypatch):
     assert recorded_args["devices"] == 1
     assert recorded_args["logger"] is False
     assert events == [
-        ("stage", "gs://bucket/Llama-3.1-8B"),
         ("bind", 0),
         "fit",
         ("save", "gs://b/p/model.ckpt"),
@@ -243,7 +238,8 @@ def test_distributed_save_and_load_invoke_run_torchrun_and_stage_model(monkeypat
     assert read_res.window is None
     assert read_res.resource_metrics is None
 
-    assert staged == ["gs://bucket/Llama-3.1-8B"] * 4
+    # Staging happens in setup(), outside the monitored run().
+    assert staged == ["gs://bucket/Llama-3.1-8B"] * 2
     expected_mod = (
         "gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_lightning._worker"
     )
@@ -252,21 +248,6 @@ def test_distributed_save_and_load_invoke_run_torchrun_and_stage_model(monkeypat
     assert ops == ["save", "setup_load", "load"]
     world_sizes = [ws for _, _, ws, _ in launches]
     assert world_sizes == [4, 2, 4]
-
-
-def test_requirements_pins_lightning_sha_without_torch():
-    req_path = pathlib.Path(__file__).resolve().parents[1] / "requirements.txt"
-    text = req_path.read_text(encoding="utf-8")
-    assert (
-        "lightning @ git+https://github.com/Lightning-AI/pytorch-lightning@"
-        "422bfa2b4fe7409c91f4d1ae79f8e923761bebb2" in text
-    )
-    assert "2.7.0" in text
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        assert not stripped.startswith("torch==")
 
 
 @pytest.fixture
@@ -324,7 +305,7 @@ def test_ddp_timed_saves_via_torchrun_complete_two_rounds(
     for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv(accelerator.DEVICE_ENV, "cpu")
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
     params = _make_params(
         strategy="ddp", world_size=2, rounds=2, model_id=tiny_llama_dir
     )

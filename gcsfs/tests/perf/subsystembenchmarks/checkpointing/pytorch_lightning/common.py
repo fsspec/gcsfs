@@ -13,7 +13,6 @@ from lightning.pytorch.strategies import FSDPStrategy, ModelParallelStrategy
 from torch.utils.data import Dataset
 
 from gcsfs.tests.perf.subsystembenchmarks._common import accelerator, launcher
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import MAX_RANKS
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._llama_tp import apply_llama_tp
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import model_dir
 
@@ -43,15 +42,9 @@ class DummyModel(L.LightningModule):
         super().__init__()
         self.params = params
 
-        model_id = params.model_id
-        use_local_files_only = model_id.startswith("gs://")
-        resolved_model = model_dir(model_id)
-
+        # setup() staged a gs:// model; model_dir() is its local copy.
         self.llama = transformers.AutoModelForCausalLM.from_pretrained(
-            resolved_model,
-            dtype=torch.bfloat16,
-            local_files_only=use_local_files_only,
-            use_cache=False,
+            model_dir(params.model_id), dtype=torch.bfloat16, use_cache=False
         )
 
         # Freeze the giant model's parameters to avoid CPU compute and OOMs.
@@ -222,9 +215,6 @@ def run_worker(
     expect_result: bool = False,
 ) -> dict | None:
     """Launch ``pytorch_lightning._worker`` via single-node ``torchrun``."""
-    effective_ws = (
-        min(world_size, MAX_RANKS) if accelerator.device_kind() == "cpu" else world_size
-    )
     with tempfile.TemporaryDirectory(prefix="ssb-pl-") as tmp_dir:
         spec_file = os.path.join(tmp_dir, "spec.json")
         result_file = os.path.join(tmp_dir, "result.json")
@@ -236,7 +226,7 @@ def run_worker(
         launcher.run_torchrun(
             _WORKER_MODULE,
             args,
-            world_size=effective_ws,
+            world_size=world_size,
             rdzv_id=rdzv_id,
         )
         if not expect_result:

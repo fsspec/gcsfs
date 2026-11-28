@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import os
 
 import fsspec
 import pytest
@@ -203,7 +204,13 @@ def _drop_first_tensor_on_rank0(
 
     RecordingLoadPlanner.create_local_plan = _patched_create_local_plan
     try:
-        with common.rank_session(rank, world_size, port) as device:
+        os.environ.update(
+            RANK=str(rank),
+            LOCAL_RANK=str(rank),
+            WORLD_SIZE=str(world_size),
+            MASTER_PORT=str(port),
+        )
+        with common.rank_session() as device:
             with load_weights(params.model_id) as weights:
                 _worker._run_load(
                     prefix,

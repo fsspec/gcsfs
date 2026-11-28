@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import inspect
 import os
 
 import pytest
 import torch
 import torch.distributed as dist
 
-from gcsfs.tests.perf.subsystembenchmarks._common import accelerator, launcher
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing import _dist
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
     _normalize_local_results,
@@ -19,23 +18,21 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
 )
 
 
-def test_find_free_port_delegates_to_launcher(monkeypatch):
-    assert _dist.PORT_BLOCK_SIZE == launcher.PORT_BLOCK_SIZE
-    monkeypatch.setattr(launcher, "find_free_port", lambda: 23456)
-    assert find_free_port() == 23456
+def test_find_free_port_returns_first_free_port_in_the_block(monkeypatch):
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        busy = s.getsockname()[1]
+        s.listen()
+        monkeypatch.setenv("GCSFS_SUBSYSTEM_PORT_BASE", str(busy))
+        port = find_free_port()
+    assert busy < port < busy + _dist.PORT_BLOCK_SIZE
 
 
 def test_find_free_port_without_a_block_asks_the_os(monkeypatch):
     monkeypatch.delenv("GCSFS_SUBSYSTEM_PORT_BASE", raising=False)
     assert 0 < find_free_port() < 65536
-
-
-def test_legacy_spawn_shims_removed():
-    for attr in ("SpawnedRanks", "spawn_split", "run_split", "_terminate"):
-        assert not hasattr(_dist, attr), f"legacy shim {attr} should be removed"
-    assert "device" not in inspect.signature(setup_distributed_env).parameters
-    assert "/proc/net/route" not in inspect.getsource(_dist)
-    assert not hasattr(_dist, "_ensure_open_file_limit")
 
 
 def test_setup_distributed_env_reads_torchrun_env_or_explicit_args(monkeypatch):

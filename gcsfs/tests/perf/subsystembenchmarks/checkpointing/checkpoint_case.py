@@ -94,8 +94,7 @@ def run_checkpoint_case(
         )
 
     with bucket_cm as bucket:
-        # bucket_ctx may yield a raw name or a full URI depending on the branch/version.
-        # Extract just the bucket name so we can safely construct our own prefix.
+        # bucket_ctx may yield a bucket name or a gs:// URI.
         bucket_name = bucket_name_of(bucket) or bucket
         params.bucket_name = bucket_name
         prefix = f"gs://{bucket_name}/checkpoint/"

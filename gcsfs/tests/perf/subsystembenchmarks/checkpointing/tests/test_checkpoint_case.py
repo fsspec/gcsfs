@@ -803,18 +803,12 @@ def test_multinode_leader_creates_deterministic_bucket_and_publishes(monkeypatch
 
 
 def test_multinode_follower_derives_identical_bucket_and_publishes_nothing(monkeypatch):
-    import inspect
-
     from gcsfs.tests.perf.subsystembenchmarks._common import nodes
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
         CheckpointResult,
     )
     from gcsfs.tests.perf.subsystembenchmarks.dataloading import bucket as bucket_mod
-    from gcsfs.tests.perf.subsystembenchmarks.dataloading import (
-        rapid_cache,
-    )
-
-    assert "NodeChannel" not in inspect.getsource(checkpoint_case)
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import rapid_cache
 
     monkeypatch.setattr(checkpoint_case, "assert_fsspec_gcsfs", lambda p: None)
     monkeypatch.setattr(

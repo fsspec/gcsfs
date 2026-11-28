@@ -20,6 +20,7 @@ from torch.distributed.checkpoint.state_dict import (
 
 from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
+    reduce_durations,
     setup_distributed_env,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
@@ -30,7 +31,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import (
     stage_gcs_model,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch.common import (
-    reduce_ray_durations,
+    is_sharded_strategy,
     resolve_storage,
     run_ray_workers,
     run_subprocess_worker,
@@ -102,10 +103,7 @@ class RayCheckpointLoadWorker:
     def load_rounds(self):
         try:
             durations = []
-            is_sharded = self.params.strategy in (
-                "fsdp_sharded",
-                "model_parallel_sharded",
-            )
+            is_sharded = is_sharded_strategy(self.params.strategy)
             for round_idx in range(self.params.rounds):
                 # Broadcast the Checkpoint instance from rank 0 so all workers on the host
                 # share the same Checkpoint and UUID. Ray's as_directory() uses this UUID to
@@ -205,7 +203,7 @@ def run_ray_load(prefix, params):
         setup_method="setup",
         run_method="load_rounds",
     )
-    return reduce_ray_durations(results, world_size, params.rounds)
+    return reduce_durations(results, world_size, params.rounds)
 
 
 class RayCheckpointReadDriver(CheckpointDriver):
@@ -213,12 +211,11 @@ class RayCheckpointReadDriver(CheckpointDriver):
 
     def setup(self, prefix: str, params):
         """Generates the source checkpoint on storage using setup topology."""
-        stage_gcs_model(getattr(params, "model_id", ""))
+        stage_gcs_model(params.model_id)
         run_subprocess_worker("setup_load", prefix, params)
 
     def run(self, prefix: str, params) -> CheckpointResult:
         """Executes the checkpoint load benchmark across Ray actor workers."""
-        stage_gcs_model(getattr(params, "model_id", ""))
         data = run_subprocess_worker("load", prefix, params, expect_result=True)
         return CheckpointResult(durations=data["durations"])
 

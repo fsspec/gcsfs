@@ -172,11 +172,28 @@ def test_step_prefix_is_normalized(prefix):
     assert _worker.step_prefix(prefix, 1) == "gcs://b/ckpt/step-1/"
 
 
-@pytest.mark.parametrize("rounds, expected_barriers", [(1, 4), (3, 10)])
-def test_worker_save_skips_post_round_barrier_on_round_zero(
-    tmp_path, monkeypatch, rounds, expected_barriers
+@pytest.mark.parametrize("rounds", [1, 3])
+def test_worker_save_deletes_earlier_steps_after_the_monitored_window(
+    tmp_path, monkeypatch, rounds
 ):
     barriers = []
+    ckpt_dir = tmp_path / f"ckpt-r{rounds}"
+    steps_at_window_end = []
+
+    class _FakeMonitor:
+        max_cpu = max_mem = net_recv = net_sent = duration = 0.0
+        vcpus = 1
+
+        def __init__(self, pid):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            steps_at_window_end.extend(sorted(p.name for p in ckpt_dir.iterdir()))
+
+    monkeypatch.setattr(_worker, "ResourceMonitor", _FakeMonitor)
     monkeypatch.setattr(_worker, "build_state", lambda *a, **kw: {})
     monkeypatch.setattr(_worker, "warm_up", lambda *a, **kw: None)
     monkeypatch.setattr(_worker.dist, "barrier", lambda: barriers.append(1))
@@ -196,7 +213,6 @@ def test_worker_save_skips_post_round_barrier_on_round_zero(
 
     monkeypatch.setattr(_worker.dcp, "save", fake_dcp_save)
 
-    ckpt_dir = tmp_path / f"ckpt-r{rounds}"
     result_file = tmp_path / f"result-r{rounds}.json"
     params = _params("fake", strategy="fsdp", dp=1, world_size=1, rounds=rounds)
 
@@ -210,5 +226,7 @@ def test_worker_save_skips_post_round_barrier_on_round_zero(
 
     data = json.loads(result_file.read_text())
     assert len(data["durations"]) == rounds
-    assert len(barriers) == expected_barriers
+    # One barrier before the window, two per timed round, one at the end.
+    assert len(barriers) == 2 * rounds + 2
+    assert steps_at_window_end == [f"step-{r}" for r in range(rounds)]
     assert [p.name for p in ckpt_dir.iterdir()] == [f"step-{rounds - 1}"]

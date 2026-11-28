@@ -42,7 +42,6 @@ def _run_standalone_torchrun(op: str, spec_file: str, result_file: str | None = 
         "torch.distributed.run",
         "--standalone",
         "--nproc_per_node=2",
-        f"--master_port={launcher.find_free_port()}",
         "-m",
         WORKER_MODULE,
         "--op",

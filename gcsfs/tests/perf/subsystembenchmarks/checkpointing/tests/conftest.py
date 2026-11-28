@@ -7,6 +7,6 @@ from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
 def _pin_cpu_device(monkeypatch):
     """Keep CPU unit tests isolated on dev machines with GPUs or TPUs."""
     monkeypatch.setenv(accelerator.DEVICE_ENV, "cpu")
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()
     yield
-    accelerator.device_kind.cache_clear()
+    accelerator.reset_cache()

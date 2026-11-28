@@ -19,6 +19,9 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
     setup_distributed_env,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import CheckpointDriver
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import (
+    stage_model,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.model import (
     build,
     build_model,
@@ -28,7 +31,6 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parallelize impo
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import (
     ensure_canonical_weights,
-    stage_model,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.state import (
     get_fqn_state_dict,
@@ -57,20 +59,13 @@ def import_fsspec_filesystem():
 
 
 @contextlib.contextmanager
-def rank_session(
-    rank: int | None = None,
-    world_size: int | None = None,
-    port: int | None = None,
-):
-    """Joins the process group and yields this rank's torch.device."""
-    device = setup_distributed_env(rank, world_size, port)
+def rank_session():
+    """Joins the torchrun process group and yields this rank's torch.device."""
+    device = setup_distributed_env()
     try:
         if device.type == "cpu":
             local_ws = int(
-                os.environ.get(
-                    "LOCAL_WORLD_SIZE",
-                    str(world_size or os.environ.get("WORLD_SIZE", "1")),
-                )
+                os.environ.get("LOCAL_WORLD_SIZE", os.environ.get("WORLD_SIZE", "1"))
             )
             torch.set_num_threads(max(1, (os.cpu_count() or 1) // max(1, local_ws)))
         yield device
@@ -137,7 +132,11 @@ def run_worker(
 
 class DCPDriver(CheckpointDriver):
     def prepare(self, params, *layouts) -> None:
-        """Rejects unsupported layouts before staging and canonicalizing weights."""
+        """Rejects unsupported layouts, then stages and canonicalizes weights once.
+
+        Runs in the benchmark parent on every node before ranks start, so ranks
+        only open the prepared files (``reference.load_weights``).
+        """
         meta_model = build_model(params.model_id)
         for layout in set(layouts):
             check_model_layout(meta_model, layout)

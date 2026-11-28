@@ -80,10 +80,12 @@ def run_test_ranks(prefix, params, target_fn, world_size: int) -> None:
     """Run ``target_fn`` across ``world_size`` spawned CPU test processes."""
     import multiprocessing as mp
 
-    from gcsfs.tests.perf.subsystembenchmarks._common import launcher
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
+        find_free_port,
+    )
 
     ctx = mp.get_context("spawn")
-    port = launcher.find_free_port()
+    port = find_free_port()
     q = ctx.Queue()
     err_q = ctx.Queue()
     procs = [

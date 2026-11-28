@@ -17,15 +17,15 @@ import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_state_dict
 
 from gcsfs.tests.perf.subsystembenchmarks._common import accelerator, launcher
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
-    find_free_port,
-    reduce_durations,
-)
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import find_free_port
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._llama_tp import apply_llama_tp
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import model_dir
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import (
+    MODEL_CACHE_DIR_ENV,
+    cache_root,
+    model_dir,
+)
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import assert_fsspec_gcsfs
 
-_TPU_ENV_PREFIX = "TORCH_TPU_"
 _RAY_NOSET_TPU_ENV = "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS"
 _WORKER_MODULE = (
     "gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch._worker"
@@ -33,15 +33,16 @@ _WORKER_MODULE = (
 
 
 def prepare_tpu_env(world_size: int) -> None:
-    """Clear stale TORCH_TPU_* vars and set single-node TPU slice env for Ray actors."""
+    """Set the single-host TorchTPU launch env that Ray actors inherit.
+
+    This process starts from a clean ``TORCH_TPU_*`` env (``launcher.run_subprocess``).
+    """
     count = accelerator.local_device_count()
     if world_size > count:
         raise ValueError(
             f"world_size {world_size} exceeds {count} "
             f"{accelerator.accelerator_type()} devices"
         )
-    for key in [k for k in os.environ if k.startswith(_TPU_ENV_PREFIX)]:
-        os.environ.pop(key, None)
     os.environ.pop(_RAY_NOSET_TPU_ENV, None)
     if world_size > 1:
         os.environ[_RAY_NOSET_TPU_ENV] = "1"
@@ -98,8 +99,11 @@ def run_ray_workers(
     if ram_root is not None:
         # Checkpoint.as_directory() downloads into tempfile.gettempdir(); keep it off
         # the boot disk. Every actor on the host shares it, so Ray's download lock
-        # still dedupes across ranks.
-        actor_options["runtime_env"] = {"env_vars": {"TMPDIR": ram_root}}
+        # still dedupes across ranks. Pin the model cache so actors still find the
+        # model staged under this process's temp dir.
+        actor_options["runtime_env"] = {
+            "env_vars": {"TMPDIR": ram_root, MODEL_CACHE_DIR_ENV: cache_root()}
+        }
     workers = []
     try:
         workers = [
@@ -113,11 +117,6 @@ def run_ray_workers(
         return ray.get([getattr(w, run_method).remote() for w in workers])
     finally:
         kill_actors(workers)
-
-
-def reduce_ray_durations(results, world_size: int, rounds: int) -> list[float]:
-    """Reduce per-rank ``[(start, end), ...]`` round timestamps across ``world_size``."""
-    return reduce_durations(results, world_size, rounds)
 
 
 def run_subprocess_worker(
@@ -169,15 +168,9 @@ def load_benchmark_model(params):
     """Loads the benchmark model, freezing the large payload."""
     import transformers
 
-    model_id = params.model_id
-    use_local_files_only = model_id.startswith("gs://")
-    resolved_model = model_dir(model_id)
-
+    # The driver's setup() staged a gs:// model; model_dir() is its local copy.
     payload = transformers.AutoModelForCausalLM.from_pretrained(
-        resolved_model,
-        dtype=torch.bfloat16,
-        local_files_only=use_local_files_only,
-        use_cache=False,
+        model_dir(params.model_id), dtype=torch.bfloat16, use_cache=False
     )
 
     for p in payload.parameters():
@@ -251,11 +244,17 @@ def parallelize_model(model, params, device_type: str = "cpu"):
 
 
 def setup_model_and_optimizer(params, device: torch.device | None = None):
-    """Loads, moves to device, parallelizes the benchmark model, and materializes AdamW states."""
+    """Loads, places, and parallelizes the benchmark model, then materializes AdamW states.
+
+    FSDP/TP strategies parallelize the CPU-loaded model first: ``fully_shard`` and
+    ``distribute_tensor`` move each module's parameters to the mesh device and keep
+    only this rank's shard, so a device never holds the whole model. ``single`` and
+    ``ddp`` keep a full replica per rank and are moved explicitly.
+    """
     model = load_benchmark_model(params)
-    if device is not None:
-        model = model.to(device)
     device_type = device.type if device is not None else "cpu"
+    if device is not None and params.strategy in ("single", "ddp"):
+        model = model.to(device)
     model = parallelize_model(model, params, device_type)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     materialize_adamw_states(optimizer)

@@ -19,6 +19,10 @@ from gcsfs.tests.perf.subsystembenchmarks._common import (  # noqa: E402
     accelerator,
     launcher,
 )
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import (  # noqa: E402
+    MODEL_CACHE_DIR_ENV,
+    cache_root,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch import (  # noqa: E402
     common,
 )
@@ -128,7 +132,8 @@ def test_drivers_run_inside_launcher_subprocess(monkeypatch):
     assert read_res.window is None
     assert read_res.resource_metrics is None
 
-    assert staged == ["gs://bucket/Llama-3.1-8B"] * 4
+    # Staging happens in setup(), outside the monitored run().
+    assert staged == ["gs://bucket/Llama-3.1-8B"] * 2
     expected_mod = (
         "gcsfs.tests.perf.subsystembenchmarks.checkpointing.ray_pytorch._worker"
     )
@@ -176,10 +181,9 @@ def test_run_ray_workers_sets_actor_tmpdir_and_kills_actors_in_finally(
     if ram_root is None:
         assert recorded == [{"num_gpus": 1.0}] * 2
     else:
+        env_vars = {"TMPDIR": ram_root, MODEL_CACHE_DIR_ENV: cache_root()}
         assert (
-            recorded
-            == [{"num_gpus": 1.0, "runtime_env": {"env_vars": {"TMPDIR": ram_root}}}]
-            * 2
+            recorded == [{"num_gpus": 1.0, "runtime_env": {"env_vars": env_vars}}] * 2
         )
 
     # Actors are still killed if ray.get raises.
@@ -197,14 +201,10 @@ def test_run_ray_workers_sets_actor_tmpdir_and_kills_actors_in_finally(
     assert killed == created
 
 
-def test_tpu_bootstrap_clears_torch_tpu_env_and_calls_set_tpu_launch_env_before_ray_init(
-    monkeypatch,
-):
+def test_tpu_bootstrap_calls_set_tpu_launch_env_before_ray_init(monkeypatch):
     events = []
-    monkeypatch.setenv("TORCH_TPU_TOPOLOGY", "stale-topo")
-    monkeypatch.setenv("TORCH_TPU_SLICEBUILDER_ADDRESSES", "stale-addr")
-    monkeypatch.setenv("TORCH_TPU_CUSTOM_STALE", "1")
     monkeypatch.delenv("RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS", raising=False)
+    monkeypatch.delenv("TORCH_TPU_TOPOLOGY", raising=False)
 
     monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
     monkeypatch.setattr(accelerator, "local_device_count", lambda: 8)
@@ -218,7 +218,6 @@ def test_tpu_bootstrap_clears_torch_tpu_env_and_calls_set_tpu_launch_env_before_
                 "set_tpu_launch_env",
                 nproc_per_node,
                 os.environ.get("RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS"),
-                {k: v for k, v in os.environ.items() if k.startswith("TORCH_TPU_")},
             )
         )
         os.environ["TORCH_TPU_TOPOLOGY"] = f"1x{nproc_per_node}"
@@ -244,14 +243,13 @@ def test_tpu_bootstrap_clears_torch_tpu_env_and_calls_set_tpu_launch_env_before_
     common.ensure_ray_initialized(4)
 
     assert events == [
-        ("set_tpu_launch_env", 4, "1", {}),
+        ("set_tpu_launch_env", 4, "1"),
         ("ray.init", "local", "1", "1x4"),
     ]
 
 
-def test_tpu_single_rank_clears_torch_tpu_env_without_set_tpu_launch_env(monkeypatch):
+def test_tpu_single_rank_skips_set_tpu_launch_env(monkeypatch):
     events = []
-    monkeypatch.setenv("TORCH_TPU_TOPOLOGY", "stale-topo")
     monkeypatch.setenv("RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS", "1")
 
     monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
@@ -264,15 +262,54 @@ def test_tpu_single_rank_clears_torch_tpu_env_without_set_tpu_launch_env(monkeyp
             (
                 "ray.init",
                 kwargs.get("address"),
-                os.environ.get("TORCH_TPU_TOPOLOGY"),
                 os.environ.get("RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS"),
             )
         ),
     )
 
     common.ensure_ray_initialized(1)
-    assert events == [("ray.init", "local", None, None)]
+    assert events == [("ray.init", "local", None)]
     assert "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS" not in os.environ
+
+
+@pytest.mark.parametrize(
+    ("strategy", "moved"),
+    [
+        ("single", True),
+        ("ddp", True),
+        ("fsdp_sharded", False),
+        ("fsdp_full", False),
+        ("model_parallel_sharded", False),
+    ],
+)
+def test_setup_model_moves_only_replicated_models_before_parallelizing(
+    monkeypatch, strategy, moved
+):
+    events = []
+    device = torch.device("cuda", 0)
+
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.probe = torch.nn.Linear(2, 2)
+
+        def to(self, *args, **kwargs):
+            events.append(("to", args))
+            return self
+
+    monkeypatch.setattr(common, "load_benchmark_model", lambda params: _Model())
+    monkeypatch.setattr(
+        common,
+        "parallelize_model",
+        lambda model, params, device_type: events.append(("parallelize", device_type))
+        or model,
+    )
+
+    common.setup_model_and_optimizer(_make_params(strategy=strategy), device)
+    expected = [("parallelize", "cuda")]
+    if moved:
+        expected.insert(0, ("to", (device,)))
+    assert events == expected
 
 
 def test_kill_actors_invokes_ray_kill_no_restart(monkeypatch):
@@ -521,6 +558,5 @@ def test_load_and_save_rounds_synchronize_before_end(monkeypatch):
         "barrier",
         "perf_counter",
         "upload",
-        ("synchronize", fake_device),
         "perf_counter",
     ]

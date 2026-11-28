@@ -1,21 +1,49 @@
 from __future__ import annotations
 
 import os
+import socket
 from typing import TYPE_CHECKING
 
-from gcsfs.tests.perf.subsystembenchmarks._common import accelerator, launcher
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
 
 if TYPE_CHECKING:
     import torch
 
-# Cap on spawned ranks to prevent OOM on test-c4-highmem.
-MAX_RANKS = accelerator.CPU_MAX_RANKS
-PORT_BLOCK_SIZE = launcher.PORT_BLOCK_SIZE
+# Concurrent benchmark processes on one VM (cloudbuild/subsystembenchmarks/scripts/run-ci.sh)
+# each get a disjoint block of ports via GCSFS_SUBSYSTEM_PORT_BASE. Without it, an
+# OS-assigned free port is probed and only bound later by the TCPStore, so two processes
+# can pick the same port and one fails with EADDRINUSE.
+PORT_BLOCK_SIZE = 16
+
+
+def _port_is_free(port: int) -> bool:
+    # A TCPStore listens dual-stack on [::]:port, which also makes this IPv4 bind fail;
+    # binding without SO_REUSEADDR also rejects a port that holds a server-side TIME_WAIT.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("", port))
+        except OSError:
+            return False
+    return True
 
 
 def find_free_port() -> int:
-    """Finds an available TCP port, delegating to _common.launcher."""
-    return launcher.find_free_port()
+    """Finds an available TCP port for an in-process gloo/Ray MASTER_PORT."""
+    base = os.environ.get("GCSFS_SUBSYSTEM_PORT_BASE")
+    if base:
+        # The first free port in the block. A case's setup and run may both get the
+        # same port; that is safe because setup's process group is gone before run
+        # probes the block.
+        for port in range(int(base), int(base) + PORT_BLOCK_SIZE):
+            if _port_is_free(port):
+                return port
+        raise RuntimeError(
+            f"no free port in [{base}, {int(base) + PORT_BLOCK_SIZE}) "
+            "(GCSFS_SUBSYSTEM_PORT_BASE)"
+        )
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
 
 
 def _normalize_local_results(local_results, rounds: int):
@@ -49,9 +77,6 @@ def reduce_durations(
         ends = [results[rank][r][1] for rank in range(n_ranks)]
         durations.append(max(ends) - min(begins))
     return durations
-
-
-_reduce = reduce_durations
 
 
 def setup_distributed_env(

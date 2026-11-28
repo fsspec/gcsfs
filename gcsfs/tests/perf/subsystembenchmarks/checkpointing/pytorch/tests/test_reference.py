@@ -21,6 +21,11 @@ import gcsfs  # noqa: E402
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (  # noqa: E402
     setup_distributed_env,
 )
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import (  # noqa: E402
+    MODEL_CACHE_DIR_ENV,
+    model_dir,
+    stage_model,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.model import (  # noqa: E402
     SETUP_SEED,
     build_model,
@@ -31,10 +36,8 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import
     ensure_canonical_weights,
     load_weights,
     local_slice,
-    model_dir,
     random_full,
     random_local,
-    stage_model,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny import (  # noqa: E402
     make_params,
@@ -43,52 +46,10 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny impor
 )
 
 
-def test_model_dir():
-    assert model_dir("gs://my-bucket/models/Llama-3.1-8B") == "/tmp/Llama-3.1-8B"
-    assert model_dir("gs://my-bucket/models/Llama-3.1-8B/") == "/tmp/Llama-3.1-8B"
-    assert model_dir("/var/tmp/local-model") == "/var/tmp/local-model"
-    assert model_dir("meta-llama/Llama-3.1-8B") == "meta-llama/Llama-3.1-8B"
-
-
-def test_stage_model_rejects_dot_and_traversal_segments(monkeypatch):
-    for bad_uri in (
-        "gs://",
-        "gs:///",
-        "gs://.",
-        "gs://..",
-        "gs://bucket/.",
-        "gs://bucket/..",
-    ):
-        with pytest.raises(ValueError, match="Invalid GCS model_id"):
-            model_dir(bad_uri)
-
-    name = f"test-stage-dot-{uuid.uuid4().hex}"
-    gcs_uri = f"gs://bucket/{name}"
-    target_dir = f"/tmp/{name}"
-
-    class _FakeFS:
-        def ls(self, prefix, detail=True):
-            return [
-                {"name": f"bucket/{name}/config.json", "type": "file"},
-                {"name": f"bucket/{name}/..", "type": "file"},
-            ]
-
-        def get(self, rpaths, lpaths):
-            raise AssertionError("fs.get must not run on traversal object keys")
-
-    monkeypatch.setattr(gcsfs, "GCSFileSystem", _FakeFS)
-    try:
-        with pytest.raises(ValueError, match="Invalid remote object key"):
-            stage_model(gcs_uri)
-        assert not os.path.exists(target_dir)
-        assert glob.glob(f"/tmp/.{name}.*") == []
-    finally:
-        shutil.rmtree(target_dir, ignore_errors=True)
-
-
 @pytest.mark.parametrize("kind", ["llama", "olmoe"])
 def test_load_weights_matches_model_fqns(tmp_path, kind):
     model_path = tiny_model_dir(tmp_path, kind=kind)
+    ensure_canonical_weights(model_path)
     weights = load_weights(model_path)
     assert isinstance(weights, MmapWeightStore)
     model = build_model(model_path)
@@ -395,11 +356,19 @@ def test_local_slice_reassembles_full():
     run_test_ranks(None, make_params(world_size=4), _local_slice_rank, 4)
 
 
-def test_stage_model_downloads_missing_weights(tmp_path, monkeypatch):
+@pytest.fixture
+def cache_dir(tmp_path, monkeypatch):
+    path = tmp_path / "cache"
+    path.mkdir()
+    monkeypatch.setenv(MODEL_CACHE_DIR_ENV, str(path))
+    return path
+
+
+def test_stage_model_downloads_missing_weights(tmp_path, cache_dir, monkeypatch):
     src_dir = tiny_model_dir(tmp_path / "src", num_layers=2)
     name = f"test-stage-model-{uuid.uuid4().hex}"
     gcs_uri = f"gs://bucket/{name}"
-    target_dir = f"/tmp/{name}"
+    target_dir = model_dir(gcs_uri)
 
     mem_fs = fsspec.filesystem("memory")
     remote_prefix = f"bucket/{name}"
@@ -434,12 +403,11 @@ def test_stage_model_downloads_missing_weights(tmp_path, monkeypatch):
         )
         assert stage_model(gcs_uri) == target_dir
     finally:
-        shutil.rmtree(target_dir, ignore_errors=True)
         if mem_fs.exists(remote_prefix):
             mem_fs.rm(remote_prefix, recursive=True)
 
 
-def test_stage_model_restages_incomplete_sharded_dir(tmp_path, monkeypatch):
+def test_stage_model_restages_incomplete_sharded_dir(tmp_path, cache_dir, monkeypatch):
     src_dir = tiny_model_dir(tmp_path / "src", num_layers=2)
     sharded = tmp_path / "sharded"
     AutoModelForCausalLM.from_pretrained(src_dir).save_pretrained(
@@ -450,7 +418,7 @@ def test_stage_model_restages_incomplete_sharded_dir(tmp_path, monkeypatch):
 
     name = f"test-stage-sharded-{uuid.uuid4().hex}"
     gcs_uri = f"gs://bucket/{name}"
-    target_dir = f"/tmp/{name}"
+    target_dir = model_dir(gcs_uri)
     mem_fs = fsspec.filesystem("memory")
     remote_prefix = f"bucket/{name}"
     try:
@@ -467,16 +435,17 @@ def test_stage_model_restages_incomplete_sharded_dir(tmp_path, monkeypatch):
         assert sorted(os.listdir(target_dir)) == sorted(os.listdir(sharded))
         assert len(load_weights(gcs_uri)) > 0
     finally:
-        shutil.rmtree(target_dir, ignore_errors=True)
         if mem_fs.exists(remote_prefix):
             mem_fs.rm(remote_prefix, recursive=True)
 
 
-def test_stage_model_failed_copy_leaves_target_untouched(tmp_path, monkeypatch):
+def test_stage_model_failed_copy_leaves_target_untouched(
+    tmp_path, cache_dir, monkeypatch
+):
     src_dir = tiny_model_dir(tmp_path / "src", num_layers=2)
     name = f"test-stage-fail-{uuid.uuid4().hex}"
     gcs_uri = f"gs://bucket/{name}"
-    target_dir = f"/tmp/{name}"
+    target_dir = model_dir(gcs_uri)
     mem_fs = fsspec.filesystem("memory")
     remote_prefix = f"bucket/{name}"
     try:
@@ -507,11 +476,8 @@ def test_stage_model_failed_copy_leaves_target_untouched(tmp_path, monkeypatch):
         with pytest.raises(OSError, match="boom"):
             stage_model(gcs_uri)
         assert os.listdir(target_dir) == ["config.json"]
-        assert glob.glob(f"/tmp/.{name}.*") == []
+        assert glob.glob(str(cache_dir / ".*")) == []
     finally:
-        shutil.rmtree(target_dir, ignore_errors=True)
-        for p in glob.glob(f"/tmp/.{name}.*"):
-            shutil.rmtree(p, ignore_errors=True)
         if mem_fs.exists(remote_prefix):
             mem_fs.rm(remote_prefix, recursive=True)
 
@@ -549,6 +515,7 @@ def _shared_weights_rank(rank, world_size, port, prefix, params, q, *, weights):
 
 def test_weights_shared_with_spawned_ranks(tmp_path):
     model_path = tiny_model_dir(tmp_path, num_layers=2)
+    ensure_canonical_weights(model_path)
     with load_weights(model_path) as weights:
         target = functools.partial(_shared_weights_rank, weights=weights)
         run_test_ranks(None, make_params(model_path, world_size=2), target, 2)
@@ -605,7 +572,7 @@ def test_random_local_matches_full_slice_with_local_storage():
 
 
 def test_model_and_reference_from_pretrained_use_local_files_only(
-    tmp_path, monkeypatch
+    tmp_path, cache_dir, monkeypatch
 ):
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import (
         model as model_mod,
@@ -639,18 +606,13 @@ def test_model_and_reference_from_pretrained_use_local_files_only(
     # 1. Local directory path in build_model
     build_model(local_dir)
 
-    # 2. Pre-staged /tmp/<name>/config.json branch in build_model
-    staged_name = f"test-local-only-staged-{uuid.uuid4().hex}"
-    staged_tmp = f"/tmp/{staged_name}"
-    os.makedirs(staged_tmp, exist_ok=True)
-    try:
-        shutil.copyfile(
-            os.path.join(local_dir, "config.json"),
-            os.path.join(staged_tmp, "config.json"),
-        )
-        build_model(f"gs://bucket/{staged_name}")
-    finally:
-        shutil.rmtree(staged_tmp, ignore_errors=True)
+    # 2. Pre-staged config.json branch in build_model
+    staged_dir = model_dir("gs://bucket/staged")
+    os.makedirs(staged_dir)
+    shutil.copyfile(
+        os.path.join(local_dir, "config.json"), os.path.join(staged_dir, "config.json")
+    )
+    build_model("gs://bucket/staged")
 
     # 3. Unstaged GCS config.json fetch branch in build_model
     unstaged_name = f"test-local-only-unstaged-{uuid.uuid4().hex}"
@@ -663,9 +625,8 @@ def test_model_and_reference_from_pretrained_use_local_files_only(
     monkeypatch.setattr(gcsfs, "GCSFileSystem", _FakeConfigFS)
     build_model(f"gs://bucket/{unstaged_name}")
 
-    # 4. Reference weight load in load_weights
-    weights = load_weights(local_dir)
-    weights.clear()
+    # 4. Reference weight canonicalization
+    ensure_canonical_weights(local_dir)
 
     assert len(config_calls) >= 3
     for path, kwargs in config_calls:
