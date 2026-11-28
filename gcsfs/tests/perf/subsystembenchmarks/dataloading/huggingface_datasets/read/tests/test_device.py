@@ -95,6 +95,14 @@ def test_build_loader_pins_memory_only_when_requested():
     assert _hf_read._build_loader([1, 2], pin_memory=True, **kwargs).pin_memory
 
 
+def test_build_loader_spawns_workers_and_keeps_in_process_loading_unchanged():
+    kwargs = dict(batch_size=2, prefetch_factor=2)
+    in_process = _hf_read._build_loader([1, 2], num_workers=0, **kwargs)
+    assert in_process.multiprocessing_context is None
+    with_workers = _hf_read._build_loader([1, 2], num_workers=2, **kwargs)
+    assert with_workers.multiprocessing_context.get_start_method() == "spawn"
+
+
 def test_run_epochs_feeds_rank0_device_with_pinned_loader(
     tmp_path, sync_calls, ranks_on_fake_gpu, loader_kwargs
 ):
@@ -183,7 +191,7 @@ def test_hf_driver_split_by_node_uses_distributed_runner(tmp_path, monkeypatch):
     result = _hf_read.HFReadDriver().run_read(prefix, params, manifest)
 
     assert len(calls) == 1
-    assert calls[0][0] == "hf"
+    assert calls[0][0] is _hf_read.worker_entry
     assert calls[0][1] == prefix
     assert calls[0][2] == params
     assert result.rows_per_epoch == [manifest["sample_count"]] * 2
@@ -208,7 +216,7 @@ def test_tpu_single_rank_isolates_in_subprocess(tmp_path, monkeypatch):
     result = _hf_read.HFReadDriver().run_read(prefix, params, manifest)
 
     assert parent_binds == []
-    assert isolated == [("hf", prefix, 1, False, {"split": False})]
+    assert isolated == [(_hf_read.worker_entry, prefix, 1, False, {"split": False})]
     assert result.rows_per_epoch == [manifest["sample_count"]] * 2
 
 
@@ -255,19 +263,16 @@ def test_hf_driver_consults_device_pin_memory(
     assert [kw["pin_memory"] for kw in loader_kwargs] == [False, False]
 
 
-def test_hf_worker_registered_and_forwards_split_extra(
+def test_worker_entry_forwards_split_extra(
     tmp_path, monkeypatch, sync_calls, ranks_on_fake_gpu, loader_kwargs
 ):
-    from gcsfs.tests.perf.subsystembenchmarks.dataloading import _worker
-
     prefix, manifest = _ingest(tmp_path)
-    worker_fn = _worker._resolve_worker("hf")
 
     def no_split(*args):
         raise AssertionError("split=False must not split by node")
 
     monkeypatch.setattr(_hf_read, "_split", no_split)
-    per_epoch, _, _ = worker_fn(
+    per_epoch, _, _ = _hf_read.worker_entry(
         0,
         1,
         prefix,

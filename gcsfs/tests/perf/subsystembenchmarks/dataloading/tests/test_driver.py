@@ -1,21 +1,17 @@
-import dataclasses
-import json
 import math
-import os
 import sys
 import types
 
 import pytest
 
-from gcsfs.tests.perf.subsystembenchmarks._common import env, launcher
+from gcsfs.tests.perf.subsystembenchmarks._common import launcher
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import driver
+from gcsfs.tests.perf.subsystembenchmarks.dataloading.tests import _worker_entries
+from gcsfs.tests.perf.subsystembenchmarks.dataloading.tests._worker_entries import (
+    RecordParams,
+)
 
-
-@dataclasses.dataclass
-class _DummyParams:
-    world_size: int = 2
-    rounds: int = 2
-    batch_size: int = 8
+_WORKER_MODULE = "gcsfs.tests.perf.subsystembenchmarks.dataloading._worker"
 
 
 class _Barrier:
@@ -103,200 +99,141 @@ def test_assert_gcsfs_backed_rejects_non_pyfilesystem():
         driver.assert_gcsfs_backed(object())
 
 
-def test_run_rank_epochs_distributed_invokes_torchrun_and_reads_result(monkeypatch):
-    captured = {}
+_ENTRY = "gcsfs.tests.perf.subsystembenchmarks.dataloading.tests._worker_entries:record"
+_RESULT = {"durations": [4.0, 3.5], "rows": [15, 15], "ttfb": 1.9, "build_seconds": 2.0}
 
-    def fake_run_torchrun(module, args, *, world_size, rdzv_id, **kwargs):
-        captured["module"] = module
-        captured["args"] = list(args)
-        captured["world_size"] = world_size
-        captured["rdzv_id"] = rdzv_id
-        captured["kwargs"] = kwargs
+
+@pytest.fixture
+def entry_calls():
+    _worker_entries.calls.clear()
+    yield _worker_entries.calls
+    _worker_entries.calls.clear()
+
+
+def _fake_launch(captured):
+    """Record a launch, read the spec it was given, and write a canned result."""
+
+    def launch(module, args, **kwargs):
+        captured.update(module=module, args=list(args), kwargs=kwargs)
         spec_path = args[args.index("--spec-file") + 1]
+        captured["spec"] = driver.read_worker_spec(spec_path)
         result_path = args[args.index("--result-file") + 1]
-        with open(spec_path, encoding="utf-8") as f:
-            captured["spec"] = json.load(f)
-        with open(result_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "durations": [4.0, 3.5],
-                    "rows": [15, 15],
-                    "ttfb": 1.9,
-                    "build_seconds": 2.0,
-                },
-                f,
-            )
+        driver.write_worker_result(result_path, **_RESULT)
         return True
 
-    monkeypatch.setattr(launcher, "run_torchrun", fake_run_torchrun)
+    return launch
 
-    params = _DummyParams(world_size=4, rounds=2, batch_size=16)
+
+@pytest.mark.parametrize("cpu_only", [False, True])
+def test_run_rank_epochs_distributed_launches_torchrun(monkeypatch, cpu_only):
+    captured = {}
+    monkeypatch.setattr(launcher, "run_torchrun", _fake_launch(captured))
+    params = RecordParams(world_size=4, rounds=2, batch_size=16)
+
     result = driver.run_rank_epochs_distributed(
-        "hf",
+        _worker_entries.record,
         "gs://bucket/prefix",
         params,
         extra={"sample_count": 30},
-        prepare_tpu_env=False,
+        cpu_only=cpu_only,
     )
 
     assert result == ([4.0, 3.5], [15, 15], 1.9, 2.0)
-    assert (
-        captured["module"] == "gcsfs.tests.perf.subsystembenchmarks.dataloading._worker"
-    )
-    assert "--distributed" in captured["args"]
-    assert captured["args"][captured["args"].index("--kind") + 1] == "hf"
-    assert captured["world_size"] == 4
-    assert captured["rdzv_id"]
-    assert captured["kwargs"]["prepare_tpu_env"] is False
-    assert captured["spec"] == {
-        "prefix": "gs://bucket/prefix",
-        "params": {"world_size": 4, "rounds": 2, "batch_size": 16},
-        "extra": {"sample_count": 30},
-    }
+    assert captured["module"] == _WORKER_MODULE
+    args = captured["args"]
+    assert args[args.index("--entry") + 1] == _ENTRY
+    assert "--distributed" in args
+    assert captured["kwargs"]["world_size"] == 4
+    assert captured["kwargs"]["rdzv_id"]
+    assert captured["kwargs"]["cpu_only"] is cpu_only
+    assert captured["spec"] == ("gs://bucket/prefix", params, {"sample_count": 30})
 
 
-def test_run_single_rank_isolated_invokes_run_subprocess_and_reads_result(monkeypatch):
+def test_run_single_rank_isolated_launches_a_subprocess(monkeypatch):
     captured = {}
+    monkeypatch.setattr(launcher, "run_subprocess", _fake_launch(captured))
+    params = RecordParams(world_size=1, rounds=1, batch_size=4)
 
-    def fake_run_subprocess(module, args, **kwargs):
-        captured["module"] = module
-        captured["args"] = list(args)
-        captured["kwargs"] = kwargs
-        spec_path = args[args.index("--spec-file") + 1]
-        result_path = args[args.index("--result-file") + 1]
-        with open(spec_path, encoding="utf-8") as f:
-            captured["spec"] = json.load(f)
-        with open(result_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "durations": [1.2],
-                    "rows": [10],
-                    "ttfb": 0.3,
-                    "build_seconds": 0.4,
-                },
-                f,
-            )
-
-    monkeypatch.setattr(launcher, "run_subprocess", fake_run_subprocess)
-
-    params = _DummyParams(world_size=1, rounds=1, batch_size=4)
     result = driver.run_single_rank_isolated(
-        "wds",
+        _worker_entries.record,
         "file:///tmp/data",
         params,
         extra={"cache_root": "/tmp/cache"},
     )
 
-    assert result == ([1.2], [10], 0.3, 0.4)
-    assert (
-        captured["module"] == "gcsfs.tests.perf.subsystembenchmarks.dataloading._worker"
-    )
+    assert result == ([4.0, 3.5], [15, 15], 1.9, 2.0)
+    assert captured["module"] == _WORKER_MODULE
     assert "--distributed" not in captured["args"]
-    assert captured["args"][captured["args"].index("--kind") + 1] == "wds"
-    assert captured["spec"] == {
-        "prefix": "file:///tmp/data",
-        "params": {"world_size": 1, "rounds": 1, "batch_size": 4},
-        "extra": {"cache_root": "/tmp/cache"},
-    }
+    assert captured["args"][captured["args"].index("--entry") + 1] == _ENTRY
+    assert captured["kwargs"] == {}
+    assert captured["spec"] == (
+        "file:///tmp/data",
+        params,
+        {"cache_root": "/tmp/cache"},
+    )
 
 
-def test_worker_main_single_rank_executes_registered_kind(tmp_path, monkeypatch):
-    from gcsfs.tests.perf.subsystembenchmarks.dataloading import _worker
+def test_worker_spec_round_trips_the_params_dataclass(tmp_path):
+    spec_file = str(tmp_path / "spec.json")
+    params = RecordParams(world_size=2, rounds=3, batch_size=5)
 
-    seen = {}
+    driver.write_worker_spec(spec_file, "gs://b/p/", params)
+    prefix, rebuilt, extra = driver.read_worker_spec(spec_file)
 
-    def fake_worker(rank, world_size, prefix, params, barrier, extra):
-        seen["args"] = (rank, world_size, prefix, params.rounds, barrier, extra)
-        return ([(10.0, 11.5, 20)], 0.25, 0.5)
+    assert (prefix, rebuilt, extra) == ("gs://b/p/", params, {})
+    assert type(rebuilt) is RecordParams
+    assert rebuilt.total_rows == 15
 
-    monkeypatch.setitem(_worker._WORKERS, "mock_kind", fake_worker)
 
+def test_write_worker_spec_rejects_non_dataclass_params(tmp_path):
+    with pytest.raises(TypeError, match="dataclass instance"):
+        driver.write_worker_spec(str(tmp_path / "spec.json"), "gs://b/p/", object())
+
+
+def test_qualified_names_resolve_module_level_objects_only():
+    assert driver.qualified_name(_worker_entries.record) == _ENTRY
+    assert driver.resolve_qualified_name(_ENTRY) is _worker_entries.record
+
+    def local():
+        pass
+
+    with pytest.raises(ValueError, match="module level"):
+        driver.qualified_name(local)
+    with pytest.raises(ValueError, match="module:qualname"):
+        driver.resolve_qualified_name("no_colon")
+
+
+def _worker_args(tmp_path, params, extra=None, *, distributed=False):
     spec_file = tmp_path / "spec.json"
     result_file = tmp_path / "result.json"
-    spec_file.write_text(
-        json.dumps(
-            {
-                "prefix": "file:///data",
-                "params": {"world_size": 1, "rounds": 1, "batch_size": 4},
-                "extra": {"tag": "ok"},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    _worker.main(
-        [
-            "--kind",
-            "mock_kind",
-            "--spec-file",
-            str(spec_file),
-            "--result-file",
-            str(result_file),
-        ]
-    )
-
-    assert seen["args"] == (0, 1, "file:///data", 1, None, {"tag": "ok"})
-    assert json.loads(result_file.read_text(encoding="utf-8")) == {
-        "durations": [1.5],
-        "rows": [20],
-        "ttfb": 0.25,
-        "build_seconds": 0.5,
-    }
+    driver.write_worker_spec(str(spec_file), "file:///data", params, extra)
+    args = ["--entry", _ENTRY, "--spec-file", str(spec_file)]
+    args += ["--result-file", str(result_file)]
+    if distributed:
+        args.append("--distributed")
+    return args, result_file
 
 
-def test_worker_main_single_rank_clears_inherited_torch_tpu_env(tmp_path, monkeypatch):
+def test_worker_main_single_rank_runs_the_entry(tmp_path, entry_calls):
     from gcsfs.tests.perf.subsystembenchmarks.dataloading import _worker
 
-    monkeypatch.setenv("TORCH_TPU_TOPOLOGY", "stale-topo")
-    monkeypatch.setenv("TORCH_TPU_SLICEBUILDER_ADDRESSES", "stale-addr")
-    monkeypatch.setenv("TORCH_TPU_DEVICES_PER_HOST", "8")
-    monkeypatch.setenv("KEEP_NON_TPU_ENV", "keep")
+    params = RecordParams(world_size=1, rounds=1, batch_size=20)
+    args, result_file = _worker_args(tmp_path, params, {"tag": "ok"})
 
-    seen = {}
+    _worker.main(args)
 
-    def fake_worker(rank, world_size, prefix, params, barrier, extra):
-        seen["tpu_keys"] = sorted(k for k in os.environ if k.startswith("TORCH_TPU_"))
-        seen["keep"] = os.environ.get("KEEP_NON_TPU_ENV")
-        return ([(1.0, 2.0, 4)], 0.1, 0.2)
-
-    monkeypatch.setitem(_worker._WORKERS, "mock_tpu_single", fake_worker)
-
-    spec_file = tmp_path / "spec.json"
-    result_file = tmp_path / "result.json"
-    spec_file.write_text(
-        json.dumps(
-            {
-                "prefix": "file:///data",
-                "params": {"world_size": 1, "rounds": 1},
-                "extra": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    _worker.main(
-        [
-            "--kind",
-            "mock_tpu_single",
-            "--spec-file",
-            str(spec_file),
-            "--result-file",
-            str(result_file),
-        ]
-    )
-
-    assert seen["tpu_keys"] == []
-    assert seen["keep"] == "keep"
-    assert [k for k in os.environ if k.startswith("TORCH_TPU_")] == []
+    assert entry_calls == [(0, 1, "file:///data", params, None, {"tag": "ok"})]
+    assert type(entry_calls[0][3]) is RecordParams
+    assert driver.read_worker_result(str(result_file)) == ([1.5], [20], 0.25, 0.5)
 
 
-def test_worker_main_distributed_uses_gloo_barrier_and_gather(tmp_path, monkeypatch):
+def test_worker_main_distributed_uses_gloo_barrier_and_gather(
+    tmp_path, monkeypatch, entry_calls
+):
     from gcsfs.tests.perf.subsystembenchmarks.dataloading import _worker
 
     events = []
-    rank0_tuple = ([(0.0, 2.0, 10)], 0.5, 1.0)
-    rank1_tuple = ([(1.0, 4.0, 5)], 0.9, 2.0)
-
+    rank1_result = ([(1.0, 4.0, 5)], 0.9, 2.0)
     fake_dist = types.SimpleNamespace(
         init_process_group=lambda **kw: events.append(("init", kw["backend"])),
         get_rank=lambda: 0,
@@ -305,93 +242,20 @@ def test_worker_main_distributed_uses_gloo_barrier_and_gather(tmp_path, monkeypa
         gather_object=lambda obj, out, dst=0: (
             events.append(("gather", dst)),
             out.__setitem__(0, obj),
-            out.__setitem__(1, rank1_tuple),
+            out.__setitem__(1, rank1_result),
         ),
         destroy_process_group=lambda: events.append(("destroy",)),
     )
-    fake_torch = types.SimpleNamespace(distributed=fake_dist)
-    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(
+        sys.modules, "torch", types.SimpleNamespace(distributed=fake_dist)
+    )
     monkeypatch.setitem(sys.modules, "torch.distributed", fake_dist)
+    params = RecordParams(world_size=2, rounds=1, batch_size=10)
+    args, result_file = _worker_args(tmp_path, params, distributed=True)
 
-    def fake_worker(rank, world_size, prefix, params, barrier, extra):
-        assert rank == 0 and world_size == 2
-        driver.await_round(barrier)
-        return rank0_tuple
+    _worker.main(args)
 
-    monkeypatch.setitem(_worker._WORKERS, "mock_dist", fake_worker)
-
-    spec_file = tmp_path / "spec.json"
-    result_file = tmp_path / "result.json"
-    spec_file.write_text(
-        json.dumps(
-            {
-                "prefix": "file:///data",
-                "params": {"world_size": 2, "rounds": 1},
-                "extra": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    _worker.main(
-        [
-            "--kind",
-            "mock_dist",
-            "--spec-file",
-            str(spec_file),
-            "--result-file",
-            str(result_file),
-            "--distributed",
-        ]
-    )
-
-    assert events == [
-        ("init", "gloo"),
-        ("barrier",),
-        ("gather", 0),
-        ("destroy",),
-    ]
-    assert json.loads(result_file.read_text(encoding="utf-8")) == {
-        "durations": [4.0],
-        "rows": [15],
-        "ttfb": 1.9,
-        "build_seconds": 2.0,
-    }
-
-
-def test_worker_main_rejects_unknown_kind(tmp_path):
-    from gcsfs.tests.perf.subsystembenchmarks.dataloading import _worker
-
-    spec_file = tmp_path / "spec.json"
-    result_file = tmp_path / "result.json"
-    spec_file.write_text(
-        json.dumps({"prefix": "file:///data", "params": {"rounds": 1}, "extra": {}}),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="Unknown worker kind"):
-        _worker.main(
-            [
-                "--kind",
-                "nonexistent",
-                "--spec-file",
-                str(spec_file),
-                "--result-file",
-                str(result_file),
-            ]
-        )
-
-
-def test_env_no_longer_defines_accelerator_helpers():
-    for removed in (
-        "detect_accelerator",
-        "detect_backend",
-        "gpu_model",
-        "_cuda_available",
-    ):
-        assert not hasattr(env, removed), f"_common/env.py still defines {removed}"
-
-
-def test_driver_no_longer_defines_mp_spawn_shims():
-    assert not hasattr(driver, "spawn_rank_epochs")
-    assert not hasattr(driver, "round_barrier")
+    assert [call[:2] for call in entry_calls] == [(0, 2)]
+    assert events == [("init", "gloo"), ("barrier",), ("gather", 0), ("destroy",)]
+    # Rank 0 spans 10.0-11.5 with first batch at 10.25; rank 1 spans 1.0-4.0.
+    assert driver.read_worker_result(str(result_file)) == ([10.5], [15], 9.25, 2.0)

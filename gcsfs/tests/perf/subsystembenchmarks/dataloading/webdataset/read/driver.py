@@ -89,15 +89,6 @@ def build_dataset(prefix, params, *, split_by_node, cache_dir=None):
         detshuffle=True,
         seed=0,
     )
-    sample_shuffle_enabled = getattr(
-        params, "sample_shuffle_enabled", params.access == "shuffled"
-    )
-    shard_shuffle_enabled = getattr(
-        params,
-        "shard_shuffle_enabled",
-        sample_shuffle_enabled and getattr(params, "shard_shuffle", True),
-    )
-
     if params.resampled:
         # Disable default node splitting and shard shuffle for resampled streams.
         kwargs["resampled"] = True
@@ -105,10 +96,12 @@ def build_dataset(prefix, params, *, split_by_node, cache_dir=None):
         kwargs["shardshuffle"] = False
     else:
         kwargs["nodesplitter"] = wds.split_by_node if split_by_node else None
-        kwargs["shardshuffle"] = params.file_count if shard_shuffle_enabled else False
+        kwargs["shardshuffle"] = (
+            params.file_count if params.shard_shuffle_enabled else False
+        )
 
     dataset = wds.WebDataset(shard_urls(prefix, params), **kwargs)
-    if sample_shuffle_enabled:
+    if params.sample_shuffle_enabled:
         dataset = dataset.shuffle(params.shuffle_buffer_size)
     if params.decode:
         dataset = dataset.decode("torchrgb")
@@ -129,6 +122,8 @@ def build_loader(dataset, params, pin_memory=False):
     if params.num_workers > 0:
         kwargs["prefetch_factor"] = params.prefetch_factor
         kwargs["persistent_workers"] = True
+        # Rank processes may already hold CUDA/libtpu state; never fork them.
+        kwargs["multiprocessing_context"] = "spawn"
         # Register gcsfs opener inside spawned worker processes.
         kwargs["worker_init_fn"] = gcsfs_opener.worker_init
     return DataLoader(dataset, **kwargs)
@@ -210,7 +205,7 @@ def run_rank_epochs(
 
 
 def worker_entry(rank, world_size, prefix, params, barrier, extra):
-    """Worker entry point invoked by ``dataloading._worker``."""
+    """Rank entry point run by ``dataloading._worker``."""
     _set_distributed_env(rank, world_size)
     extra = extra or {}
     return run_rank_epochs(
@@ -226,13 +221,13 @@ def worker_entry(rank, world_size, prefix, params, barrier, extra):
 
 def run_split_epochs(prefix, params, cache_root, sample_count):
     """Runs world_size worker ranks via torchrun and aggregates epoch results."""
-    # Undecoded ranks never touch an accelerator, so they skip TPU launch setup.
+    # Undecoded ranks never touch an accelerator, so they run as CPU ranks.
     return run_rank_epochs_distributed(
-        "wds",
+        worker_entry,
         prefix,
         params,
         extra={"cache_root": cache_root, "sample_count": sample_count},
-        prepare_tpu_env=params.decode,
+        cpu_only=not params.decode,
     )
 
 
@@ -251,7 +246,7 @@ class WebDatasetReadDriver:
             elif params.decode and accelerator.device_kind() == "tpu":
                 # Isolate TPU device init inside a subprocess so pytest parent never locks libtpu.
                 durations, rows, ttfb, build_seconds = run_single_rank_isolated(
-                    "wds",
+                    worker_entry,
                     prefix,
                     dataclasses.replace(params, world_size=1),
                     extra={"cache_root": cache_root, "sample_count": sample_count},

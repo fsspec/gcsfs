@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import tempfile
 import time
 
 import fsspec
@@ -27,6 +25,8 @@ from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import (
 _WORKER_MODULE = (
     "gcsfs.tests.perf.subsystembenchmarks.dataloading.ray_data.read._worker"
 )
+
+logger = logging.getLogger(__name__)
 
 
 class _GCSFileSystemWithCacheType(gcsfs.GCSFileSystem):
@@ -57,8 +57,9 @@ def _kill_actors(actors) -> None:
     for actor in actors:
         try:
             ray.kill(actor, no_restart=True)
-        except Exception:
-            pass
+        except (ray.exceptions.RayError, ValueError) as exc:
+            # Best effort: the actor may already be gone; shutdown reaps the rest.
+            logger.debug("ray.kill(%r) failed: %s", actor, exc)
 
 
 def ensure_ray_initialized():
@@ -239,7 +240,7 @@ def run_single_rank(dataset, params):
     per_epoch = []
     ttfb = None
     if _uses_tpu_actors(params):
-        resources = device_lib.ray_task_resources(1, False)
+        resources = accelerator.ray_resources(1)
         actor = None
         try:
             actor = _ShardConsumer.options(**resources).remote(0, 1, params, dataset)
@@ -287,7 +288,8 @@ def run_multi_rank(dataset, params):
     world_size = params.world_size
     epoch_records = []
     collate_fn = _TextParquetCollateFn() if params.fmt == "text_parquet" else None
-    resources = device_lib.ray_task_resources(world_size, params.has_features)
+    # Feature-column batches stay on the host, so those tasks take no accelerator.
+    resources = {} if params.has_features else accelerator.ray_resources(world_size)
     actors = []
     try:
         # Split once per case: Ray reshuffles files from the split coordinator's
@@ -366,18 +368,12 @@ def _run_read_in_process(prefix, params) -> ReadResult:
 
 def _run_read_isolated(prefix, params) -> ReadResult:
     """Run TPU Ray Data read inside an isolated subprocess so parent never touches libtpu."""
-    with tempfile.TemporaryDirectory(prefix="gcsfs_ray_worker_") as tmpdir:
-        spec_file = os.path.join(tmpdir, "spec.json")
-        result_file = os.path.join(tmpdir, "result.json")
-        dl_driver._write_worker_spec(spec_file, prefix, params, None)
+    with dl_driver.worker_files(prefix, params) as (spec_file, result_file):
         launcher.run_subprocess(
             _WORKER_MODULE,
             ["--spec-file", spec_file, "--result-file", result_file],
         )
-        durations, rows_list, ttfb, build_seconds = dl_driver._read_worker_result(
-            result_file
-        )
-    return ReadResult(durations, rows_list, ttfb, build_seconds)
+        return ReadResult(*dl_driver.read_worker_result(result_file))
 
 
 class RayDataReadDriver:

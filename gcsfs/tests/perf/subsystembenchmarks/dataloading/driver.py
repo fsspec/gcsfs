@@ -5,7 +5,9 @@ Drivers execute engine-specific reads through gcsfs. All drivers must route thro
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import importlib
 import json
 import os
 import tempfile
@@ -102,26 +104,72 @@ def reduce_split(results, rounds):
     return durations, rows_list, ttfb
 
 
-def _serialize_params(params) -> dict:
-    if dataclasses.is_dataclass(params) and not isinstance(params, type):
-        return dataclasses.asdict(params)
-    return dict(vars(params))
+def qualified_name(obj) -> str:
+    """Return the ``module:qualname`` import path of a module-level class or function."""
+    name = f"{obj.__module__}:{obj.__qualname__}"
+    if "<locals>" in name:
+        raise ValueError(f"{name} is not importable; define it at module level")
+    return name
 
 
-def _write_worker_spec(spec_file: str, prefix: str, params, extra: dict | None) -> None:
+def resolve_qualified_name(name: str):
+    """Import and return the object named by a ``module:qualname`` path."""
+    module_name, _, attr_path = name.partition(":")
+    if not module_name or not attr_path:
+        raise ValueError(f"expected 'module:qualname', got {name!r}")
+    obj = importlib.import_module(module_name)
+    for attr in attr_path.split("."):
+        obj = getattr(obj, attr)
+    return obj
+
+
+def write_worker_spec(
+    path: str, prefix: str, params, extra: dict | None = None
+) -> None:
+    """Write a rank worker's inputs; ``params`` must be a dataclass instance."""
+    if not dataclasses.is_dataclass(params) or isinstance(params, type):
+        raise TypeError(f"params must be a dataclass instance, got {type(params)!r}")
     payload = {
         "prefix": str(prefix),
-        "params": _serialize_params(params),
+        "params_cls": qualified_name(type(params)),
+        "params": dataclasses.asdict(params),
         "extra": dict(extra) if extra is not None else {},
     }
-    with open(spec_file, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f)
 
 
-def _read_worker_result(
-    result_file: str,
-) -> tuple[list[float], list[int], float, float]:
-    with open(result_file, encoding="utf-8") as f:
+def read_worker_spec(path: str) -> tuple[str, object, dict]:
+    """Return ``(prefix, params, extra)``, rebuilding the params dataclass."""
+    with open(path, encoding="utf-8") as f:
+        spec = json.load(f)
+    params_cls = resolve_qualified_name(spec["params_cls"])
+    if not dataclasses.is_dataclass(params_cls):
+        raise TypeError(f"{spec['params_cls']} is not a dataclass")
+    return spec["prefix"], params_cls(**spec["params"]), spec["extra"]
+
+
+def write_worker_result(
+    path: str,
+    durations: list[float],
+    rows: list[int],
+    ttfb: float,
+    build_seconds: float,
+) -> None:
+    """Write a worker's reduced metrics for the parent to read back."""
+    payload = {
+        "durations": list(durations),
+        "rows": list(rows),
+        "ttfb": ttfb,
+        "build_seconds": build_seconds,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+
+
+def read_worker_result(path: str) -> tuple[list[float], list[int], float, float]:
+    """Return ``(durations, rows, ttfb, build_seconds)`` written by a worker."""
+    with open(path, encoding="utf-8") as f:
         data = json.load(f)
     return (
         list(data["durations"]),
@@ -131,60 +179,71 @@ def _read_worker_result(
     )
 
 
+@contextlib.contextmanager
+def worker_files(prefix: str, params, extra: dict | None = None):
+    """Yield ``(spec_file, result_file)`` in a private temp dir with the spec written."""
+    with tempfile.TemporaryDirectory(prefix="gcsfs_dl_worker_") as tmpdir:
+        spec_file = os.path.join(tmpdir, "spec.json")
+        result_file = os.path.join(tmpdir, "result.json")
+        write_worker_spec(spec_file, prefix, params, extra)
+        yield spec_file, result_file
+
+
 def run_rank_epochs_distributed(
-    worker_kind: str,
+    entry,
     prefix: str,
     params,
     *,
     extra: dict | None = None,
-    prepare_tpu_env: bool = True,
+    cpu_only: bool = False,
 ) -> tuple[list[float], list[int], float, float]:
-    """Run multi-rank epochs via torchrun and return (durations, rows, ttfb, build_s)."""
-    with tempfile.TemporaryDirectory(prefix="gcsfs_dl_worker_") as tmpdir:
-        spec_file = os.path.join(tmpdir, "spec.json")
-        result_file = os.path.join(tmpdir, "result.json")
-        _write_worker_spec(spec_file, prefix, params, extra)
-        args = [
-            "--kind",
-            worker_kind,
-            "--spec-file",
-            spec_file,
-            "--result-file",
-            result_file,
-            "--distributed",
-        ]
+    """Run ``entry`` on ``params.world_size`` torchrun ranks.
+
+    ``entry`` is a module-level ``(rank, world_size, prefix, params, barrier,
+    extra) -> (per_epoch, ttfb, build_seconds)`` function; ``cpu_only`` runs
+    the ranks on CPU for work that never touches an accelerator. Returns
+    ``(durations, rows, ttfb, build_seconds)``.
+    """
+    with worker_files(prefix, params, extra) as (spec_file, result_file):
         launcher.run_torchrun(
             _WORKER_MODULE,
-            args,
+            [
+                "--entry",
+                qualified_name(entry),
+                "--spec-file",
+                spec_file,
+                "--result-file",
+                result_file,
+                "--distributed",
+            ],
             world_size=params.world_size,
-            rdzv_id=f"dl-{worker_kind}-{uuid.uuid4().hex[:8]}",
-            prepare_tpu_env=prepare_tpu_env,
+            rdzv_id=f"dl-{uuid.uuid4().hex[:8]}",
+            cpu_only=cpu_only,
         )
-        return _read_worker_result(result_file)
+        return read_worker_result(result_file)
 
 
 def run_single_rank_isolated(
-    worker_kind: str,
+    entry,
     prefix: str,
     params,
     *,
     extra: dict | None = None,
 ) -> tuple[list[float], list[int], float, float]:
-    """Run single-rank epochs in an isolated subprocess and return metrics."""
-    with tempfile.TemporaryDirectory(prefix="gcsfs_dl_worker_") as tmpdir:
-        spec_file = os.path.join(tmpdir, "spec.json")
-        result_file = os.path.join(tmpdir, "result.json")
-        _write_worker_spec(spec_file, prefix, params, extra)
-        args = [
-            "--kind",
-            worker_kind,
-            "--spec-file",
-            spec_file,
-            "--result-file",
-            result_file,
-        ]
-        launcher.run_subprocess(_WORKER_MODULE, args)
-        return _read_worker_result(result_file)
+    """Run ``entry`` as rank 0 of 1 in an isolated subprocess and return metrics."""
+    with worker_files(prefix, params, extra) as (spec_file, result_file):
+        launcher.run_subprocess(
+            _WORKER_MODULE,
+            [
+                "--entry",
+                qualified_name(entry),
+                "--spec-file",
+                spec_file,
+                "--result-file",
+                result_file,
+            ],
+        )
+        return read_worker_result(result_file)
 
 
 def assert_fsspec_gcsfs(prefix):

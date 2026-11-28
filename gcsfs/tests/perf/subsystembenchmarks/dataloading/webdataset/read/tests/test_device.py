@@ -167,11 +167,11 @@ def test_run_rank_epochs_on_cpu_neither_pins_nor_synchronizes(
 
 
 @pytest.mark.parametrize("decode", [False, True])
-def test_split_run_passes_prepare_tpu_env_matching_decode(prefix, monkeypatch, decode):
+def test_split_run_launches_undecoded_ranks_on_cpu(prefix, monkeypatch, decode):
     seen = []
 
-    def fake_distributed(kind, pfx, params, *, extra=None, prepare_tpu_env=True):
-        seen.append((kind, pfx, params, extra, prepare_tpu_env))
+    def fake_distributed(entry, pfx, params, *, extra=None, cpu_only=False):
+        seen.append((entry, pfx, params, extra, cpu_only))
         return ([0.1], [_FILES * _ROWS], 0.05, 0.01)
 
     monkeypatch.setattr(driver, "run_rank_epochs_distributed", fake_distributed)
@@ -181,12 +181,12 @@ def test_split_run_passes_prepare_tpu_env_matching_decode(prefix, monkeypatch, d
     )
 
     assert len(seen) == 1
-    kind, pfx, got_params, extra, prepare_tpu_env = seen[0]
-    assert kind == "wds"
+    entry, pfx, got_params, extra, cpu_only = seen[0]
+    assert entry is driver.worker_entry
     assert pfx == prefix
     assert got_params == params
     assert extra == {"cache_root": None, "sample_count": _FILES * _ROWS}
-    assert prepare_tpu_env is decode
+    assert cpu_only is not decode
     assert result.rows_per_epoch == [_FILES * _ROWS]
 
 
@@ -199,8 +199,8 @@ def test_tpu_single_rank_decoded_isolates_in_subprocess(prefix, monkeypatch):
     )
     isolated = []
 
-    def fake_isolated(kind, pfx, params, *, extra=None):
-        isolated.append((kind, pfx, params.world_size, params.split_by_node, extra))
+    def fake_isolated(entry, pfx, params, *, extra=None):
+        isolated.append((entry, pfx, params.world_size, params.split_by_node, extra))
         return ([0.1], [_FILES * _ROWS], 0.05, 0.01)
 
     monkeypatch.setattr(driver, "run_single_rank_isolated", fake_isolated)
@@ -211,7 +211,13 @@ def test_tpu_single_rank_decoded_isolates_in_subprocess(prefix, monkeypatch):
 
     assert parent_binds == []
     assert isolated == [
-        ("wds", prefix, 1, False, {"cache_root": None, "sample_count": _FILES * _ROWS})
+        (
+            driver.worker_entry,
+            prefix,
+            1,
+            False,
+            {"cache_root": None, "sample_count": _FILES * _ROWS},
+        )
     ]
     assert res.rows_per_epoch == [_FILES * _ROWS]
 
@@ -255,26 +261,41 @@ def test_wds_driver_consults_device_pin_memory(
     assert loader_kwargs[0]["pin_memory"] is False
 
 
-def test_wds_worker_registered_and_handles_deserialized_namespace(
-    prefix, monkeypatch, sync_calls, ranks_on_fake_gpu, loader_kwargs
+def test_worker_runs_the_entry_with_rebuilt_params(
+    prefix, tmp_path, sync_calls, ranks_on_fake_gpu, loader_kwargs
 ):
-    import dataclasses
-    from types import SimpleNamespace
-
+    """The single-rank worker rebuilds the params dataclass, properties included."""
     from gcsfs.tests.perf.subsystembenchmarks.dataloading import _worker
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import driver as dl_driver
 
-    worker_fn = _worker._resolve_worker("wds")
-    # Simulate _worker.main deserializing dataclass params into SimpleNamespace.
-    ns_params = SimpleNamespace(
-        **dataclasses.asdict(_params(access="shuffled", decode=True, rounds=1))
-    )
-    per_epoch, _, _ = worker_fn(
-        0,
-        1,
-        prefix,
-        ns_params,
-        None,
-        {"cache_root": None, "sample_count": _FILES * _ROWS},
+    spec_file = str(tmp_path / "spec.json")
+    result_file = str(tmp_path / "result.json")
+    params = _params(access="shuffled", decode=True, rounds=1)
+    dl_driver.write_worker_spec(
+        spec_file, prefix, params, {"cache_root": None, "sample_count": _FILES * _ROWS}
     )
 
-    assert [rows for _, _, rows in per_epoch] == [_FILES * _ROWS]
+    _worker.main(
+        [
+            "--entry",
+            dl_driver.qualified_name(driver.worker_entry),
+            "--spec-file",
+            spec_file,
+            "--result-file",
+            result_file,
+        ]
+    )
+
+    _, rows, _, _ = dl_driver.read_worker_result(result_file)
+    assert rows == [_FILES * _ROWS]
+    assert ranks_on_fake_gpu == [0]
+    assert sync_calls == [FAKE_GPU]
+
+
+def test_build_loader_spawns_workers_and_keeps_in_process_loading_unchanged(prefix):
+    params = _params()
+    dataset = driver.build_dataset(prefix, params, split_by_node=False)
+    assert driver.build_loader(dataset, params).multiprocessing_context is None
+    params.num_workers = 1
+    loader = driver.build_loader(dataset, params)
+    assert loader.multiprocessing_context.get_start_method() == "spawn"

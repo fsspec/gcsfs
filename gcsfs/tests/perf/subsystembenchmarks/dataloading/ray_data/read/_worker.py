@@ -1,19 +1,20 @@
-"""Isolated subprocess worker for Ray Data TPU read benchmarks."""
+"""Isolated subprocess worker for Ray Data TPU read benchmarks.
+
+``launcher.run_subprocess`` starts this module with a clean ``TORCH_TPU_*``
+env; for multi-rank cases it sets the TorchTPU launch env before Ray starts so
+every rank-pinned actor inherits it.
+"""
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from collections.abc import Sequence
 
 from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
-from gcsfs.tests.perf.subsystembenchmarks.dataloading.ray_data.parameters import (
-    RayDataReadParameters,
-)
+from gcsfs.tests.perf.subsystembenchmarks.dataloading import driver as dl_driver
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.ray_data.read import driver
 
-_TPU_ENV_PREFIX = "TORCH_TPU_"
 _RAY_NOSET_TPU_ENV = "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS"
 
 
@@ -28,47 +29,29 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _prepare_tpu_env(effective_ws: int) -> None:
+def _configure_tpu_env(world_size: int) -> None:
     count = accelerator.local_device_count()
-    if effective_ws > count:
+    if world_size > count:
         raise ValueError(
-            f"world_size {effective_ws} exceeds {count} "
+            f"world_size {world_size} exceeds {count} "
             f"{accelerator.accelerator_type()} devices"
         )
-    for key in [k for k in os.environ if k.startswith(_TPU_ENV_PREFIX)]:
-        os.environ.pop(key, None)
-    os.environ.pop(_RAY_NOSET_TPU_ENV, None)
-    if effective_ws > 1:
+    if world_size > 1:
         os.environ[_RAY_NOSET_TPU_ENV] = "1"
         from torch.tpu import distributed as tpu_distributed
 
-        tpu_distributed.set_tpu_launch_env(nproc_per_node=effective_ws)
-
-
-def _write_result(result_file: str, result: driver.ReadResult) -> None:
-    payload = {
-        "durations": list(result.durations),
-        "rows": list(result.rows_per_epoch),
-        "ttfb": result.ttfb_seconds,
-        "build_seconds": result.build_seconds,
-    }
-    with open(result_file, "w", encoding="utf-8") as f:
-        json.dump(payload, f)
+        tpu_distributed.set_tpu_launch_env(nproc_per_node=world_size)
+    else:
+        os.environ.pop(_RAY_NOSET_TPU_ENV, None)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
-    with open(args.spec_file, encoding="utf-8") as f:
-        spec = json.load(f)
-
-    prefix = spec["prefix"]
-    params = RayDataReadParameters(**spec["params"])
+    prefix, params, _ = dl_driver.read_worker_spec(args.spec_file)
 
     if driver._uses_tpu_actors(params):
-        effective_ws = (
-            params.world_size if (params.split_by_node and params.world_size > 1) else 1
-        )
-        _prepare_tpu_env(effective_ws)
+        multi_rank = params.split_by_node and params.world_size > 1
+        _configure_tpu_env(params.world_size if multi_rank else 1)
 
     try:
         driver.ensure_ray_initialized()
@@ -76,7 +59,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     finally:
         driver.shutdown_ray()
 
-    _write_result(args.result_file, result)
+    dl_driver.write_worker_result(
+        args.result_file,
+        result.durations,
+        result.rows_per_epoch,
+        result.ttfb_seconds,
+        result.build_seconds,
+    )
 
 
 if __name__ == "__main__":

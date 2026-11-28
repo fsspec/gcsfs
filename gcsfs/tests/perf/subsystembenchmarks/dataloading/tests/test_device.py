@@ -21,11 +21,11 @@ FAKE_TPU = torch.device("meta")
 
 @pytest.fixture(autouse=True)
 def _clean_accelerator(monkeypatch):
-    accelerator._clear_caches()
+    accelerator.reset_cache()
     monkeypatch.delenv(accelerator.DEVICE_ENV, raising=False)
     monkeypatch.delenv("TORCH_DEVICE_BACKEND_AUTOLOAD", raising=False)
     yield
-    accelerator._clear_caches()
+    accelerator.reset_cache()
 
 
 @pytest.fixture
@@ -62,29 +62,22 @@ def test_rank_device_is_none_on_cpu(on_cpu):
     assert device_lib.rank_device(3) is None
 
 
-def test_rank_device_delegates_to_accelerator_bind_rank_on_gpu(on_gpu, monkeypatch):
+@pytest.mark.parametrize("kind", ["cuda", "tpu"])
+def test_rank_device_delegates_to_accelerator_bind_rank(monkeypatch, kind):
     bound = []
-    on_gpu(4)
-    monkeypatch.setattr(
-        accelerator, "bind_rank", lambda rank: bound.append(rank) or FAKE_GPU
-    )
-
-    assert device_lib.rank_device(6) == FAKE_GPU
-    assert bound == [6]
-
-
-def test_rank_device_delegates_to_accelerator_bind_rank_on_tpu(on_tpu, monkeypatch):
-    bound = []
-    on_tpu(8)
+    monkeypatch.setattr(accelerator, "device_kind", lambda: kind)
     monkeypatch.setattr(
         accelerator,
         "bind_rank",
-        lambda rank, **kw: bound.append((rank, kw)) or FAKE_TPU,
+        lambda rank, **kw: bound.append((rank, kw)) or FAKE_GPU,
     )
 
-    assert device_lib.rank_device(2) == FAKE_TPU
-    assert device_lib.rank_device(3, world_size=4) == FAKE_TPU
-    assert bound == [(2, {}), (3, {"global_rank": 3, "world_size": 4})]
+    assert device_lib.rank_device(2) == FAKE_GPU
+    assert device_lib.rank_device(3, world_size=4) == FAKE_GPU
+    assert bound == [
+        (2, {"global_rank": 2, "world_size": None}),
+        (3, {"global_rank": 3, "world_size": 4}),
+    ]
 
 
 def test_pin_memory_matches_device_presence():
@@ -108,6 +101,11 @@ def test_to_device_moves_nested_tensors_and_passes_other_values_through():
     assert isinstance(out[1]["ids"], tuple)
     assert out[1]["ids"][0].device == FAKE_GPU
     assert out[1]["ids"][1] == 7
+
+
+def test_to_device_keeps_tensors_already_on_the_device():
+    tensor = torch.ones(2, device=FAKE_GPU)
+    assert device_lib.to_device({"label": tensor}, FAKE_GPU)["label"] is tensor
 
 
 def test_feed_returns_loader_unchanged_on_cpu(on_cpu):
@@ -197,24 +195,6 @@ def test_rounds_stopped_at_a_target_synchronize_before_their_end_timestamp(
     assert len(synced_at) == 2
     for (begin, end, _), sync in zip(per_epoch, synced_at):
         assert begin < sync < end
-
-
-def test_ray_task_resources_delegates_and_skips_feature_cases(on_cpu, on_gpu, on_tpu):
-    assert device_lib.ray_task_resources(8, has_features=False) == {}
-    assert device_lib.ray_task_resources(8, has_features=True) == {}
-
-    on_gpu(8)
-    assert device_lib.ray_task_resources(16, has_features=False) == {"num_gpus": 0.5}
-    assert device_lib.ray_task_resources(8, has_features=False) == {"num_gpus": 1.0}
-    assert device_lib.ray_task_resources(8, has_features=True) == {}
-
-    on_tpu(8)
-    assert device_lib.ray_task_resources(8, has_features=False) == {
-        "resources": {"TPU": 1.0}
-    }
-    with pytest.raises(ValueError, match="exceeds 8 tpu devices"):
-        device_lib.ray_task_resources(16, has_features=False)
-    assert device_lib.ray_task_resources(8, has_features=True) == {}
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA GPU")

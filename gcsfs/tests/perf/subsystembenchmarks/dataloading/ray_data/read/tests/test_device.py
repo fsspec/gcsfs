@@ -21,7 +21,7 @@ from gcsfs.tests.perf.subsystembenchmarks._common import (  # noqa: E402
 )
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import (  # noqa: E402
     ReadResult,
-    _write_worker_spec,
+    write_worker_spec,
 )
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.ray_data.parameters import (  # noqa: E402
     RayDataReadParameters,
@@ -204,11 +204,7 @@ def test_multi_rank_tasks_request_their_accelerator_resources(
             return real_consume.options(num_gpus=0, resources={})
 
     monkeypatch.setattr(driver, "_consume_shard", _RecordingRemote())
-    monkeypatch.setattr(
-        driver.device_lib,
-        "ray_task_resources",
-        lambda ws, has_features: {} if has_features else {"num_gpus": 0.375},
-    )
+    monkeypatch.setattr(accelerator, "ray_resources", lambda ws: {"num_gpus": 0.375})
     params = _params(split_by_node=True, world_size=2)
     arrow_fs, paths = driver.resolve_parquet_source(
         _write_shards(tmp_path, "pretok_parquet")
@@ -230,14 +226,7 @@ def test_feature_columns_skip_the_accelerator(
     monkeypatch.setattr(
         driver.device_lib, "rank_device", lambda rank: ranks.append(rank) or FAKE_GPU
     )
-    real_resources = driver.device_lib.ray_task_resources
-
-    def spy_resources(ws, has_features):
-        res = real_resources(ws, has_features)
-        resource_calls.append((ws, has_features, res))
-        return res
-
-    monkeypatch.setattr(driver.device_lib, "ray_task_resources", spy_resources)
+    monkeypatch.setattr(accelerator, "ray_resources", resource_calls.append)
     monkeypatch.setattr(accelerator, "device_kind", lambda: "cuda")
     monkeypatch.setattr(accelerator, "local_device_count", lambda: 8)
     params = _params(**_FEATURES)
@@ -254,7 +243,7 @@ def test_feature_columns_skip_the_accelerator(
 
     assert rows == [20, 20] and shard_rows == 20 and multi_rows == [20, 20]
     assert ranks == [] and sync_calls == []
-    assert resource_calls == [(2, True, {})]
+    assert resource_calls == []
 
 
 class _FakeActor:
@@ -490,9 +479,7 @@ def test_shuffled_rounds_read_files_in_a_new_order(
     if path.startswith("tpu"):
         # The TPU actor path, scheduled on this CPU-only test cluster.
         monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
-        monkeypatch.setattr(
-            driver.device_lib, "ray_task_resources", lambda ws, has_features: {}
-        )
+        monkeypatch.setattr(accelerator, "ray_resources", lambda ws: {})
     shards = tmp_path / "shards"
     shards.mkdir()
     log_dir = tmp_path / "log"
@@ -592,9 +579,6 @@ def test_worker_multi_rank_tpu_sets_launch_env_before_ray_init_and_shuts_down(
 
     monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
     monkeypatch.setattr(accelerator, "local_device_count", lambda: 8)
-    monkeypatch.setenv("TORCH_TPU_TOPOLOGY", "stale-topo")
-    monkeypatch.setenv("TORCH_TPU_SLICEBUILDER_ADDRESSES", "stale-addr")
-    monkeypatch.setenv("TORCH_TPU_DEVICES_PER_HOST", "8")
     monkeypatch.delenv("RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS", raising=False)
 
     events = []
@@ -604,9 +588,6 @@ def test_worker_multi_rank_tpu_sets_launch_env_before_ray_init_and_shuts_down(
             (
                 "set_tpu_launch_env",
                 nproc_per_node,
-                os.environ.get("TORCH_TPU_TOPOLOGY"),
-                os.environ.get("TORCH_TPU_SLICEBUILDER_ADDRESSES"),
-                os.environ.get("TORCH_TPU_DEVICES_PER_HOST"),
                 os.environ.get("RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS"),
             )
         )
@@ -656,14 +637,14 @@ def test_worker_multi_rank_tpu_sets_launch_env_before_ray_init_and_shuts_down(
 
     spec_file = tmp_path / "spec.json"
     result_file = tmp_path / "result.json"
-    _write_worker_spec(
+    write_worker_spec(
         str(spec_file), "gs://b/p/", _params(split_by_node=True, world_size=4), None
     )
 
     _worker.main(["--spec-file", str(spec_file), "--result-file", str(result_file)])
 
     assert events == [
-        ("set_tpu_launch_env", 4, None, None, None, "1"),
+        ("set_tpu_launch_env", 4, "1"),
         (
             "ray_init",
             {
@@ -690,8 +671,6 @@ def test_worker_single_rank_tpu_skips_set_tpu_launch_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
     monkeypatch.setattr(accelerator, "local_device_count", lambda: 8)
-    monkeypatch.setenv("TORCH_TPU_TOPOLOGY", "stale-topo")
-    monkeypatch.setenv("TORCH_TPU_DEVICES_PER_HOST", "8")
     monkeypatch.setenv("RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS", "1")
 
     tpu_env_calls = []
@@ -715,15 +694,13 @@ def test_worker_single_rank_tpu_skips_set_tpu_launch_env(tmp_path, monkeypatch):
 
     spec_file = tmp_path / "spec.json"
     result_file = tmp_path / "result.json"
-    _write_worker_spec(
+    write_worker_spec(
         str(spec_file), "gs://b/p/", _params(split_by_node=False, world_size=1), None
     )
 
     _worker.main(["--spec-file", str(spec_file), "--result-file", str(result_file)])
 
     assert tpu_env_calls == []
-    assert "TORCH_TPU_TOPOLOGY" not in os.environ
-    assert "TORCH_TPU_DEVICES_PER_HOST" not in os.environ
     assert "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS" not in os.environ
     assert events == ["init", "run", "shutdown"]
     assert json.loads(result_file.read_text())["rows"] == [20]
@@ -739,7 +716,7 @@ def test_worker_tpu_rejects_world_size_above_host_tpus(tmp_path, monkeypatch):
 
     spec_file = tmp_path / "spec.json"
     result_file = tmp_path / "result.json"
-    _write_worker_spec(
+    write_worker_spec(
         str(spec_file), "gs://b/p/", _params(split_by_node=True, world_size=8), None
     )
 
@@ -765,7 +742,7 @@ def test_worker_shuts_down_ray_on_run_error(tmp_path, monkeypatch):
 
     spec_file = tmp_path / "spec.json"
     result_file = tmp_path / "result.json"
-    _write_worker_spec(
+    write_worker_spec(
         str(spec_file), "gs://b/p/", _params(split_by_node=False, world_size=1), None
     )
 

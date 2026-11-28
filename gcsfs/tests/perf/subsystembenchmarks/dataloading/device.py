@@ -20,8 +20,6 @@ def rank_device(rank, *, world_size=None):
     """
     if accelerator.device_kind() == "cpu":
         return None
-    if world_size is None:
-        return accelerator.bind_rank(rank)
     return accelerator.bind_rank(rank, global_rank=rank, world_size=world_size)
 
 
@@ -31,28 +29,17 @@ def pin_memory(device) -> bool:
 
 
 def _to_device(obj, device, tensor_cls):
+    # Tensor.to returns the tensor itself when it is already on ``device``.
     if isinstance(obj, tensor_cls):
-        return obj if obj.device == device else obj.to(device, non_blocking=True)
+        return obj.to(device, non_blocking=True)
     if isinstance(obj, dict):
-        changed = False
-        out = {}
-        for key, value in obj.items():
-            moved = _to_device(value, device, tensor_cls)
-            out[key] = moved
-            if moved is not value:
-                changed = True
-        return out if changed else obj
-    if isinstance(obj, (list, tuple)):
-        changed = False
-        out_items = []
-        for value in obj:
-            moved = _to_device(value, device, tensor_cls)
-            out_items.append(moved)
-            if moved is not value:
-                changed = True
-        if not changed:
-            return obj
-        return tuple(out_items) if isinstance(obj, tuple) else out_items
+        return {
+            key: _to_device(value, device, tensor_cls) for key, value in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_to_device(value, device, tensor_cls) for value in obj]
+    if isinstance(obj, tuple):
+        return tuple(_to_device(value, device, tensor_cls) for value in obj)
     return obj
 
 
@@ -89,10 +76,3 @@ def feed(loader, device):
     if device is None and accelerator.device_kind() != "tpu":
         return loader
     return _DeviceFeed(loader, device)
-
-
-def ray_task_resources(world_size: int, has_features: bool = False) -> dict:
-    """Ray task resource kwargs for ``world_size`` consumers; empty for CPU or feature cases."""
-    if has_features:
-        return {}
-    return accelerator.ray_resources(world_size)

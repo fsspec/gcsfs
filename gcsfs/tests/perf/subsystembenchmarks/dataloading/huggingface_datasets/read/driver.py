@@ -65,6 +65,8 @@ def _build_loader(ds, *, batch_size, num_workers, prefetch_factor, pin_memory=Fa
     if num_workers > 0:
         kwargs["prefetch_factor"] = prefetch_factor
         kwargs["persistent_workers"] = True
+        # Rank processes may already hold CUDA/libtpu state; never fork them.
+        kwargs["multiprocessing_context"] = "spawn"
     return DataLoader(ds, **kwargs)
 
 
@@ -163,14 +165,14 @@ def run_rank_epochs(rank, world_size, prefix, params, barrier=None, *, split=Tru
 
 
 def worker_entry(rank, world_size, prefix, params, barrier, extra):
-    """Worker entry point invoked by ``dataloading._worker``."""
+    """Rank entry point run by ``dataloading._worker``."""
     split = extra.get("split", True) if extra else True
     return run_rank_epochs(rank, world_size, prefix, params, barrier, split=split)
 
 
 def run_split_epochs(prefix, params):
     """Run `world_size` ranks via torchrun and reduce results across ranks."""
-    return run_rank_epochs_distributed("hf", prefix, params)
+    return run_rank_epochs_distributed(worker_entry, prefix, params)
 
 
 class HFReadDriver:
@@ -185,7 +187,7 @@ class HFReadDriver:
         elif accelerator.device_kind() == "tpu":
             # Isolate TPU device init inside a subprocess so pytest parent never locks libtpu.
             durations, rows_list, ttfb, build_seconds = run_single_rank_isolated(
-                "hf",
+                worker_entry,
                 prefix,
                 dataclasses.replace(params, world_size=1),
                 extra={"split": False},
