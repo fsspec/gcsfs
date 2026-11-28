@@ -27,9 +27,10 @@ A group is a `<subsystem>/<implementation>` directory with its own
 `--device` defaults to `auto`, which trusts `torch.accelerator.is_available()`
 to select `cuda`, `tpu`, or `cpu`; passing an explicit `--device=cuda` or
 `--device=tpu` fails fast if that accelerator is unavailable.
-Data-loading groups detect CUDA automatically. On a GPU host, each round
-includes copying batches to the GPU. The exceptions are WebDataset with
-`decode: false` and Ray Data cases with feature columns, where there is nothing to copy.
+Data-loading groups run on CPU, CUDA, or TPU according to `--device`. On a GPU
+or TPU host, each round includes copying batches to the accelerator. The
+exceptions are WebDataset with `decode: false` and Ray Data cases with feature
+columns, where there is nothing to copy.
 `checkpointing/pytorch_{save,load,reshard}` run on the device that `--device`
 resolves (`gloo` on CPU, `cpu:gloo,cuda:nccl` on GPU; TPU DCP support is pending);
 `checkpointing/pytorch_lightning` and `checkpointing/ray_pytorch` run on CPU (`gloo`).
@@ -57,7 +58,7 @@ columns). Such reads turn into hundreds of small range reads per file.
 | `cache_type`, `block_size` | gcsfs `open()` options for every file Ray opens, for any `ray_data` case. pyarrow's `FSSpecHandler` passes none, so the driver applies them as filesystem defaults. Unset keeps gcsfs's defaults. |
 
 With feature columns, batches stay pyarrow tables (binary columns have no tensor
-form), so these cases do not copy batches to the GPU.
+form), so these cases do not copy batches to the accelerator.
 
 With a projection, `dataset_read_throughput_mean_bytes_per_second` and
 `dataset_read_amplification_ratio` are still relative to the whole stored table.
@@ -296,7 +297,7 @@ subsystembenchmarks/
 │   ├── bucket.py       # per-case bucket (also used by checkpointing)
 │   ├── amplification.py
 │   ├── datagen.py      # synthetic Parquet/JSONL corpus, optional feature columns
-│   ├── device.py       # GPU batch delivery
+│   ├── device.py       # GPU/TPU batch delivery
 │   ├── huggingface_datasets/
 │   ├── ray_data/
 │   └── webdataset/     # also gcsfs_opener.py, imagegen.py

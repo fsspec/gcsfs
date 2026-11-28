@@ -1,6 +1,10 @@
 """Ray Data streaming read driver for subsystem benchmarks."""
 
+from __future__ import annotations
+
 import logging
+import os
+import tempfile
 import time
 
 import fsspec
@@ -9,13 +13,19 @@ import ray
 import torch
 
 import gcsfs
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator, launcher
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import device as device_lib
+from gcsfs.tests.perf.subsystembenchmarks.dataloading import driver as dl_driver
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import (
     ReadResult,
     assert_fsspec_gcsfs,
     assert_gcsfs_backed,
     reduce_split,
     timestamp,
+)
+
+_WORKER_MODULE = (
+    "gcsfs.tests.perf.subsystembenchmarks.dataloading.ray_data.read._worker"
 )
 
 
@@ -37,10 +47,25 @@ class _GCSFileSystemWithCacheType(gcsfs.GCSFileSystem):
         return super()._open(path, mode, **kwargs)
 
 
+def _uses_tpu_actors(params) -> bool:
+    """Return True when TPU consumers must run in rank-pinned persistent Ray actors."""
+    return accelerator.device_kind() == "tpu" and not params.has_features
+
+
+def _kill_actors(actors) -> None:
+    """Explicitly terminate Ray actors before cluster shutdown."""
+    for actor in actors:
+        try:
+            ray.kill(actor, no_restart=True)
+        except Exception:
+            pass
+
+
 def ensure_ray_initialized():
-    """Initializes local Ray cluster on CPU if not already running."""
+    """Initializes local Ray cluster if not already running."""
     if not ray.is_initialized():
         ray.init(
+            address="local",
             include_dashboard=False,
             ignore_reinit_error=True,
             logging_level=logging.WARNING,
@@ -138,7 +163,7 @@ def _torch_batch_kwargs(params, shuffle_seed, collate_fn, device):
         collate_fn=collate_fn,
         device=device if device is not None else torch.device("cpu"),
         # Ray pins only pure-tensor batches, i.e. without a custom collate.
-        pin_memory=device is not None and collate_fn is None,
+        pin_memory=device_lib.pin_memory(device) and collate_fn is None,
         drop_last=False,
     )
 
@@ -168,25 +193,81 @@ def _iter_batches(source, params, shuffle_seed, collate_fn, device):
     return device_lib.feed(batches, device)
 
 
+def _epoch_shuffle_seed(params, epoch: int) -> int | None:
+    if params.access == "shuffled" and params.shuffle_buffer_size > 0:
+        return 42 + epoch
+    return None
+
+
+def _consume_batches(source, params, shuffle_seed, collate_fn, device):
+    """Consume all batches from ``source`` and return ``(first_batch, end, rows)``."""
+    first_batch = None
+    rows = 0
+    for batch in _iter_batches(source, params, shuffle_seed, collate_fn, device):
+        if first_batch is None:
+            first_batch = timestamp()
+        rows += _rows_in_batch(batch)
+    return first_batch, timestamp(), rows
+
+
+@ray.remote(num_cpus=1)
+class _ShardConsumer:
+    """Persistent rank-pinned TPU consumer that keeps its dataset or split.
+
+    Holding ``source`` for the whole case keeps Ray's execution count across
+    rounds, so ``FileShuffleConfig(reseed_after_execution=True)`` reshuffles files
+    every round instead of repeating round 1's order.
+    """
+
+    def __init__(self, rank: int, params, source):
+        self._params = params
+        self._source = source
+        self._device = device_lib.rank_device(rank)
+
+    def ready(self) -> bool:
+        return True
+
+    def consume(self, shuffle_seed, collate_fn):
+        return _consume_batches(
+            self._source, self._params, shuffle_seed, collate_fn, self._device
+        )
+
+
 def run_single_rank(dataset, params):
     """Iterates dataset on single consumer rank across rounds."""
-    device = None if params.has_features else device_lib.rank_device(0)
+    collate_fn = _TextParquetCollateFn() if params.fmt == "text_parquet" else None
     per_epoch = []
     ttfb = None
-    collate_fn = _TextParquetCollateFn() if params.fmt == "text_parquet" else None
-    for epoch in range(params.rounds):
-        begin = timestamp()
-        rows = 0
-        shuffle_seed = (
-            42 + epoch
-            if params.access == "shuffled" and params.shuffle_buffer_size > 0
-            else None
-        )
-        for batch in _iter_batches(dataset, params, shuffle_seed, collate_fn, device):
-            if epoch == 0 and ttfb is None:
-                ttfb = timestamp() - begin
-            rows += _rows_in_batch(batch)
-        per_epoch.append((begin, timestamp(), rows))
+    if _uses_tpu_actors(params):
+        resources = device_lib.ray_task_resources(1, False)
+        actor = None
+        try:
+            actor = _ShardConsumer.options(**resources).remote(0, params, dataset)
+            ray.get(actor.ready.remote())
+            for epoch in range(params.rounds):
+                shuffle_seed = _epoch_shuffle_seed(params, epoch)
+                begin = timestamp()
+                first_batch, end, rows = ray.get(
+                    actor.consume.remote(shuffle_seed, collate_fn)
+                )
+                if epoch == 0 and first_batch is not None:
+                    ttfb = first_batch - begin
+                per_epoch.append((begin, end, rows))
+        finally:
+            if actor is not None:
+                _kill_actors([actor])
+    else:
+        device = None if params.has_features else device_lib.rank_device(0)
+        for epoch in range(params.rounds):
+            shuffle_seed = _epoch_shuffle_seed(params, epoch)
+            begin = timestamp()
+            first_batch, end, rows = _consume_batches(
+                dataset, params, shuffle_seed, collate_fn, device
+            )
+            if epoch == 0 and first_batch is not None:
+                ttfb = first_batch - begin
+            per_epoch.append((begin, end, rows))
+
     durations = [end - begin for begin, end, _ in per_epoch]
     rows_list = [r for _, _, r in per_epoch]
     return durations, rows_list, (ttfb if ttfb is not None else float("inf"))
@@ -195,16 +276,10 @@ def run_single_rank(dataset, params):
 @ray.remote(num_cpus=1)
 def _consume_shard(shard, params, shuffle_seed, collate_fn):
     """Consumes one streaming split, returning (first_batch, end, rows) timestamps."""
-    first_batch = None
-    rows = 0
     # Ray sets CUDA_VISIBLE_DEVICES from num_gpus, so rank 0 is this task's GPU.
     # Feature-column batches stay on the host, so those cases take no GPU.
     device = None if params.has_features else device_lib.rank_device(0)
-    for batch in _iter_batches(shard, params, shuffle_seed, collate_fn, device):
-        if first_batch is None:
-            first_batch = timestamp()
-        rows += _rows_in_batch(batch)
-    return first_batch, timestamp(), rows
+    return _consume_batches(shard, params, shuffle_seed, collate_fn, device)
 
 
 def run_multi_rank(dataset, params):
@@ -212,35 +287,53 @@ def run_multi_rank(dataset, params):
     world_size = params.world_size
     epoch_records = []
     collate_fn = _TextParquetCollateFn() if params.fmt == "text_parquet" else None
-    num_gpus = 0 if params.has_features else device_lib.ray_task_num_gpus(world_size)
-    for epoch in range(params.rounds):
+    resources = device_lib.ray_task_resources(world_size, params.has_features)
+    actors = []
+    try:
+        # Split once per case: Ray reshuffles files from the split coordinator's
+        # execution count, which a fresh split every round would reset to zero.
         splits = dataset.streaming_split(n=world_size, equal=False)
-        shuffle_seed = (
-            42 + epoch
-            if params.access == "shuffled" and params.shuffle_buffer_size > 0
-            else None
-        )
-
-        # Start the clock before dispatch so the time Ray spends scheduling the
-        # consumer tasks is charged to the epoch instead of being invisible.
-        begin = timestamp()
-        futures = [
-            _consume_shard.options(num_gpus=num_gpus).remote(
-                split, params, shuffle_seed, collate_fn
-            )
-            for split in splits
-        ]
-        epoch_records.append(
-            [
-                (
-                    begin,
-                    end,
-                    rows,
-                    (first_batch - begin) if first_batch is not None else float("inf"),
+        if _uses_tpu_actors(params):
+            for rank in range(world_size):
+                actors.append(
+                    _ShardConsumer.options(**resources).remote(
+                        rank, params, splits[rank]
+                    )
                 )
-                for first_batch, end, rows in ray.get(futures)
-            ]
-        )
+            ray.get([actor.ready.remote() for actor in actors])
+        for epoch in range(params.rounds):
+            shuffle_seed = _epoch_shuffle_seed(params, epoch)
+            # Start the clock before dispatch so the time Ray spends scheduling the
+            # consumer tasks is charged to the epoch instead of being invisible.
+            begin = timestamp()
+            if actors:
+                futures = [
+                    actor.consume.remote(shuffle_seed, collate_fn) for actor in actors
+                ]
+            else:
+                futures = [
+                    _consume_shard.options(**resources).remote(
+                        split, params, shuffle_seed, collate_fn
+                    )
+                    for split in splits
+                ]
+            epoch_records.append(
+                [
+                    (
+                        begin,
+                        end,
+                        rows,
+                        (
+                            (first_batch - begin)
+                            if first_batch is not None
+                            else float("inf")
+                        ),
+                    )
+                    for first_batch, end, rows in ray.get(futures)
+                ]
+            )
+    finally:
+        _kill_actors(actors)
 
     results = []
     for r in range(world_size):
@@ -254,6 +347,39 @@ def run_multi_rank(dataset, params):
     return reduce_split(results, params.rounds)
 
 
+def _run_read_in_process(prefix, params) -> ReadResult:
+    """Build dataset and execute read rounds in the current Ray driver process."""
+    build_start = time.perf_counter()
+    arrow_fs, paths = resolve_parquet_source(
+        prefix, params.cache_type, params.block_size
+    )
+    dataset = build_dataset(arrow_fs, paths, params)
+    build_seconds = time.perf_counter() - build_start
+
+    if params.split_by_node and params.world_size > 1:
+        durations, rows_list, ttfb = run_multi_rank(dataset, params)
+    else:
+        durations, rows_list, ttfb = run_single_rank(dataset, params)
+
+    return ReadResult(durations, rows_list, ttfb, build_seconds)
+
+
+def _run_read_isolated(prefix, params) -> ReadResult:
+    """Run TPU Ray Data read inside an isolated subprocess so parent never touches libtpu."""
+    with tempfile.TemporaryDirectory(prefix="gcsfs_ray_worker_") as tmpdir:
+        spec_file = os.path.join(tmpdir, "spec.json")
+        result_file = os.path.join(tmpdir, "result.json")
+        dl_driver._write_worker_spec(spec_file, prefix, params, None)
+        launcher.run_subprocess(
+            _WORKER_MODULE,
+            ["--spec-file", spec_file, "--result-file", result_file],
+        )
+        durations, rows_list, ttfb, build_seconds = dl_driver._read_worker_result(
+            result_file
+        )
+    return ReadResult(durations, rows_list, ttfb, build_seconds)
+
+
 class RayDataReadDriver:
     """Driver for single and multi-rank Ray Data streaming read benchmarks."""
 
@@ -261,18 +387,7 @@ class RayDataReadDriver:
 
     def run_read(self, prefix, params, manifest):
         del manifest
+        if _uses_tpu_actors(params):
+            return _run_read_isolated(prefix, params)
         ensure_ray_initialized()
-
-        build_start = time.perf_counter()
-        arrow_fs, paths = resolve_parquet_source(
-            prefix, params.cache_type, params.block_size
-        )
-        dataset = build_dataset(arrow_fs, paths, params)
-        build_seconds = time.perf_counter() - build_start
-
-        if params.split_by_node and params.world_size > 1:
-            durations, rows_list, ttfb = run_multi_rank(dataset, params)
-        else:
-            durations, rows_list, ttfb = run_single_rank(dataset, params)
-
-        return ReadResult(durations, rows_list, ttfb, build_seconds)
+        return _run_read_in_process(prefix, params)

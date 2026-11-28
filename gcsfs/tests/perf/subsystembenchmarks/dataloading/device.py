@@ -94,8 +94,3 @@ def ray_task_resources(world_size: int, has_features: bool = False) -> dict:
     if has_features:
         return {}
     return accelerator.ray_resources(world_size)
-
-
-def ray_task_num_gpus(world_size):
-    """Temporary shim until ray_data switches to ``ray_task_resources``."""
-    return ray_task_resources(world_size).get("num_gpus", 0)
