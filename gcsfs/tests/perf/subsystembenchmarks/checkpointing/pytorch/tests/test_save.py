@@ -1,15 +1,24 @@
+import contextlib
+import json
+import os
 import struct
 
 import fsspec
 import pytest
 import torch
-from torch.distributed.checkpoint.fsspec_filesystem import FsspecReader
-from torch.distributed.checkpoint.metadata import MetadataIndex, TensorStorageMetadata
-from torch.multiprocessing.spawn import ProcessRaisedException
 
 pytest.importorskip("transformers")
 
+from torch.distributed.checkpoint.metadata import (  # noqa: E402
+    MetadataIndex,
+    TensorStorageMetadata,
+)
+
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (  # noqa: E402
+    ResourceSnapshot,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import (  # noqa: E402
+    _worker,
     common,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import (  # noqa: E402
@@ -17,9 +26,6 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.tiny import (  # noqa: E402
     make_params,
-)
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.write import (  # noqa: E402
-    driver as write_driver_mod,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.write.driver import (  # noqa: E402
     PyTorchCheckpointWriteDriver,
@@ -41,6 +47,7 @@ _SAVE_CASES_4RANK = [
 
 @pytest.mark.parametrize("model_kind, sizes", _SAVE_CASES_4RANK)
 def test_save_roundtrip(tmp_path, tiny_models, monkeypatch, model_kind, sizes):
+    FsspecReader, _ = common.import_fsspec_filesystem()
     params = _params(tiny_models[model_kind], world_size=4, rounds=3, **sizes)
     params.target_layout().validate()
     ckpt_dir = tmp_path / "ckpt"
@@ -48,14 +55,15 @@ def test_save_roundtrip(tmp_path, tiny_models, monkeypatch, model_kind, sizes):
     driver = PyTorchCheckpointWriteDriver()
 
     captured_bytes_written = []
-    orig_read_stats = common.read_stats
+    orig_run_worker = common.run_worker
 
-    def _spy_read_stats(stats_dir):
-        stats = orig_read_stats(stats_dir)
-        captured_bytes_written.extend(s["bytes_written"] for s in stats)
-        return stats
+    def _spy_run_worker(op, *args, **kwargs):
+        data = orig_run_worker(op, *args, **kwargs)
+        if op == "save" and data is not None:
+            captured_bytes_written.extend(s["bytes_written"] for s in data["stats"])
+        return data
 
-    monkeypatch.setattr(common, "read_stats", _spy_read_stats)
+    monkeypatch.setattr(common, "run_worker", _spy_run_worker)
 
     driver.setup(prefix, params)
     result = driver.run(prefix, params)
@@ -74,6 +82,9 @@ def test_save_roundtrip(tmp_path, tiny_models, monkeypatch, model_kind, sizes):
     assert len(result.durations) == 3
     assert all(d > 0 for d in result.durations)
     assert result.bytes_transferred is None
+    assert result.window is not None and result.window[0] <= result.window[1]
+    assert isinstance(result.resource_metrics, ResourceSnapshot)
+    assert result.resource_metrics.vcpus >= 1
     assert result.extra_columns.keys() == {"dcp_write_bytes_per_rank_max"}
     assert len(captured_bytes_written) == 4
     assert result.extra_columns["dcp_write_bytes_per_rank_max"] == max(
@@ -82,8 +93,8 @@ def test_save_roundtrip(tmp_path, tiny_models, monkeypatch, model_kind, sizes):
 
     # Replica deduplication & exactness: total bytes_written across all ranks
     # equals the tensor bytes of a single full copy of (model, optim).
-    weights = load_weights(tiny_models[model_kind])
-    one_copy_tensor_bytes = sum((3 * t.numel() + 1) * 4 for t in weights.values())
+    with load_weights(tiny_models[model_kind]) as weights:
+        one_copy_tensor_bytes = sum((3 * t.numel() + 1) * 4 for t in weights.values())
     md = FsspecReader(step2_uri).read_metadata().state_dict_metadata
     md_tensor_bytes = sum(
         c.sizes.numel() * item_md.properties.dtype.itemsize
@@ -103,7 +114,8 @@ def test_save_roundtrip(tmp_path, tiny_models, monkeypatch, model_kind, sizes):
     result.verify()
 
 
-def test_save_verify_detects_corruption(tmp_path, tiny_models):
+def test_save_verify_detects_corruption(tmp_path, tiny_models, capfd):
+    FsspecReader, _ = common.import_fsspec_filesystem()
     params = _params(
         tiny_models["llama"], strategy="fsdp", dp=2, world_size=2, rounds=2
     )
@@ -120,8 +132,8 @@ def test_save_verify_detects_corruption(tmp_path, tiny_models):
     info = meta.storage_data[idx]
     distcp_path = step_dir / info.relative_path
 
-    weights = load_weights(tiny_models["llama"])
-    embed_f32 = weights["model.embed_tokens.weight"].to(dtype=torch.float32)
+    with load_weights(tiny_models["llama"]) as weights:
+        embed_f32 = weights["model.embed_tokens.weight"].to(dtype=torch.float32)
     shard0_bytes = embed_f32[: embed_f32.shape[0] // 2].contiguous().numpy().tobytes()
     blob = bytearray(distcp_path.read_bytes())
     pos = blob.find(shard0_bytes, info.offset, info.offset + info.length)
@@ -130,14 +142,13 @@ def test_save_verify_detects_corruption(tmp_path, tiny_models):
     blob[pos : pos + 4] = struct.pack("<f", corrupted_val)
     distcp_path.write_bytes(bytes(blob))
 
-    with pytest.raises(
-        (ProcessRaisedException, RuntimeError),
-        match=(
-            r"RuntimeError: rank 0: value mismatch in 1 entries, "
-            r"e\.g\. model\.embed_tokens\.weight"
-        ),
-    ):
+    capfd.readouterr()
+    with pytest.raises(RuntimeError, match="Subprocess exited with status"):
         result.verify()
+    stderr = capfd.readouterr().err
+    assert (
+        "rank 0: value mismatch in 1 entries, e.g. model.embed_tokens.weight" in stderr
+    )
 
 
 @pytest.mark.parametrize(
@@ -149,32 +160,34 @@ def test_save_verify_detects_corruption(tmp_path, tiny_models):
     ],
 )
 def test_verify_reader_uses_blockcache_on_gcs_only(monkeypatch, prefix, kwargs):
-    monkeypatch.setattr(write_driver_mod, "FsspecReader", lambda p, **kw: (p, kw))
-    assert write_driver_mod._reader_for(prefix) == (prefix, kwargs)
+    monkeypatch.setattr(
+        _worker,
+        "import_fsspec_filesystem",
+        lambda: (lambda p, **kw: (p, kw), None),
+    )
+    assert _worker._reader_for(prefix) == (prefix, kwargs)
 
 
 @pytest.mark.parametrize("prefix", ["gcs://b/ckpt", "gcs://b/ckpt/"])
 def test_step_prefix_is_normalized(prefix):
-    assert write_driver_mod._step_prefix(prefix, 1) == "gcs://b/ckpt/step-1/"
+    assert _worker.step_prefix(prefix, 1) == "gcs://b/ckpt/step-1/"
 
 
-@pytest.mark.parametrize("rounds, expected_barriers", [(1, 2), (3, 8)])
-def test_rank_save_skips_post_round_barrier_on_round_zero(
+@pytest.mark.parametrize("rounds, expected_barriers", [(1, 4), (3, 10)])
+def test_worker_save_skips_post_round_barrier_on_round_zero(
     tmp_path, monkeypatch, rounds, expected_barriers
 ):
-    import contextlib
-    import os
-    import queue
-
     barriers = []
-    monkeypatch.setattr(
-        write_driver_mod,
-        "rank_session",
-        lambda *a, **kw: contextlib.nullcontext(torch.device("cpu")),
-    )
-    monkeypatch.setattr(write_driver_mod, "build_state", lambda *a, **kw: {})
-    monkeypatch.setattr(write_driver_mod, "warm_up", lambda *a, **kw: None)
-    monkeypatch.setattr(write_driver_mod.dist, "barrier", lambda: barriers.append(1))
+    monkeypatch.setattr(_worker, "build_state", lambda *a, **kw: {})
+    monkeypatch.setattr(_worker, "warm_up", lambda *a, **kw: None)
+    monkeypatch.setattr(_worker.dist, "barrier", lambda: barriers.append(1))
+    monkeypatch.setattr(_worker.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(_worker.dist, "get_world_size", lambda: 1)
+
+    def _fake_gather_object(payload, gathered, dst=0):
+        gathered[0] = payload
+
+    monkeypatch.setattr(_worker.dist, "gather_object", _fake_gather_object)
 
     def fake_dcp_save(state, *, storage_writer, planner):
         fs, root = fsspec.core.url_to_fs(storage_writer.path)
@@ -182,78 +195,22 @@ def test_rank_save_skips_post_round_barrier_on_round_zero(
         with open(os.path.join(root, ".metadata"), "wb") as f:
             f.write(b"ok")
 
-    monkeypatch.setattr(write_driver_mod.dcp, "save", fake_dcp_save)
+    monkeypatch.setattr(_worker.dcp, "save", fake_dcp_save)
 
     ckpt_dir = tmp_path / f"ckpt-r{rounds}"
-    stats_dir = tmp_path / f"stats-r{rounds}"
-    stats_dir.mkdir()
-    q = queue.Queue()
-    params = _params("fake", strategy="fsdp", dp=2, world_size=2, rounds=rounds)
+    result_file = tmp_path / f"result-r{rounds}.json"
+    params = _params("fake", strategy="fsdp", dp=1, world_size=1, rounds=rounds)
 
-    write_driver_mod._rank_save(
-        0,
-        2,
-        29500,
-        ckpt_dir.as_uri(),
-        params,
-        q,
-        weights={},
-        stats_dir=str(stats_dir),
-    )
+    with contextlib.nullcontext():
+        _worker._run_save(
+            ckpt_dir.as_uri(),
+            params,
+            weights={},
+            device=torch.device("cpu"),
+            result_file=str(result_file),
+        )
 
-    assert len(q.get_nowait()) == rounds
+    data = json.loads(result_file.read_text())
+    assert len(data["durations"]) == rounds
     assert len(barriers) == expected_barriers
     assert [p.name for p in ckpt_dir.iterdir()] == [f"step-{rounds - 1}"]
-
-
-def test_write_driver_close_clears_weights_without_verify(
-    tmp_path, tiny_models, monkeypatch
-):
-    from unittest.mock import MagicMock
-
-    params = _params(
-        tiny_models["llama"], strategy="fsdp", dp=2, world_size=2, rounds=1
-    )
-    prefix = (tmp_path / "ckpt_close").as_uri()
-    driver = PyTorchCheckpointWriteDriver()
-    driver.setup(prefix, params)
-
-    captured_weights = []
-    orig_load_weights = write_driver_mod.load_weights
-
-    def spy_load_weights(mid):
-        w = orig_load_weights(mid)
-        captured_weights.append(w)
-        return w
-
-    verify_spawns = []
-    orig_run_split = write_driver_mod.run_split
-
-    def spy_run_split(*args, **kwargs):
-        verify_spawns.append(args)
-        return orig_run_split(*args, **kwargs)
-
-    monkeypatch.setattr(write_driver_mod, "load_weights", spy_load_weights)
-    monkeypatch.setattr(write_driver_mod, "run_split", spy_run_split)
-
-    result = driver.run(prefix, params)
-    assert getattr(result, "close", None) is not None
-    assert len(captured_weights) == 1 and len(captured_weights[0]) > 0
-    result.close()
-    result.close()
-    assert captured_weights == [{}]
-    assert verify_spawns == []
-
-    # Error after load_weights before CheckpointResult return also clears weights.
-    weights_err = {"w": 1}
-    fake_ranks = MagicMock()
-    monkeypatch.setattr(write_driver_mod, "load_weights", lambda mid: weights_err)
-    monkeypatch.setattr(
-        write_driver_mod,
-        "spawn_with_stats",
-        lambda *a, **kw: (fake_ranks, [{"corrupt": 1}]),
-    )
-    with pytest.raises(KeyError):
-        driver.run(prefix, params)
-    fake_ranks.join.assert_called_once_with()
-    assert weights_err == {}

@@ -70,13 +70,13 @@ def _clean_env(monkeypatch):
         "GCSFS_SUBSYSTEM_SWEEP_AXES",
         "GCSFS_BENCHMARK_FILTER",
         "GCSFS_SUBSYSTEM_CONFIG",
-        "GCSFS_SUBSYSTEM_DEVICE",
         placement.NODES_ENV,
         placement.DEVICES_PER_NODE_ENV,
         placement.COLLECTED_CASES_FILE_ENV,
         placement.GROUP_ENV,
     ):
         monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv(accelerator.DEVICE_ENV, "cpu")
     yield
     accelerator.reset_cache()
 

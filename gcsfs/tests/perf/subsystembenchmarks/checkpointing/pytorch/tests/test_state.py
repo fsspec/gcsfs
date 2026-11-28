@@ -33,9 +33,6 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (  # noqa: 
     run_split,
     setup_distributed_env,
 )
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.device import (  # noqa: E402
-    rank_device,
-)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.layout import (  # noqa: E402
     Layout,
 )
@@ -104,9 +101,8 @@ _STRATEGIES_4RANK = [
 def _build_then_verify_rank(
     rank, world_size, port, prefix, params, q, *, models_and_weights
 ):
-    setup_distributed_env(rank, world_size, port)
+    cpu = setup_distributed_env(rank, world_size, port)
     try:
-        cpu = rank_device("cpu", rank)
         for kind, layout in _STRATEGIES_4RANK:
             model_path, weights = models_and_weights[kind]
             model, optim = build(model_path, layout, SETUP_SEED, weights, cpu)
@@ -228,9 +224,8 @@ def test_verify_names_corrupted_key(tmp_path):
 
 
 def _planners_roundtrip_rank(rank, world_size, port, prefix, params, q, *, weights):
-    setup_distributed_env(rank, world_size, port)
+    cpu = setup_distributed_env(rank, world_size, port)
     try:
-        cpu = rank_device("cpu", rank)
         layout = Layout("fsdp", world_size=world_size, data_parallel_size=world_size)
         model, optim = build(params, layout, SETUP_SEED, weights, cpu)
         save_state = get_fqn_state_dict(model, optim)

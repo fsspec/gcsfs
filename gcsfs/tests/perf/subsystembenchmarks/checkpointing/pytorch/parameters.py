@@ -1,12 +1,12 @@
 import dataclasses
 from typing import Optional
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.configurator import (
     _BUCKET,
     CheckpointParameters,
     _model_id_slug,
 )
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.device import run_device
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.layout import (
     STRATEGY_MESH_DIMS,
     Layout,
@@ -44,7 +44,7 @@ class PyTorchCheckpointParameters(CheckpointParameters):
         src = self.source_layout()
         cols.update(
             {
-                "device": run_device(),
+                "device": accelerator.device_kind(),
                 "data_parallel_replicate_size": self.data_parallel_replicate_size,
                 "pipeline_parallel_size": self.pipeline_parallel_size,
                 "expert_parallel_size": self.expert_parallel_size,

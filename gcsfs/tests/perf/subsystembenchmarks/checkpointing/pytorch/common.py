@@ -1,7 +1,9 @@
 """Rank and driver plumbing shared by the DCP load and save drivers."""
 
+from __future__ import annotations
+
 import contextlib
-import functools
+import dataclasses
 import json
 import os
 import tempfile
@@ -11,15 +13,12 @@ import fsspec
 import torch
 import torch.distributed as dist
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator, launcher
+from gcsfs.tests.perf.subsystembenchmarks._common.nodes import NodeGroup
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
     setup_distributed_env,
-    spawn_split,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import CheckpointDriver
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.device import (
-    rank_device,
-    run_device,
-)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.model import (
     build,
     build_model,
@@ -28,21 +27,49 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parallelize impo
     check_model_layout,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import (
+    ensure_canonical_weights,
     stage_model,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.state import (
     get_fqn_state_dict,
 )
 
+WORKER_MODULE = "gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch._worker"
+
+
+def import_fsspec_filesystem():
+    """Return (FsspecReader, FsspecWriter) across PyTorch 2.14+ module paths."""
+    try:
+        from torch.distributed.checkpoint.fsspec_filesystem import (
+            FsspecReader,
+            FsspecWriter,
+        )
+    except ImportError:
+        from torch.distributed.checkpoint._fsspec_filesystem import (
+            FsspecReader,
+            FsspecWriter,
+        )
+    return FsspecReader, FsspecWriter
+
 
 @contextlib.contextmanager
-def rank_session(rank, world_size, port):
+def rank_session(
+    rank: int | None = None,
+    world_size: int | None = None,
+    port: int | None = None,
+):
     """Joins the process group and yields this rank's torch.device."""
-    device_kind = run_device()
-    setup_distributed_env(rank, world_size, port, device=device_kind)
+    device = setup_distributed_env(rank, world_size, port)
     try:
-        torch.set_num_threads(max(1, (os.cpu_count() or 1) // world_size))
-        yield rank_device(device_kind, rank)
+        if device.type == "cpu":
+            local_ws = int(
+                os.environ.get(
+                    "LOCAL_WORLD_SIZE",
+                    str(world_size or os.environ.get("WORLD_SIZE", "1")),
+                )
+            )
+            torch.set_num_threads(max(1, (os.cpu_count() or 1) // max(1, local_ws)))
+        yield device
     finally:
         dist.destroy_process_group()
 
@@ -51,72 +78,67 @@ def build_state(params, layout, seed, weights, device) -> dict:
     return get_fqn_state_dict(*build(params, layout, seed, weights, device))
 
 
-def synchronize(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-
-
 def warm_up(prefix: str, device: torch.device) -> None:
     """Builds the fsspec/gcsfs instance and fetches a token before timed rounds."""
     fs, root = fsspec.core.url_to_fs(prefix)
     fs.exists(root)
-    synchronize(device)
+    accelerator.synchronize(device)
 
 
 def timed(device: torch.device, fn, *args, **kwargs) -> tuple[float, float]:
-    """Runs fn between barriers; the end time includes queued CUDA work."""
+    """Runs fn between barriers; the end time includes queued accelerator work."""
     dist.barrier()
     begin = time.perf_counter()
     fn(*args, **kwargs)
-    synchronize(device)
+    accelerator.synchronize(device)
     dist.barrier()
     return begin, time.perf_counter()
 
 
-def write_stats(stats_dir: str, rank: int, stats: dict) -> None:
-    with open(os.path.join(stats_dir, f"rank{rank}.json"), "w") as f:
-        json.dump(stats, f)
+def run_worker(
+    op: str,
+    prefix: str,
+    params,
+    *,
+    world_size: int,
+    rdzv_id: str,
+    node_group: NodeGroup | None = None,
+    expect_result: bool = False,
+) -> dict | None:
+    """Launch ``_worker.py`` via torchrun and return parsed result.json on leader."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        spec_file = os.path.join(tmp_dir, "spec.json")
+        result_file = os.path.join(tmp_dir, "result.json")
+        with open(spec_file, "w") as f:
+            json.dump({"prefix": prefix, "params": dataclasses.asdict(params)}, f)
 
+        args = ["--op", op, "--spec-file", spec_file]
+        if expect_result:
+            args.extend(["--result-file", result_file])
 
-def read_stats(stats_dir: str) -> list[dict]:
-    stats = []
-    for name in sorted(os.listdir(stats_dir)):
-        with open(os.path.join(stats_dir, name)) as f:
-            stats.append(json.load(f))
-    return stats
-
-
-def spawn_with_stats(prefix, params, target_fn, world_size, weights):
-    """Spawns target_fn(..., weights=, stats_dir=) and returns (ranks, stats).
-
-    Each rank writes its stats before reporting durations, so they are all on
-    disk once spawn_split returns. On failure the ranks are terminated and the
-    shared weights released.
-    """
-    ranks = None
-    try:
-        with tempfile.TemporaryDirectory() as stats_dir:
-            ranks = spawn_split(
-                prefix,
-                params,
-                functools.partial(target_fn, weights=weights, stats_dir=stats_dir),
-                world_size_override=world_size,
-            )
-            return ranks, read_stats(stats_dir)
-    except BaseException:
-        weights.clear()
-        if ranks is not None:
-            ranks.close()
-        raise
+        launched = launcher.run_torchrun(
+            WORKER_MODULE,
+            args,
+            world_size=world_size,
+            rdzv_id=rdzv_id,
+            node_group=node_group,
+        )
+        if not expect_result or not launched:
+            return None
+        if node_group is not None and not node_group.is_leader:
+            return None
+        with open(result_file) as f:
+            return json.load(f)
 
 
 class DCPDriver(CheckpointDriver):
     def prepare(self, params, *layouts) -> None:
-        """Rejects unsupported layouts before staging the model weights."""
+        """Rejects unsupported layouts before staging and canonicalizing weights."""
         meta_model = build_model(params.model_id)
         for layout in set(layouts):
             check_model_layout(meta_model, layout)
         stage_model(params.model_id)
+        ensure_canonical_weights(params.model_id)
 
     def is_checkpoint_file(self, path: str) -> bool:
         return path.endswith((".distcp", ".metadata"))
