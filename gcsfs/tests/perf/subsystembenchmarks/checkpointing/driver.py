@@ -3,6 +3,18 @@ from typing import Callable, Optional, Protocol, runtime_checkable
 
 
 @dataclasses.dataclass
+class ResourceSnapshot:
+    """Resource metrics snapshot matching publish_resource_metrics attributes."""
+
+    max_cpu: float
+    max_mem: float
+    net_recv: float
+    net_sent: float
+    duration: float
+    vcpus: int
+
+
+@dataclasses.dataclass
 class CheckpointResult:
     """Container for driver run metrics returned to checkpoint_case runner."""
 
@@ -16,6 +28,8 @@ class CheckpointResult:
     # even when the monitor context or verify() raises.
     close: Optional[Callable[[], None]] = None
     bytes_transferred: Optional[int] = None
+    window: Optional[tuple[float, float]] = None
+    resource_metrics: Optional[object] = None
 
 
 @runtime_checkable

@@ -1,4 +1,3 @@
-import socket
 from unittest.mock import MagicMock
 
 import pytest
@@ -72,72 +71,13 @@ def test_spawn_split_reports_before_join(fake_spawn):
     assert ctx.join_calls == 1
 
 
-@pytest.fixture
-def port_block(monkeypatch):
+def test_find_free_port_delegates_to_launcher(monkeypatch):
+    from gcsfs.tests.perf.subsystembenchmarks._common import launcher
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing import _dist
 
-    monkeypatch.setenv("GCSFS_SUBSYSTEM_PORT_BASE", "21000")
-    busy = set()
-    monkeypatch.setattr(_dist, "_port_is_free", lambda port: port not in busy)
-    return busy
-
-
-def test_find_free_port_returns_the_first_port_of_the_block(port_block):
-    assert find_free_port() == 21000
-
-
-def test_find_free_port_skips_a_port_in_use(port_block):
-    port_block.update({21000, 21001})
-    assert find_free_port() == 21002
-
-
-def test_find_free_port_reuses_a_port_once_it_is_released(port_block):
-    # setup (a spawned process) and run (the parent) of one case may share a port.
-    port_block.add(21000)
-    assert find_free_port() == 21001
-    port_block.discard(21000)
-    assert find_free_port() == 21000
-
-
-def test_find_free_port_stays_inside_the_block(port_block):
-    from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import PORT_BLOCK_SIZE
-
-    last = 21000 + PORT_BLOCK_SIZE - 1
-    port_block.update(range(21000, last))
-    assert find_free_port() == last
-
-
-def test_find_free_port_fails_when_the_block_is_exhausted(port_block, monkeypatch):
-    from gcsfs.tests.perf.subsystembenchmarks.checkpointing import _dist
-
-    monkeypatch.setattr(_dist, "_port_is_free", lambda port: False)
-    with pytest.raises(RuntimeError, match="21000"):
-        find_free_port()
-
-
-def test_port_is_free_detects_a_bound_socket():
-    from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import _port_is_free
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as busy:
-        busy.bind(("", 0))
-        busy.listen()
-        assert not _port_is_free(busy.getsockname()[1])
-
-
-@pytest.mark.skipif(not socket.has_ipv6, reason="needs IPv6")
-def test_port_is_free_detects_a_dual_stack_listener():
-    # torch's TCPStore listens on [::]:port with IPV6_V6ONLY off.
-    from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import _port_is_free
-
-    try:
-        busy = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-    except OSError:
-        pytest.skip("IPv6 sockets unavailable")
-    with busy:
-        busy.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-        busy.bind(("::", 0))
-        busy.listen()
-        assert not _port_is_free(busy.getsockname()[1])
+    assert _dist.PORT_BLOCK_SIZE == launcher.PORT_BLOCK_SIZE
+    monkeypatch.setattr(launcher, "find_free_port", lambda: 23456)
+    assert find_free_port() == 23456
 
 
 def test_find_free_port_without_a_block_asks_the_os(monkeypatch):
@@ -330,19 +270,33 @@ def test_spawned_ranks_close_is_idempotent_and_safe_after_join():
     manager3.shutdown.assert_called_once_with()
 
 
-def test_setup_distributed_env_cpu_and_cuda(monkeypatch):
+def test_setup_distributed_env_reads_torchrun_env_or_explicit_args(monkeypatch):
+    import inspect
     import os
 
     import torch
     import torch.distributed as dist
 
+    from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing import _dist
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
         setup_distributed_env,
     )
 
+    assert "/proc/net/route" not in inspect.getsource(_dist)
+    assert not hasattr(_dist, "_ensure_open_file_limit")
+
     events = []
+
+    def fake_bind_rank(local_rank, *, global_rank=None, world_size=None):
+        events.append(("bind", local_rank, global_rank, world_size))
+        return torch.device("cpu")
+
+    monkeypatch.setattr(accelerator, "bind_rank", fake_bind_rank)
     monkeypatch.setattr(
-        torch.cuda, "set_device", lambda idx: events.append(("set_device", idx))
+        accelerator,
+        "process_group_backend",
+        lambda world_size=None: "gloo",
     )
     monkeypatch.setattr(
         dist,
@@ -351,56 +305,91 @@ def test_setup_distributed_env_cpu_and_cuda(monkeypatch):
             ("init_pg", backend, rank, world_size)
         ),
     )
-    for key in (
-        "MASTER_ADDR",
-        "MASTER_PORT",
-        "GLOO_SOCKET_IFNAME",
-        "WORLD_SIZE",
-        "RANK",
-        "LOCAL_RANK",
-    ):
-        monkeypatch.delenv(key, raising=False)
 
-    setup_distributed_env(1, 4, 29500)
-    assert events == [("init_pg", "gloo", 1, 4)]
-    assert os.environ["RANK"] == "1"
-    assert os.environ["WORLD_SIZE"] == "4"
-    assert os.environ["MASTER_PORT"] == "29500"
+    def _clear_env():
+        for key in (
+            "MASTER_ADDR",
+            "MASTER_PORT",
+            "GLOO_SOCKET_IFNAME",
+            "WORLD_SIZE",
+            "RANK",
+            "LOCAL_RANK",
+        ):
+            monkeypatch.delenv(key, raising=False)
 
-    events.clear()
-    setup_distributed_env(2, 8, 29501, device="cuda")
+    # 1. torchrun env path with non-local MASTER_ADDR -> does NOT set GLOO_SOCKET_IFNAME
+    _clear_env()
+    monkeypatch.setenv("RANK", "3")
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setenv("MASTER_ADDR", "leader.headless.svc")
+    monkeypatch.setenv("MASTER_PORT", "29400")
+
+    dev = setup_distributed_env()
+    assert dev == torch.device("cpu")
     assert events == [
-        ("set_device", 2),
-        ("init_pg", "cpu:gloo,cuda:nccl", 2, 8),
+        ("bind", 1, 3, 4),
+        ("init_pg", "gloo", 3, 4),
+    ]
+    assert "GLOO_SOCKET_IFNAME" not in os.environ
+
+    # 2. torchrun env path with loopback MASTER_ADDR -> sets GLOO_SOCKET_IFNAME=lo
+    for loopback in ("localhost", "127.0.0.1", "::1"):
+        _clear_env()
+        events.clear()
+        monkeypatch.setenv("RANK", "0")
+        monkeypatch.setenv("LOCAL_RANK", "0")
+        monkeypatch.setenv("WORLD_SIZE", "2")
+        monkeypatch.setenv("MASTER_ADDR", loopback)
+        monkeypatch.setenv("MASTER_PORT", "29401")
+
+        setup_distributed_env()
+        assert os.environ["GLOO_SOCKET_IFNAME"] == "lo"
+
+    # 3. Explicit args (Ray actor / legacy path) -> defaults MASTER_ADDR=localhost & lo
+    _clear_env()
+    events.clear()
+    dev = setup_distributed_env(rank=1, world_size=4, port=29500)
+    assert dev == torch.device("cpu")
+    assert events == [
+        ("bind", 1, 1, 4),
+        ("init_pg", "gloo", 1, 4),
+    ]
+    assert os.environ["RANK"] == "1"
+    assert os.environ["LOCAL_RANK"] == "1"
+    assert os.environ["WORLD_SIZE"] == "4"
+    assert os.environ["MASTER_ADDR"] == "localhost"
+    assert os.environ["MASTER_PORT"] == "29500"
+    assert os.environ["GLOO_SOCKET_IFNAME"] == "lo"
+
+
+def test_normalize_local_results_rebases_monotonic_clocks():
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
+        _normalize_local_results,
+        reduce_durations,
+    )
+
+    node0 = [
+        [(1000.2, 1005.5), (1010.0, 1012.0)],
+        [(1000.0, 1005.8), (1010.5, 1012.5)],
+    ]
+    node1 = [
+        [(50000.1, 50006.2), (50020.0, 50023.0)],
+        [(50000.0, 50005.9), (50020.2, 50022.8)],
     ]
 
+    norm0 = _normalize_local_results(node0, rounds=2)
+    norm1 = _normalize_local_results(node1, rounds=2)
 
-def _shared_tensor_rank(rank, world_size, port, prefix, params, q, *, tensors):
-    assert len(tensors) == 600
-    q.put([(0.0, 1.0)])
+    assert norm0[0][0] == pytest.approx((0.2, 5.5))
+    assert norm0[1][0] == pytest.approx((0.0, 5.8))
+    assert norm1[0][0] == pytest.approx((0.1, 6.2))
+    assert norm1[1][0] == pytest.approx((0.0, 5.9))
 
+    durations = reduce_durations(norm0 + norm1, world_size=4, rounds=2)
+    assert durations == pytest.approx([6.2, 3.0])
 
-def test_spawn_split_raises_soft_nofile_limit_for_shared_tensors(tmp_path):
-    import functools
-    import resource
-    import types
-
-    torch = pytest.importorskip("torch")
-    old_soft, old_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    if old_hard != resource.RLIM_INFINITY and old_hard < 4096:
-        pytest.skip("hard RLIMIT_NOFILE too low for shared-tensor test")
-
-    resource.setrlimit(resource.RLIMIT_NOFILE, (1024, old_hard))
-    try:
-        tensors = [torch.zeros(4).share_memory_() for _ in range(600)]
-        real_params = types.SimpleNamespace(world_size=2, rounds=1)
-        durations = run_split(
-            str(tmp_path),
-            real_params,
-            functools.partial(_shared_tensor_rank, tensors=tensors),
-        )
-        assert len(durations) == 1
-        new_soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
-        assert new_soft > 1024
-    finally:
-        resource.setrlimit(resource.RLIMIT_NOFILE, (old_soft, old_hard))
+    # Empty / None results handled cleanly
+    assert _normalize_local_results([], rounds=2) == []
+    assert _normalize_local_results([None, None], rounds=2) == [None, None]
+    assert reduce_durations([None, None], world_size=2, rounds=2) == []
