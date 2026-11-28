@@ -120,6 +120,7 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: |
+            gcsfs/tests/perf/subsystembenchmarks/requirements-cpu.txt
             gcsfs/tests/perf/subsystembenchmarks/dataloading/huggingface_datasets/requirements.txt
             gcsfs/tests/perf/subsystembenchmarks/dataloading/webdataset/requirements.txt
             gcsfs/tests/perf/subsystembenchmarks/dataloading/ray_data/requirements.txt
@@ -129,6 +130,7 @@ jobs:
         run: |
           python -m pip install -e .
           python -m pip install \
+            -r gcsfs/tests/perf/subsystembenchmarks/requirements-cpu.txt \
             -r gcsfs/tests/perf/subsystembenchmarks/dataloading/huggingface_datasets/requirements.txt \
             -r gcsfs/tests/perf/subsystembenchmarks/dataloading/webdataset/requirements.txt \
             -r gcsfs/tests/perf/subsystembenchmarks/dataloading/ray_data/requirements.txt \

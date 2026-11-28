@@ -76,7 +76,7 @@ for group in "${GROUP_LIST[@]}"; do
   (
     python3 -m venv "$venv"
     "$venv/bin/pip" install --quiet --upgrade pip
-    "$venv/bin/pip" install --quiet -r "$SSB/$group/requirements.txt"
+    "$venv/bin/pip" install --quiet -r "$SSB/requirements-cpu.txt" -r "$SSB/$group/requirements.txt"
   ) >"$CI_DIR/install-${group//\//-}.log" 2>&1 &
   INSTALL_PIDS+=("$!")
 done
