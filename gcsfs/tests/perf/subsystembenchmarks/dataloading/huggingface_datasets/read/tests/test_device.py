@@ -12,6 +12,7 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("datasets")
 pytest.importorskip("pyarrow")
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator  # noqa: E402
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import datagen  # noqa: E402
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.huggingface_datasets.parameters import (  # noqa: E402
     HFReadParameters,
@@ -59,7 +60,7 @@ def _params(manifest, **overrides):
 @pytest.fixture
 def sync_calls(monkeypatch):
     calls = []
-    monkeypatch.setattr(torch.cuda, "synchronize", calls.append)
+    monkeypatch.setattr(accelerator, "synchronize", calls.append)
     return calls
 
 
@@ -118,7 +119,7 @@ def test_run_epochs_on_cpu_neither_pins_nor_synchronizes(
     tmp_path, monkeypatch, sync_calls, loader_kwargs
 ):
     prefix, manifest = _ingest(tmp_path)
-    monkeypatch.setattr(_hf_read.device_lib.env, "detect_accelerator", lambda: "cpu")
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "cpu")
 
     _, rows, _, _ = _hf_read.run_epochs(
         prefix=prefix,

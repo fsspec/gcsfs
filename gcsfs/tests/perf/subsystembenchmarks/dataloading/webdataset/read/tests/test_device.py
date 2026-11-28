@@ -6,6 +6,7 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("webdataset")
 pytest.importorskip("PIL")
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator  # noqa: E402
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.webdataset import (  # noqa: E402
     configs,
     imagegen,
@@ -55,7 +56,7 @@ def prefix(tmp_path):
 @pytest.fixture
 def sync_calls(monkeypatch):
     calls = []
-    monkeypatch.setattr(torch.cuda, "synchronize", calls.append)
+    monkeypatch.setattr(accelerator, "synchronize", calls.append)
     return calls
 
 
@@ -154,7 +155,7 @@ def test_resampled_rounds_still_synchronize_after_stopping_at_target(
 def test_run_rank_epochs_on_cpu_neither_pins_nor_synchronizes(
     prefix, monkeypatch, sync_calls, loader_kwargs
 ):
-    monkeypatch.setattr(driver.device_lib.env, "detect_accelerator", lambda: "cpu")
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "cpu")
 
     per_epoch, _, _ = driver.run_rank_epochs(
         0, 1, prefix, _params(rounds=1), sample_count=_FILES * _ROWS

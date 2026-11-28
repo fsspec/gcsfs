@@ -3,9 +3,19 @@
 Drivers execute engine-specific reads through gcsfs. All drivers must route through fsspec/gcsfs.
 """
 
+from __future__ import annotations
+
 import dataclasses
+import json
+import os
+import tempfile
 import time
+import uuid
 from typing import Protocol, runtime_checkable
+
+from gcsfs.tests.perf.subsystembenchmarks._common import launcher
+
+_WORKER_MODULE = "gcsfs.tests.perf.subsystembenchmarks.dataloading._worker"
 
 
 @dataclasses.dataclass
@@ -95,6 +105,91 @@ def reduce_split(results, rounds):
     first_batches = [res[0][0][0] + res[1] for res in results]
     ttfb = max(first_batches) - min(first_begins)
     return durations, rows_list, ttfb
+
+
+def _serialize_params(params) -> dict:
+    if dataclasses.is_dataclass(params) and not isinstance(params, type):
+        return dataclasses.asdict(params)
+    return dict(vars(params))
+
+
+def _write_worker_spec(spec_file: str, prefix: str, params, extra: dict | None) -> None:
+    payload = {
+        "prefix": str(prefix),
+        "params": _serialize_params(params),
+        "extra": dict(extra) if extra is not None else {},
+    }
+    with open(spec_file, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+
+
+def _read_worker_result(
+    result_file: str,
+) -> tuple[list[float], list[int], float, float]:
+    with open(result_file, encoding="utf-8") as f:
+        data = json.load(f)
+    return (
+        list(data["durations"]),
+        list(data["rows"]),
+        float(data["ttfb"]),
+        float(data["build_seconds"]),
+    )
+
+
+def run_rank_epochs_distributed(
+    worker_kind: str,
+    prefix: str,
+    params,
+    *,
+    extra: dict | None = None,
+    prepare_tpu_env: bool = True,
+) -> tuple[list[float], list[int], float, float]:
+    """Run multi-rank epochs via torchrun and return (durations, rows, ttfb, build_s)."""
+    with tempfile.TemporaryDirectory(prefix="gcsfs_dl_worker_") as tmpdir:
+        spec_file = os.path.join(tmpdir, "spec.json")
+        result_file = os.path.join(tmpdir, "result.json")
+        _write_worker_spec(spec_file, prefix, params, extra)
+        args = [
+            "--kind",
+            worker_kind,
+            "--spec-file",
+            spec_file,
+            "--result-file",
+            result_file,
+            "--distributed",
+        ]
+        launcher.run_torchrun(
+            _WORKER_MODULE,
+            args,
+            world_size=params.world_size,
+            rdzv_id=f"dl-{worker_kind}-{uuid.uuid4().hex[:8]}",
+            prepare_tpu_env=prepare_tpu_env,
+        )
+        return _read_worker_result(result_file)
+
+
+def run_single_rank_isolated(
+    worker_kind: str,
+    prefix: str,
+    params,
+    *,
+    extra: dict | None = None,
+) -> tuple[list[float], list[int], float, float]:
+    """Run single-rank epochs in an isolated subprocess and return metrics."""
+    with tempfile.TemporaryDirectory(prefix="gcsfs_dl_worker_") as tmpdir:
+        spec_file = os.path.join(tmpdir, "spec.json")
+        result_file = os.path.join(tmpdir, "result.json")
+        _write_worker_spec(spec_file, prefix, params, extra)
+        args = [
+            "--kind",
+            worker_kind,
+            "--spec-file",
+            spec_file,
+            "--result-file",
+            result_file,
+        ]
+        launcher.run_subprocess(_WORKER_MODULE, args)
+        return _read_worker_result(result_file)
 
 
 def spawn_rank_epochs(rank_entry, prefix, params, *rank_args):

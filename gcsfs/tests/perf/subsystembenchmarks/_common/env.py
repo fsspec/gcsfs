@@ -2,20 +2,6 @@ import os
 import platform
 
 
-def _cuda_available() -> bool:
-    try:
-        import torch
-
-        return bool(torch.cuda.is_available())
-    except Exception:
-        return False
-
-
-def detect_accelerator() -> str:
-    """Auto-detect the accelerator. Never a benchmark parameter — an environment fact."""
-    return "gpu" if _cuda_available() else "cpu"
-
-
 def python_version() -> str:
     return ".".join(platform.python_version_tuple()[:2])
 

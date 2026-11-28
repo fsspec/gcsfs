@@ -8,6 +8,7 @@ pytest.importorskip("ray")
 import pyarrow as pa  # noqa: E402
 import pyarrow.parquet as pq  # noqa: E402
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator  # noqa: E402
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.ray_data.parameters import (  # noqa: E402
     RayDataReadParameters,
 )
@@ -60,7 +61,7 @@ def _write_shards(root, fmt):
 @pytest.fixture
 def sync_calls(monkeypatch):
     calls = []
-    monkeypatch.setattr(torch.cuda, "synchronize", calls.append)
+    monkeypatch.setattr(accelerator, "synchronize", calls.append)
     return calls
 
 
