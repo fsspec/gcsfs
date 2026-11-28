@@ -12,6 +12,7 @@ import os
 import sys
 from collections import Counter, defaultdict
 
+import numpy as np
 from metrics import raw_store, stats, summary_schema
 
 PER_STEP_STABILIZATION_STEPS = 0
@@ -900,6 +901,192 @@ def _fail_validation(message: str) -> None:
     raise SystemExit(1)
 
 
+# --- Artifact workload (workloads/adk-agent) ---------------------------------
+ARTIFACT_OPS = (
+    "save",
+    "load_latest",
+    "load_version",
+    "list_keys",
+    "list_versions",
+    "get_version",
+    "delete",
+)
+_ARTIFACT_LOAD_OPS = ("load_latest", "load_version")
+_ARTIFACT_PHASES = frozenset({"main", "resume"})
+
+
+def _validate_artifact_op_sequences(op_rows: list, expected_ops: int) -> None:
+    """Verify per-phase op sequence IDs are unique, contiguous 1..N, and complete."""
+    by_phase = defaultdict(list)
+    seen = set()
+    for row in op_rows:
+        seq = row.get("seq")
+        if not isinstance(seq, str) or ":" not in seq:
+            _fail_validation(f"artifact op row has invalid seq {seq!r}")
+        if seq in seen:
+            _fail_validation(f"artifact op row has duplicate seq {seq!r}")
+        seen.add(seq)
+        phase, _, raw_index = seq.partition(":")
+        if phase not in _ARTIFACT_PHASES or not raw_index.isdigit():
+            _fail_validation(f"artifact op row has invalid seq {seq!r}")
+        by_phase[phase].append(int(raw_index))
+    if "main" not in by_phase:
+        _fail_validation("artifact op rows are missing the main phase")
+    for phase, indices in by_phase.items():
+        expected = set(range(1, len(indices) + 1))
+        if set(indices) != expected:
+            _fail_validation(
+                f"artifact {phase} op seqs must be contiguous 1..{len(indices)}, "
+                f"found {sorted(indices)}"
+            )
+    if len(seen) != expected_ops:
+        _fail_validation(
+            f"artifact op rows incomplete: scraped {len(seen)}, driver printed "
+            f"{expected_ops}"
+        )
+
+
+def validate_required_artifact_metrics(
+    *, op_rows: list, probe_rows: list, workload_rows: list
+) -> None:
+    """Fail unless the driver's op, probe and workload lines all arrived."""
+    if len(workload_rows) != 1:
+        _fail_validation(
+            "artifact metrics require exactly one workload row, "
+            f"found {len(workload_rows)}"
+        )
+    workload = workload_rows[0]
+    if workload.get("validation_failures") != 0:
+        _fail_validation(
+            f"artifact run reported {workload.get('validation_failures')} "
+            "validation failures"
+        )
+    if not op_rows:
+        _fail_validation("artifact op rows are missing")
+    unknown_ops = sorted(
+        {str(row.get("op")) for row in op_rows if row.get("op") not in ARTIFACT_OPS}
+    )
+    if unknown_ops:
+        _fail_validation(
+            f"artifact op rows contain unknown ops {unknown_ops}, "
+            f"expected a subset of {ARTIFACT_OPS}"
+        )
+    # Cloud Logging does not deliver lines in order, so the Workload line can
+    # arrive before the last op lines. Fail (and let scrape-metrics retry)
+    # until every op sequence ID the driver printed has been scraped.
+    expected_ops = workload.get("ops")
+    if expected_ops is None or len(op_rows) != expected_ops:
+        _fail_validation(
+            f"artifact op rows incomplete: scraped {len(op_rows)}, driver printed "
+            f"{expected_ops}"
+        )
+    _validate_artifact_op_sequences(op_rows, expected_ops)
+    probe_counter = _counter_for(probe_rows, "op")
+    missing = [op for op in ARTIFACT_OPS if probe_counter.get(op) != 1]
+    if missing or len(probe_rows) != len(ARTIFACT_OPS):
+        _fail_validation(
+            f"artifact probe rows must contain one entry per op in {ARTIFACT_OPS}, "
+            f"found {dict(probe_counter)}"
+        )
+
+
+def calc_artifact_metrics(op_rows: list, probe_rows: list, workload_rows: list) -> dict:
+    """Per-op latency stats, requests per op, throughput and run-level values."""
+    out = {}
+    for op in ARTIFACT_OPS:
+        latencies = [
+            row["latency_ms"]
+            for row in op_rows
+            if row.get("op") == op
+            and row.get("ok")
+            and row.get("latency_ms") is not None
+        ]
+        if not latencies:
+            continue
+        p50, p95, p99 = np.percentile(latencies, [50, 95, 99])
+        out[f"artifact_{op}_count"] = len(latencies)
+        out[f"artifact_{op}_latency_mean_ms"] = stats.mean(latencies)
+        out[f"artifact_{op}_latency_p50_ms"] = float(p50)
+        out[f"artifact_{op}_latency_p95_ms"] = float(p95)
+        out[f"artifact_{op}_latency_p99_ms"] = float(p99)
+    for row in probe_rows:
+        if row.get("op") in ARTIFACT_OPS and row.get("requests_per_op") is not None:
+            out[f"artifact_{row['op']}_requests_per_op"] = row["requests_per_op"]
+
+    def throughput(ops):
+        rows = [r for r in op_rows if r.get("op") in ops and r.get("ok")]
+        total_bytes = sum(r.get("bytes") or 0 for r in rows)
+        # Exclude 0-byte calls (such as rewind tombstones) so metadata-only
+        # calls do not add latency to the byte-rate denominator.
+        sized_rows = [r for r in rows if (r.get("bytes") or 0) > 0]
+        total_seconds = sum((r.get("latency_ms") or 0) for r in sized_rows) / 1000
+        return total_bytes, (total_bytes / total_seconds if total_seconds > 0 else None)
+
+    _, save_throughput = throughput(("save",))
+    read_bytes, load_throughput = throughput(_ARTIFACT_LOAD_OPS)
+    if save_throughput is not None:
+        out["artifact_save_throughput_bytes_per_sec"] = save_throughput
+    if load_throughput is not None:
+        out["artifact_load_throughput_bytes_per_sec"] = load_throughput
+    out["artifact_logical_read_bytes"] = read_bytes
+
+    if workload_rows:
+        workload = workload_rows[0]
+        out.update(
+            {
+                "sessions": workload.get("sessions"),
+                "turns": workload.get("turns"),
+                "workload_total_s": workload.get("total_s"),
+                "artifact_cold_first_op_ms": workload.get("cold_first_op_ms"),
+                "validation_checks": workload.get("validation_checks"),
+                "validation_failures": workload.get("validation_failures"),
+                "artifact_untimed_read_bytes": workload.get("untimed_read_bytes"),
+            }
+        )
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def build_artifact_summary_row(
+    *,
+    run_id: str,
+    workload_name: str,
+    requirements: str,
+    op_rows: list,
+    probe_rows: list,
+    workload_rows: list,
+    system_rows: list,
+    dimensions: dict,
+) -> dict:
+    """One artifact summary row in the shared macrobenchmark schema."""
+    row = {
+        "run_id": run_id,
+        "workload_name": workload_name,
+        "requirements": requirements,
+    }
+    row.update({k: v for k, v in dimensions.items() if v is not None})
+    row.update(calc_artifact_metrics(op_rows, probe_rows, workload_rows))
+    system = calc_system_metrics(system_rows)
+    # The artifact bucket is the per-run checkpoint bucket, so monitoring.py
+    # reports its read traffic under the checkpoint_* names.
+    read_bytes = system.pop("checkpoint_read_bytes", None)
+    read_requests = system.pop("checkpoint_read_request_count", None)
+    system.pop("checkpoint_read_amplification_ratio", None)
+    row.update(system)
+    if read_bytes is not None:
+        row["artifact_gcs_read_bytes"] = read_bytes
+        # The bucket also served the probe and validation reads, which are
+        # not timed ops, so they count toward the bytes the driver needed.
+        needed_bytes = (row.get("artifact_logical_read_bytes") or 0) + (
+            row.get("artifact_untimed_read_bytes") or 0
+        )
+        ratio = _amplification(read_bytes, needed_bytes or None)
+        if ratio is not None:
+            row["artifact_read_amplification_ratio"] = ratio
+    if read_requests is not None:
+        row["artifact_gcs_read_request_count"] = read_requests
+    return row
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(
         description="Aggregate raw metric CSVs into one summary row."
@@ -927,6 +1114,11 @@ def main(argv=None) -> None:
         "--require-ray-metrics",
         action="store_true",
         help="Fail unless the complete structured Ray metric profile is present.",
+    )
+    parser.add_argument(
+        "--require-artifact-metrics",
+        action="store_true",
+        help="Aggregate the artifact workload instead of a training workload.",
     )
     parser.add_argument(
         "--resume-run",
@@ -960,6 +1152,31 @@ def main(argv=None) -> None:
     args = parser.parse_args(argv)
 
     tables = raw_store.read_raw_metrics(args.in_dir, run_type=args.run_type)
+    if args.require_artifact_metrics:
+        validate_required_artifact_metrics(
+            op_rows=tables.artifact_op_rows,
+            probe_rows=tables.artifact_probe_rows,
+            workload_rows=tables.artifact_workload_rows,
+        )
+        row = build_artifact_summary_row(
+            run_id=args.run_id,
+            workload_name=args.workload_name,
+            requirements=args.requirements,
+            op_rows=tables.artifact_op_rows,
+            probe_rows=tables.artifact_probe_rows,
+            workload_rows=tables.artifact_workload_rows,
+            system_rows=tables.system_rows,
+            dimensions={
+                "bucket_type": args.bucket_type,
+                "zone": args.zone,
+                "region": args.region,
+                "machine_type": args.machine_type,
+                "nodes": args.nodes,
+                "image": args.image,
+            },
+        )
+        _write_summary(args.out_file, row)
+        return
     step_rows = tables.step_rows
     write_rows = tables.write_rows
     restore_rows = tables.restore_rows
@@ -1076,15 +1293,18 @@ def main(argv=None) -> None:
         dimensions=dimensions,
         maximum_rank_write_duration=args.require_ray_metrics,
     )
+    _write_summary(args.out_file, row)
 
-    os.makedirs(os.path.dirname(os.path.abspath(args.out_file)), exist_ok=True)
-    with open(args.out_file, "w", newline="") as fh:
+
+def _write_summary(out_file: str, row: dict) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(out_file)), exist_ok=True)
+    with open(out_file, "w", newline="") as fh:
         writer = csv.DictWriter(
             fh, fieldnames=SUMMARY_FIELDNAMES, restval="N/A", extrasaction="ignore"
         )
         writer.writeheader()
         writer.writerow(row)
-    print(f"Wrote summary to {args.out_file}")
+    print(f"Wrote summary to {out_file}")
 
 
 if __name__ == "__main__":

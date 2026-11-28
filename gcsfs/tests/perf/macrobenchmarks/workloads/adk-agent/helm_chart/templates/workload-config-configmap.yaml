@@ -1,0 +1,12 @@
+# yamllint disable
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: "{{ .Release.Name }}-config"
+data:
+  adk_bench.py: |-
+{{ .Files.Get "adk_bench.py" | nindent 4 }}
+  request_counter.py: |-
+{{ .Files.Get "request_counter.py" | nindent 4 }}
+  requirements.txt: |-
+{{ .Files.Get "requirements.txt" | nindent 4 }}

@@ -2,6 +2,7 @@ import unittest.mock as mock
 from types import SimpleNamespace
 
 import pytest
+from google.api_core import exceptions as api_exceptions
 
 from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 from gcsfs.tests import layouts
@@ -155,7 +156,7 @@ def test_prepare_files_rcu_warm_and_cold_use_http_on_emulator(
                     "_get_bucket_layout",
                     new_callable=mock.AsyncMock,
                     return_value=bucket_layout,
-                ),
+                ) as get_layout,
                 mock.patch(
                     "gcsfs.zb_hns_utils.init_aaow",
                     new_callable=mock.AsyncMock,
@@ -165,6 +166,9 @@ def test_prepare_files_rcu_warm_and_cold_use_http_on_emulator(
                 bench_conftest._prepare_files(
                     gcs, paths, file_size=64, bucket_type=bucket_type
                 )
+            # The writes saw the mocked RCU layout; otherwise the init_aaow
+            # guard above proves nothing.
+            get_layout.assert_awaited_with(TEST_BUCKET)
         finally:
             gcs.invalidate_storage_layout_cache(TEST_BUCKET)
 
@@ -419,12 +423,24 @@ def test_benchmark_io_fixture_primes_grpc_client_on_extended_fs_for_small_rcu_wa
     def _make_fs(**kwargs):
         return ExtendedGcsFileSystem(token="anon", skip_instance_cache=True, **kwargs)
 
+    # On an HNS bucket, _info probes get_folder alongside the object lookup.
+    # Answer it like the service does for an object so no real channel connects.
+    fake_control_plane_client = SimpleNamespace(
+        get_folder=mock.AsyncMock(side_effect=api_exceptions.NotFound("not a folder"))
+    )
+
     with (
         mock.patch.object(
             ExtendedGcsFileSystem,
             "_get_bucket_layout",
             new_callable=mock.AsyncMock,
             return_value=bucket_layout,
+        ),
+        mock.patch.object(
+            ExtendedGcsFileSystem,
+            "_get_control_plane_client",
+            new_callable=mock.AsyncMock,
+            return_value=fake_control_plane_client,
         ),
         mock.patch.object(
             ExtendedGcsFileSystem,
@@ -682,8 +698,7 @@ def test_read_cat_and_cat_ranges_rotate_rcu_cold_files_each_round(extended_gcs_f
         mock_proc = mock.Mock(exitcode=0)
 
         def capture_process(target, args):
-            worker_args = args[1]
-            mp_paths_per_spawn.append(worker_args[1])
+            mp_paths_per_spawn.append(args[1])
             return mock_proc
 
         mock_ctx.Process.side_effect = capture_process

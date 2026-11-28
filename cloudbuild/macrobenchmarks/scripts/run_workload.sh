@@ -32,7 +32,8 @@ helm install "$RUN_ID" "$CHART" -f "$CHART/values_base.yaml" \
   --set workload.ckptToKeep="${_CKPT_TO_KEEP}" \
   --set workload.perDeviceBatch="${_PER_DEVICE_BATCH}" \
   --set workload.gradAccum="${_GRAD_ACCUM}" \
-  --set workload.simulatedStepComputeSeconds="${_SIMULATED_STEP_COMPUTE_SECONDS}"
+  --set workload.simulatedStepComputeSeconds="${_SIMULATED_STEP_COMPUTE_SECONDS}" \
+  --set-string workload.scenario="${_SCENARIO:-}"
 if ! wait_for_jobset "$RUN_ID" run-workload; then
   exit 1
 fi

@@ -1,0 +1,72 @@
+# yamllint disable
+{{- $root := . -}}
+{{ $nodes := .Values.workload.nodes }}
+
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: "{{ .Release.Name }}"
+  namespace: "{{ .Values.namespace }}"
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  replicatedJobs:
+  - name: workload
+    replicas: 1
+    template:
+      spec:
+        parallelism: {{ $nodes }}
+        completions: {{ $nodes }}
+        backoffLimit: 0
+        completionMode: Indexed
+        ttlSecondsAfterFinished: 43200
+        template:
+          metadata:
+            name: {{ .Release.Name }}
+            annotations:
+              kubectl.kubernetes.io/default-container: workload
+          spec:
+            serviceAccountName: {{ $root.Values.serviceAccount }}
+            restartPolicy: Never
+            {{- if $root.Values.nodeSelector }}
+            nodeSelector:
+              {{- toYaml $root.Values.nodeSelector | nindent 14 }}
+            {{- end }}
+            volumes:
+            - name: workload-configuration
+              configMap:
+                name: "{{ .Release.Name }}-config"
+            - name: workload-launcher
+              configMap:
+                name: "{{ .Release.Name }}-launcher"
+            containers:
+            - name: workload
+              image: "{{ $root.Values.workload.image }}"
+              imagePullPolicy: Always
+              env:
+              - name: RUN_ID
+                value: "{{ .Release.Name }}"
+              - name: JOB_COMPLETION_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+              - name: SCENARIO
+                value: "{{ $root.Values.workload.scenario }}"
+              - name: REQUIREMENTS
+                value: "{{ $root.Values.workload.requirements }}"
+              - name: CKPT_WRITE_PATH
+                value: "{{ $root.Values.gcsfs.ckptWritePath }}"
+              {{- if $root.Values.workload.envs }}
+              {{- toYaml .Values.workload.envs | nindent 14 }}
+              {{- end }}
+              command:
+              - bash
+              - -c
+              - |
+                echo "Pod on $(hostname --fqdn) is running"
+                bash /workload/launcher/launch-workload.sh
+              volumeMounts:
+              - name: workload-configuration
+                mountPath: {{ $root.Values.workload.configPath }}
+              - name: workload-launcher
+                mountPath: /workload/launcher

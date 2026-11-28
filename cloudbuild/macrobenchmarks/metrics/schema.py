@@ -26,6 +26,10 @@ SYSTEM_METRICS_DIRECTORY = "system_metrics"
 SYSTEM_METRICS_FILE = "system_metrics.csv"
 RAY_DATA_ITERATION_DIRECTORY = "ray_data_iteration"
 RAY_DATA_ITERATION_METRICS_FILE = "ray_data_iteration_metrics.csv"
+ARTIFACT_DIRECTORY = "artifact"
+ARTIFACT_OP_METRICS_FILE = "artifact_ops.csv"
+ARTIFACT_PROBE_METRICS_FILE = "artifact_probes.csv"
+ARTIFACT_WORKLOAD_METRICS_FILE = "workload.csv"
 
 
 def fieldnames(dataclass_type) -> list:
@@ -143,3 +147,38 @@ class RayDataIterationMetrics:
     total_s: float
     time_to_first_batch_s: float
     blocked_calls: int
+
+
+@dataclass(kw_only=True)
+class ArtifactOpMetrics:
+    """One timed artifact service call (``Artifact Op`` line)."""
+
+    seq: str
+    op: str
+    latency_ms: float
+    bytes: int
+    ok: int
+
+
+@dataclass(kw_only=True)
+class ArtifactProbeMetrics:
+    """JSON requests per op from the serial probe (``Artifact Probe`` line)."""
+
+    op: str
+    requests_per_op: float
+
+
+@dataclass(kw_only=True)
+class ArtifactWorkloadMetrics:
+    """Run-level artifact benchmark results (``Artifact Workload`` line)."""
+
+    total_s: float
+    cold_first_op_ms: float = None
+    sessions: int
+    turns: int
+    ops: int = None
+    untimed_read_bytes: int = None
+    validation_checks: int = None
+    validation_failures: int = None
+    window_start: str = None
+    window_end: str = None

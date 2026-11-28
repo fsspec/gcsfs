@@ -262,6 +262,50 @@ def collect_node_capacity(
     return rows
 
 
+def _in_window_interval(start_epoch: int, end_epoch: int, period: int) -> tuple:
+    """Align ``(start_epoch, end_epoch)`` so points stay inside the window.
+
+    Cloud Monitoring aligns backwards from ``end_time`` and returns points
+    stamped in ``(start_time, end_time]``. Advancing ``start_time`` by
+    ``(end - start) % period`` drops the leading partial period that would
+    reach before ``start_epoch``, while keeping ``end_epoch`` exact avoids
+    reaching past ``end_epoch``. When the window is shorter than one alignment
+    period, query ``(end_epoch - period, end_epoch)`` so one sample is returned
+    without spilling into post-run checks.
+    """
+    duration = end_epoch - start_epoch
+    if duration < period:
+        return end_epoch - period, end_epoch
+    return start_epoch + duration % period, end_epoch
+
+
+def _monitoring_windows(
+    start_time: str, end_time: str, period: int, artifact_workload_rows: list = None
+) -> tuple:
+    """Return ``((pod_start, pod_end), (bucket_start, bucket_end))`` in epoch seconds.
+
+    For artifact runs, pod CPU/memory/network are scoped to the driver's
+    measured scenario window (excluding image pull, ``pip install``, ``probe``
+    and post-run validation), while bucket ``DELTA`` totals span the full step
+    plus two alignment periods after ``end_time`` so reads from final-state
+    checks near pod exit are not clipped.
+    """
+    step_start = _to_epoch(start_time)
+    step_end = _to_epoch(end_time)
+    pod_window = _align_interval(step_start, step_end, period)
+    if not artifact_workload_rows:
+        return pod_window, pod_window
+    workload = artifact_workload_rows[0]
+    window_start = workload.get("window_start")
+    window_end = workload.get("window_end")
+    if window_start and window_end:
+        measured_start = _to_epoch(window_start)
+        measured_end = max(_to_epoch(window_end), measured_start + 1)
+        pod_window = _in_window_interval(measured_start, measured_end, period)
+    bucket_window = _align_interval(step_start, step_end + 2 * period, period)
+    return pod_window, bucket_window
+
+
 def assemble_rows(
     client,
     storage_client,
@@ -273,10 +317,16 @@ def assemble_rows(
     restore_rows,
     start_epoch,
     end_epoch,
+    bucket_start_epoch=None,
+    bucket_end_epoch=None,
     cluster=None,
     period=60,
 ) -> list:
     """Pod gauges + node capacity + per-bucket totals + du sizes, as one row list."""
+    if bucket_start_epoch is None:
+        bucket_start_epoch = start_epoch
+    if bucket_end_epoch is None:
+        bucket_end_epoch = end_epoch
     rows = collect(
         client,
         project=project,
@@ -290,8 +340,8 @@ def assemble_rows(
             client,
             project=project,
             cluster=cluster,
-            start_epoch=start_epoch,
-            end_epoch=end_epoch,
+            start_epoch=bucket_start_epoch,
+            end_epoch=bucket_end_epoch,
             period=period,
         )
     if checkpoint_bucket:
@@ -300,8 +350,8 @@ def assemble_rows(
             project=project,
             bucket=checkpoint_bucket,
             prefix="checkpoint",
-            start_epoch=start_epoch,
-            end_epoch=end_epoch,
+            start_epoch=bucket_start_epoch,
+            end_epoch=bucket_end_epoch,
             period=period,
         )
     if dataset_bucket:
@@ -310,8 +360,8 @@ def assemble_rows(
             project=project,
             bucket=dataset_bucket,
             prefix="dataset",
-            start_epoch=start_epoch,
-            end_epoch=end_epoch,
+            start_epoch=bucket_start_epoch,
+            end_epoch=bucket_end_epoch,
             period=period,
         )
     if storage_client is not None:
@@ -364,12 +414,20 @@ def main(argv=None) -> None:
         except Exception as e:  # sizes become N/A, run continues
             print(f"Warning: storage client unavailable, size columns N/A: {e}")
         restore_rows = []
+        artifact_workload_rows = []
         try:
-            restore_rows = raw_store.read_raw_metrics(args.out_dir).restore_rows
+            tables = raw_store.read_raw_metrics(args.out_dir)
+            restore_rows = tables.restore_rows
+            artifact_workload_rows = tables.artifact_workload_rows
         except Exception as e:
-            print(f"Warning: could not read restore rows for checkpoint du: {e}")
-        start_epoch, end_epoch = _align_interval(
-            _to_epoch(args.start_time), _to_epoch(args.end_time), args.period
+            print(f"Warning: could not read raw metrics for monitoring windows: {e}")
+        (start_epoch, end_epoch), (bucket_start_epoch, bucket_end_epoch) = (
+            _monitoring_windows(
+                args.start_time,
+                args.end_time,
+                args.period,
+                artifact_workload_rows,
+            )
         )
         rows = assemble_rows(
             client,
@@ -381,6 +439,8 @@ def main(argv=None) -> None:
             restore_rows=restore_rows,
             start_epoch=start_epoch,
             end_epoch=end_epoch,
+            bucket_start_epoch=bucket_start_epoch,
+            bucket_end_epoch=bucket_end_epoch,
             cluster=args.cluster,
             period=args.period,
         )

@@ -136,9 +136,119 @@ def _avoid_adc_timeout(monkeypatch):
     yield
 
 
+def _split_host_port(address):
+    """Split ``host[:port]`` (IPv6 in brackets) into ``(host, port)``.
+
+    A missing port defaults to 443, as the Google API clients assume.
+    """
+    if address.startswith("["):
+        host, _, rest = address[1:].partition("]")
+        port = rest[1:] if rest.startswith(":") else ""
+    elif address.count(":") == 1:
+        host, port = address.split(":")
+    else:
+        host, port = address, ""
+    return host, port or "443"
+
+
+def _http_emulator_addresses():
+    """``(host, port)`` of the configured GCS emulator, which only speaks HTTP."""
+    return {
+        _split_host_port(location.split("://", 1)[-1].split("/", 1)[0])
+        for location in (os.getenv("STORAGE_EMULATOR_HOST"), params.get("endpoint_url"))
+        if location and location != "default"
+    }
+
+
+def _is_local_grpc_target(target):
+    """Whether a gRPC target is a gRPC server run by the tests themselves.
+
+    That is a unix socket or a loopback address other than the HTTP emulator.
+    gcsfs points its gRPC clients at the emulator address too, and connecting
+    there starts the same resolver and connection threads as a real host.
+    """
+    target = str(target)
+    if target.startswith("unix:"):
+        return True
+    if "://" in target:
+        scheme, rest = target.split("://", 1)
+        if scheme != "dns":
+            # e.g. google-c2p:///localhost: DirectPath resolves through xDS and
+            # the metadata server, whatever the host is.
+            return False
+        target = rest.rsplit("/", 1)[-1]
+    elif target.startswith("dns:"):
+        target = target[len("dns:") :]
+    address = _split_host_port(target)
+    if address in _http_emulator_addresses():
+        return False
+    host = address[0]
+    return host in ("localhost", "0.0.0.0", "::1") or host.startswith("127.")
+
+
+@pytest.fixture(autouse=True)
+def _forbid_remote_grpc_connections(request, monkeypatch):
+    """Fail a unit test that leaves a gRPC channel to a remote host connecting.
+
+    Creating a channel is lazy and harmless, but once a call starts, gRPC
+    resolves DNS and connects on its own threads, which call getenv(). On older
+    glibc (e.g. Ubuntu 24.04 CI runners) that races with any setenv() in the
+    test process (pytest, monkeypatch.setenv) and can crash the whole run with
+    SIGSEGV. Stub the client instead. Runs against real GCS and benchmark runs
+    are exempt.
+    """
+    if is_real_gcs() or request.config.getoption("--run-benchmarks"):
+        yield
+        return
+
+    import grpc
+    import grpc.aio
+
+    remote_channels = []
+    connected = set()
+    idle = (grpc.ChannelConnectivity.IDLE, grpc.ChannelConnectivity.SHUTDOWN)
+
+    def check(target, channel):
+        if channel.get_state(try_to_connect=False) not in idle:
+            connected.add(target)
+
+    def record_remote(create_channel):
+        def wrapper(target, *args, **kwargs):
+            channel = create_channel(target, *args, **kwargs)
+            if not _is_local_grpc_target(target):
+                remote_channels.append((target, channel))
+                close = channel._close
+
+                # Fixtures such as gcs or extended_gcsfs close their channels
+                # before this autouse fixture tears down, and a closed channel
+                # reads SHUTDOWN. So also check the state just before closing;
+                # close() and "async with" both go through _close().
+                async def checked_close(grace=None):
+                    check(target, channel)
+                    await close(grace)
+
+                channel._close = checked_close
+            return channel
+
+        return wrapper
+
+    for name in ("secure_channel", "insecure_channel"):
+        monkeypatch.setattr(grpc.aio, name, record_remote(getattr(grpc.aio, name)))
+
+    yield
+
+    for target, channel in remote_channels:
+        check(target, channel)
+    if connected:
+        pytest.fail(
+            f"Unit test connected gRPC channel(s) to {sorted(connected)}; stub "
+            "the client instead of reaching a real host."
+        )
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _stub_environment_detection(request):
-    """Keep host-specific env/ tokens and metadata server probes out of tests."""
+    """Keep host-specific environment telemetry and metadata server probes out of tests."""
     if request.config.getoption("--run-benchmarks"):
         yield
         return
@@ -147,19 +257,6 @@ def _stub_environment_detection(request):
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(EnvironmentDetector, "detect", lambda self: None)
-        yield
-
-
-@pytest.fixture(scope="session", autouse=True)
-def _mock_get_bucket_layout_on_emulator():
-    """Mock _get_bucket_layout to return UNKNOWN instantly on emulator."""
-    from gcsfs.tests.utils import _patch_get_bucket_layout_for_emulator
-
-    patch = _patch_get_bucket_layout_for_emulator()
-    if patch:
-        with patch:
-            yield
-    else:
         yield
 
 
@@ -663,6 +760,14 @@ def zonal_write_mocks(request):
         return
 
     rapid_write_filesystems = _rapid_write_filesystems(request, layout)
+    # Layouts are cached per filesystem, so drop what setup (e.g. bucket
+    # cleanup on the emulator) already looked up; otherwise the mocked
+    # _get_bucket_layout below is never consulted.
+    test_filesystems = [
+        request.getfixturevalue(name)
+        for name in ("extended_gcsfs", "async_gcs")
+        if name in getattr(request, "fixturenames", ())
+    ]
 
     patch_target_get_bucket_layout = (
         "gcsfs.extended_gcsfs.ExtendedGcsFileSystem._get_bucket_layout"
@@ -709,6 +814,9 @@ def zonal_write_mocks(request):
         mock.patch(patch_target_init_aaow, mock_init_aaow),
         contextlib.ExitStack() as stack,
     ):
+        for fs in test_filesystems:
+            fs.invalidate_storage_layout_cache()
+            stack.callback(fs.invalidate_storage_layout_cache)
         for fs in rapid_write_filesystems:
             stack.enter_context(mock.patch.object(fs, "rcu_rapid_write", True))
         mocks = {

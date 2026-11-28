@@ -12,22 +12,23 @@ class ControlPlaneTelemetryInterceptor(grpc.aio.UnaryUnaryClientInterceptor):
     """Attach gcsfs feature metadata to Storage Control unary RPCs."""
 
     async def intercept_unary_unary(self, continuation, client_call_details, request):
-        if not telemetry_manager.default_usage_tracker.is_enabled():
-            return await continuation(client_call_details, request)
-
         existing = (
             tuple(client_call_details.metadata)
             if client_call_details.metadata is not None
             else ()
         )
-        if any(k.lower() == GRPC_METADATA_KEY for k, _ in existing):
-            return await continuation(client_call_details, request)
-
+        filtered = tuple((k, v) for k, v in existing if k.lower() != GRPC_METADATA_KEY)
+        had_feature_key = len(filtered) != len(existing)
         encoded = telemetry_manager.default_usage_tracker.encode_features()
         if not encoded:
-            return await continuation(client_call_details, request)
+            if not had_feature_key:
+                return await continuation(client_call_details, request)
+            updated_details = client_call_details._replace(
+                metadata=grpc.aio.Metadata(*filtered)
+            )
+            return await continuation(updated_details, request)
 
         updated_details = client_call_details._replace(
-            metadata=grpc.aio.Metadata(*existing, (GRPC_METADATA_KEY, encoded))
+            metadata=grpc.aio.Metadata(*filtered, (GRPC_METADATA_KEY, encoded))
         )
         return await continuation(updated_details, request)

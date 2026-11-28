@@ -3422,6 +3422,16 @@ def test_default_gcp_universe(monkeypatch, mtls_env):
     assert fs.batch_url_base == "https://storage.googleapis.com/batch/storage/v1"
 
 
+def test_empty_gcp_universe_is_default(monkeypatch, mtls_env):
+    # An empty GOOGLE_CLOUD_UNIVERSE_DOMAIN means unset, as in google-cloud-storage.
+    monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "")
+
+    fs = fsspec.filesystem("gcs", token="anon")
+    assert fs.base == "https://storage.googleapis.com/storage/v1/"
+
+
 def _write_test_pki(directory):
     """Write a throwaway CA plus server and client certs signed by it."""
     import datetime as dt
@@ -5269,51 +5279,57 @@ def test_user_agent_includes_cache_type_and_source_in_read(gcs, skip_if_grpc_rea
 
 
 @pytest.mark.parametrize(
-    "input_headers,cache_type,cache_source,framework,expected_in,expected_not_in",
+    "input_headers,cache_type,cache_source,framework,expected_ua",
     [
-        (None, None, None, None, ["python-gcsfs/"], ["cache_type"]),
+        (None, None, None, None, f"python-gcsfs/{version}"),
         (
             None,
             "readahead",
             "explicit",
             None,
-            ["python-gcsfs/", "cache_type/readahead:e"],
-            [],
+            f"python-gcsfs/{version} cache_type/readahead:e",
         ),
         (
             None,
             "none",
             "default",
             None,
-            ["python-gcsfs/", "cache_type/none:d"],
-            [],
+            f"python-gcsfs/{version} cache_type/none:d",
         ),
-        (None, None, None, "torch", ["python-gcsfs/", "fw/torch"], []),
+        (None, None, None, "torch", f"python-gcsfs/{version}"),
         (
             {"User-Agent": "my-custom-agent"},
             None,
             None,
             "pandas",
-            ["my-custom-agent"],
-            ["fw/pandas"],
+            "my-custom-agent",
         ),
     ],
 )
 def test_user_agent_telemetry_integration(
+    monkeypatch,
     input_headers,
     cache_type,
     cache_source,
     framework,
-    expected_in,
-    expected_not_in,
+    expected_ua,
 ):
-    """Verify that _get_headers builds User-Agent with cache/telemetry tokens and preserves overrides."""
+    """Verify _get_headers builds User-Agent cleanly and emits telemetry in X-Goog-Storage-Gcsfs-Features."""
+    import base64
     import contextlib
 
+    import gcsfs.telemetry.manager as manager_mod
     from gcsfs.core import GCSFileSystem
-    from gcsfs.telemetry.context import Dimension
+    from gcsfs.telemetry.context import HTTP_HEADER_KEY, Dimension
+    from gcsfs.telemetry.features_proto import GcsfsFeatures, GcsfsFramework
+    from gcsfs.telemetry.manager import UsageMetricsTracker
     from gcsfs.telemetry.wrapper import _telemetry_context
 
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("GCSFS_NO_TELEMETRY", raising=False)
+    monkeypatch.setattr(
+        manager_mod, "default_usage_tracker", UsageMetricsTracker(detectors=[])
+    )
     # _get_headers needs no server, so avoid the heavier emulator-backed `gcs` fixture
     gcs = GCSFileSystem(token="anon", skip_instance_cache=True)
 
@@ -5327,11 +5343,17 @@ def test_user_agent_telemetry_integration(
             input_headers, cache_type=cache_type, cache_source=cache_source
         )
 
-    ua = headers["User-Agent"]
-    for token in expected_in:
-        assert token in ua
-    for token in expected_not_in:
-        assert token not in ua
+    assert headers["User-Agent"] == expected_ua
+    if framework is None:
+        assert HTTP_HEADER_KEY not in headers
+    else:
+        assert HTTP_HEADER_KEY in headers
+        decoded = GcsfsFeatures.deserialize(
+            base64.urlsafe_b64decode(headers[HTTP_HEADER_KEY])
+        )
+        assert (
+            decoded.framework == GcsfsFramework[f"GCSFS_FRAMEWORK_{framework.upper()}"]
+        )
 
 
 def test_init_does_not_evaluate_buckets(monkeypatch):
@@ -5453,7 +5475,7 @@ def test_get_dirs_and_update_cache_with_directories_and_prefix(gcs):
     "suffix", ["#123", "?generation=123", "#variant?generation=123"]
 )
 async def test_merge_rejects_specific_generations_before_request(suffix):
-    fs = GCSFileSystem(token="anon", version_aware=True)
+    fs = CoreGCSFileSystem(token="anon", version_aware=True)
     destination = f"bucket/destination{suffix}"
     with mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as request:
         with pytest.raises(
@@ -5652,7 +5674,7 @@ def test_gcsfile_open_with_generation_pins_size_and_reads(cache_type):
     """GCSFile opened with generation= pins both f.size and f.read() across cache modes."""
     from urllib.parse import parse_qs, urlsplit
 
-    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    fs = CoreGCSFileSystem(token="anon", skip_instance_cache=True)
     path = "bucket/file.bin"
     versions = {"111": b"v1-10bytes", "222": b"v2-longer-live-payload"}
     overwritten_after_open = False

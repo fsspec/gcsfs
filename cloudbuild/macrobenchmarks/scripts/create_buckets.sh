@@ -10,17 +10,21 @@ skip_if_failed
 source "${BUILD_VARS_FILE}"
 create_typed_bucket "$CHECKPOINT_BUCKET"
 
-# Per-run dataset bucket (same config as CHECKPOINT_BUCKET), populated by an
-# in-region copy, so its egress is attributable to one run for the dataset
-# read-amplification metric.
-create_typed_bucket "$DATASET_BUCKET"
-SRC_OBJECT_PATH=$(echo "${_DATASET_PATH}" | sed -E 's#^gs://[^/]+/?##')
-# *_rcu_z needs RAPID objects, which gcloud cannot write on an RCU bucket; the
-# rcu-stage step copies the dataset with gcsfs instead.
-if [ "${RCU_STATE}" != "z" ]; then
-  copy_dataset_into_run_bucket
+# The ADK workload writes its artifacts to the checkpoint bucket and reads no
+# dataset, so it skips the dataset bucket.
+if [ "${_WORKLOAD}" != "adk-agent" ]; then
+  # Per-run dataset bucket (same config as CHECKPOINT_BUCKET), populated by an
+  # in-region copy, so its egress is attributable to one run for the dataset
+  # read-amplification metric.
+  create_typed_bucket "$DATASET_BUCKET"
+  SRC_OBJECT_PATH=$(echo "${_DATASET_PATH}" | sed -E 's#^gs://[^/]+/?##')
+  # *_rcu_z needs RAPID objects, which gcloud cannot write on an RCU bucket; the
+  # rcu-stage step copies the dataset with gcsfs instead.
+  if [ "${RCU_STATE}" != "z" ]; then
+    copy_dataset_into_run_bucket
+  fi
+  echo "export RUN_DATASET_PATH=gs://${DATASET_BUCKET}/${SRC_OBJECT_PATH}" >> "${BUILD_VARS_FILE}"
 fi
-echo "export RUN_DATASET_PATH=gs://${DATASET_BUCKET}/${SRC_OBJECT_PATH}" >> "${BUILD_VARS_FILE}"
 if gcloud storage buckets describe gs://$RESULTS_BUCKET --project=${PROJECT_ID} >/dev/null 2>&1; then
   # Reuse only if co-located with this build's LOCATION. The ingestion pipeline
   # builds the BigQuery dataset (and external table) in LOCATION; a results
