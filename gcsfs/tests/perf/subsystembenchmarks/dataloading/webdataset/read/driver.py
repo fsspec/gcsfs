@@ -1,16 +1,19 @@
 """WebDataset image read driver for subsystem benchmarks."""
 
 import contextlib
+import dataclasses
 import os
 import shutil
 import tempfile
 import time
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import device as device_lib
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import (
     ReadResult,
     measure_epochs,
-    spawn_rank_epochs,
+    run_rank_epochs_distributed,
+    run_single_rank_isolated,
 )
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.webdataset import gcsfs_opener
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.webdataset.imagegen import (
@@ -86,6 +89,15 @@ def build_dataset(prefix, params, *, split_by_node, cache_dir=None):
         detshuffle=True,
         seed=0,
     )
+    sample_shuffle_enabled = getattr(
+        params, "sample_shuffle_enabled", params.access == "shuffled"
+    )
+    shard_shuffle_enabled = getattr(
+        params,
+        "shard_shuffle_enabled",
+        sample_shuffle_enabled and getattr(params, "shard_shuffle", True),
+    )
+
     if params.resampled:
         # Disable default node splitting and shard shuffle for resampled streams.
         kwargs["resampled"] = True
@@ -93,12 +105,10 @@ def build_dataset(prefix, params, *, split_by_node, cache_dir=None):
         kwargs["shardshuffle"] = False
     else:
         kwargs["nodesplitter"] = wds.split_by_node if split_by_node else None
-        kwargs["shardshuffle"] = (
-            params.file_count if params.shard_shuffle_enabled else False
-        )
+        kwargs["shardshuffle"] = params.file_count if shard_shuffle_enabled else False
 
     dataset = wds.WebDataset(shard_urls(prefix, params), **kwargs)
-    if params.sample_shuffle_enabled:
+    if sample_shuffle_enabled:
         dataset = dataset.shuffle(params.shuffle_buffer_size)
     if params.decode:
         dataset = dataset.decode("torchrgb")
@@ -181,7 +191,7 @@ def run_rank_epochs(
             split_by_node=params.split_by_node,
             cache_dir=rank_cache_dir(cache_root, rank),
         )
-        loader = build_loader(dataset, params, pin_memory=device is not None)
+        loader = build_loader(dataset, params, pin_memory=device_lib.pin_memory(device))
         build_seconds = time.perf_counter() - build_start
 
         target = None
@@ -199,16 +209,31 @@ def run_rank_epochs(
     return per_epoch, ttfb, build_seconds
 
 
-def _rank_entry(rank, world_size, prefix, params, barrier, queue, cache_root, samples):
+def worker_entry(rank, world_size, prefix, params, barrier, extra):
+    """Worker entry point invoked by ``dataloading._worker``."""
     _set_distributed_env(rank, world_size)
-    queue.put(
-        run_rank_epochs(rank, world_size, prefix, params, barrier, cache_root, samples)
+    extra = extra or {}
+    return run_rank_epochs(
+        rank,
+        world_size,
+        prefix,
+        params,
+        barrier=barrier,
+        cache_root=extra.get("cache_root"),
+        sample_count=extra.get("sample_count"),
     )
 
 
 def run_split_epochs(prefix, params, cache_root, sample_count):
-    """Spawns world_size worker processes and aggregates epoch results."""
-    return spawn_rank_epochs(_rank_entry, prefix, params, cache_root, sample_count)
+    """Runs world_size worker ranks via torchrun and aggregates epoch results."""
+    # Undecoded ranks never touch an accelerator, so they skip TPU launch setup.
+    return run_rank_epochs_distributed(
+        "wds",
+        prefix,
+        params,
+        extra={"cache_root": cache_root, "sample_count": sample_count},
+        prepare_tpu_env=params.decode,
+    )
 
 
 class WebDatasetReadDriver:
@@ -222,6 +247,14 @@ class WebDatasetReadDriver:
             if params.split_by_node:
                 durations, rows, ttfb, build_seconds = run_split_epochs(
                     prefix, params, cache_root, sample_count
+                )
+            elif params.decode and accelerator.device_kind() == "tpu":
+                # Isolate TPU device init inside a subprocess so pytest parent never locks libtpu.
+                durations, rows, ttfb, build_seconds = run_single_rank_isolated(
+                    "wds",
+                    prefix,
+                    dataclasses.replace(params, world_size=1),
+                    extra={"cache_root": cache_root, "sample_count": sample_count},
                 )
             else:
                 per_epoch, ttfb, build_seconds = run_rank_epochs(

@@ -164,3 +164,117 @@ def test_run_rank_epochs_on_cpu_neither_pins_nor_synchronizes(
     assert per_epoch[0][2] == _FILES * _ROWS
     assert loader_kwargs[0]["pin_memory"] is False
     assert sync_calls == []
+
+
+@pytest.mark.parametrize("decode", [False, True])
+def test_split_run_passes_prepare_tpu_env_matching_decode(prefix, monkeypatch, decode):
+    seen = []
+
+    def fake_distributed(kind, pfx, params, *, extra=None, prepare_tpu_env=True):
+        seen.append((kind, pfx, params, extra, prepare_tpu_env))
+        return ([0.1], [_FILES * _ROWS], 0.05, 0.01)
+
+    monkeypatch.setattr(driver, "run_rank_epochs_distributed", fake_distributed)
+    params = _params(split_by_node=True, world_size=2, decode=decode, rounds=1)
+    result = driver.WebDatasetReadDriver().run_read(
+        prefix, params, {"sample_count": _FILES * _ROWS}
+    )
+
+    assert len(seen) == 1
+    kind, pfx, got_params, extra, prepare_tpu_env = seen[0]
+    assert kind == "wds"
+    assert pfx == prefix
+    assert got_params == params
+    assert extra == {"cache_root": None, "sample_count": _FILES * _ROWS}
+    assert prepare_tpu_env is decode
+    assert result.rows_per_epoch == [_FILES * _ROWS]
+
+
+def test_tpu_single_rank_decoded_isolates_in_subprocess(prefix, monkeypatch):
+    """split_by_node=False decoded on TPU must not bind in parent."""
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
+    parent_binds = []
+    monkeypatch.setattr(
+        driver.device_lib, "rank_device", lambda r: parent_binds.append(r)
+    )
+    isolated = []
+
+    def fake_isolated(kind, pfx, params, *, extra=None):
+        isolated.append((kind, pfx, params.world_size, params.split_by_node, extra))
+        return ([0.1], [_FILES * _ROWS], 0.05, 0.01)
+
+    monkeypatch.setattr(driver, "run_single_rank_isolated", fake_isolated)
+    params = _params(split_by_node=False, world_size=4, decode=True, rounds=1)
+    res = driver.WebDatasetReadDriver().run_read(
+        prefix, params, {"sample_count": _FILES * _ROWS}
+    )
+
+    assert parent_binds == []
+    assert isolated == [
+        ("wds", prefix, 1, False, {"cache_root": None, "sample_count": _FILES * _ROWS})
+    ]
+    assert res.rows_per_epoch == [_FILES * _ROWS]
+
+
+def test_tpu_single_rank_undecoded_stays_host_only(prefix, monkeypatch):
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
+    distributed, isolated, binds = [], [], []
+    monkeypatch.setattr(
+        driver, "run_rank_epochs_distributed", lambda *a, **kw: distributed.append(a)
+    )
+    monkeypatch.setattr(
+        driver, "run_single_rank_isolated", lambda *a, **kw: isolated.append(a)
+    )
+    monkeypatch.setattr(driver.device_lib, "rank_device", lambda r: binds.append(r))
+
+    res = driver.WebDatasetReadDriver().run_read(
+        prefix, _params(decode=False, rounds=1), {"sample_count": _FILES * _ROWS}
+    )
+
+    assert distributed == []
+    assert isolated == []
+    assert binds == []
+    assert res.rows_per_epoch == [_FILES * _ROWS]
+
+
+def test_wds_driver_consults_device_pin_memory(
+    prefix, monkeypatch, sync_calls, ranks_on_fake_gpu, loader_kwargs
+):
+    pin_calls = []
+    monkeypatch.setattr(
+        driver.device_lib,
+        "pin_memory",
+        lambda dev: pin_calls.append(dev) or False,
+    )
+
+    driver.run_rank_epochs(
+        0, 1, prefix, _params(decode=True, rounds=1), sample_count=_FILES * _ROWS
+    )
+
+    assert pin_calls == [FAKE_GPU]
+    assert loader_kwargs[0]["pin_memory"] is False
+
+
+def test_wds_worker_registered_and_handles_deserialized_namespace(
+    prefix, monkeypatch, sync_calls, ranks_on_fake_gpu, loader_kwargs
+):
+    import dataclasses
+    from types import SimpleNamespace
+
+    from gcsfs.tests.perf.subsystembenchmarks.dataloading import _worker
+
+    worker_fn = _worker._resolve_worker("wds")
+    # Simulate _worker.main deserializing dataclass params into SimpleNamespace.
+    ns_params = SimpleNamespace(
+        **dataclasses.asdict(_params(access="shuffled", decode=True, rounds=1))
+    )
+    per_epoch, _, _ = worker_fn(
+        0,
+        1,
+        prefix,
+        ns_params,
+        None,
+        {"cache_root": None, "sample_count": _FILES * _ROWS},
+    )
+
+    assert [rows for _, _, rows in per_epoch] == [_FILES * _ROWS]

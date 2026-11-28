@@ -21,7 +21,10 @@ WorkerFn = Callable[
 _WORKERS: dict[str, WorkerFn] = {}
 
 # Lazy "module:callable" entry points for built-in worker kinds.
-_BUILTIN_WORKERS: dict[str, str] = {}
+_BUILTIN_WORKERS: dict[str, str] = {
+    "hf": "gcsfs.tests.perf.subsystembenchmarks.dataloading.huggingface_datasets.read.driver:worker_entry",
+    "wds": "gcsfs.tests.perf.subsystembenchmarks.dataloading.webdataset.read.driver:worker_entry",
+}
 
 
 def register_worker(kind: str, fn: WorkerFn) -> None:

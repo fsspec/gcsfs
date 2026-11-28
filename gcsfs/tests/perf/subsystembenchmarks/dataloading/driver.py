@@ -47,11 +47,6 @@ def timestamp():
 ROUND_BARRIER_TIMEOUT_SECONDS = 3600
 
 
-def round_barrier(ctx, world_size):
-    """Return a Barrier for multi-rank synchronization, or None if single-rank."""
-    return ctx.Barrier(world_size) if world_size > 1 else None
-
-
 def await_round(barrier):
     """Synchronize ranks at the barrier before starting a round."""
     if barrier is not None:
@@ -190,31 +185,6 @@ def run_single_rank_isolated(
         ]
         launcher.run_subprocess(_WORKER_MODULE, args)
         return _read_worker_result(result_file)
-
-
-def spawn_rank_epochs(rank_entry, prefix, params, *rank_args):
-    """Spawn rank processes and reduce epoch metrics and dataset build time."""
-    import torch.multiprocessing as mp
-
-    ctx = mp.get_context("spawn")
-    with ctx.Manager() as manager:
-        queue = manager.Queue()
-        mp.spawn(
-            rank_entry,
-            args=(
-                params.world_size,
-                prefix,
-                params,
-                round_barrier(ctx, params.world_size),
-                queue,
-                *rank_args,
-            ),
-            nprocs=params.world_size,
-            join=True,
-        )
-        results = [queue.get() for _ in range(params.world_size)]
-    durations, rows, ttfb = reduce_split(results, params.rounds)
-    return durations, rows, ttfb, max(result[2] for result in results)
 
 
 def assert_fsspec_gcsfs(prefix):

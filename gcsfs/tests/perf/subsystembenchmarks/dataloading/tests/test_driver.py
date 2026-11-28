@@ -3,7 +3,6 @@ import json
 import math
 import sys
 import types
-from types import SimpleNamespace
 
 import pytest
 
@@ -346,59 +345,6 @@ def test_env_no_longer_defines_accelerator_helpers():
         assert not hasattr(env, removed), f"_common/env.py still defines {removed}"
 
 
-# Module-level probe functions for mp.spawn pickling (temporary until Task 7).
-
-
-def _asymmetric_round_probe(rank, barrier, queue):
-    import time
-
-    for round_index in range(3):
-        driver.await_round(barrier)
-        begin = driver.timestamp()
-        # Vary rank sleep durations to test barrier synchronization across rounds.
-        time.sleep(0.05 * (rank + 1))
-        queue.put((round_index, begin, driver.timestamp()))
-
-
-def test_round_barrier_keeps_every_rank_inside_its_own_round():
-    mp = pytest.importorskip("torch.multiprocessing")
-
-    world_size = 3
-    ctx = mp.get_context("spawn")
-    with ctx.Manager() as manager:
-        queue = manager.Queue()
-        mp.spawn(
-            _asymmetric_round_probe,
-            args=(driver.round_barrier(ctx, world_size), queue),
-            nprocs=world_size,
-            join=True,
-        )
-        marks = [queue.get() for _ in range(world_size * 3)]
-
-    for round_index in range(2):
-        latest_end = max(end for r, _, end in marks if r == round_index)
-        earliest_begin = min(begin for r, begin, _ in marks if r == round_index + 1)
-        assert (
-            earliest_begin >= latest_end
-        ), f"round {round_index + 1} started before round {round_index} finished"
-
-
-def _rank_result_probe(rank, world_size, prefix, params, barrier, queue):
-    assert world_size == params.world_size
-    assert prefix == "unused"
-    driver.await_round(barrier)
-    queue.put(
-        (
-            [(float(rank), float(2 + 2 * rank), 10 - 5 * rank)],
-            0.5 + 0.4 * rank,
-            1.0 + rank,
-        )
-    )
-
-
-def test_spawn_rank_epochs_reduces_results_and_uses_slowest_build():
-    params = SimpleNamespace(world_size=2, rounds=1)
-
-    result = driver.spawn_rank_epochs(_rank_result_probe, "unused", params)
-
-    assert result == ([4.0], [15], 1.9, 2.0)
+def test_driver_no_longer_defines_mp_spawn_shims():
+    assert not hasattr(driver, "spawn_rank_epochs")
+    assert not hasattr(driver, "round_barrier")
