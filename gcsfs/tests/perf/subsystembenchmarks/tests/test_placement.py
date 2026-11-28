@@ -2,7 +2,6 @@ import os
 import types
 
 import pytest
-import torch
 
 from gcsfs.tests.perf.subsystembenchmarks._common import (
     accelerator,
@@ -40,29 +39,26 @@ def _clean_env(monkeypatch):
 
 @pytest.fixture
 def on_cpu(monkeypatch):
-    monkeypatch.setattr(accelerator, "_cuda_available", lambda: False)
-    monkeypatch.setattr(accelerator, "_tpu_hardware_present", lambda: False)
+    monkeypatch.setattr(accelerator, "_probe_accelerator", lambda: ("cpu", 0, "none"))
 
 
 @pytest.fixture
 def on_cuda_8(monkeypatch):
-    monkeypatch.setattr(accelerator, "_cuda_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: 8)
+    monkeypatch.setattr(
+        accelerator, "_probe_accelerator", lambda: ("cuda", 8, "NVIDIA H200")
+    )
 
 
 @pytest.fixture
 def on_cuda_4(monkeypatch):
-    monkeypatch.setattr(accelerator, "_cuda_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: 4)
+    monkeypatch.setattr(
+        accelerator, "_probe_accelerator", lambda: ("cuda", 4, "NVIDIA H200")
+    )
 
 
 @pytest.fixture
 def on_tpu_4(monkeypatch):
-    monkeypatch.setattr(accelerator, "_cuda_available", lambda: False)
-    monkeypatch.setattr(accelerator, "_cuda_hardware_present", lambda: False)
-    monkeypatch.setattr(accelerator, "_tpu_hardware_present", lambda: True)
-    monkeypatch.setattr(accelerator, "_torch_tpu_installed", lambda: True)
-    monkeypatch.setattr(accelerator, "_tpu_device_count", lambda: 4)
+    monkeypatch.setattr(accelerator, "_probe_accelerator", lambda: ("tpu", 4, "v6e"))
 
 
 def test_nodes_needed():
