@@ -6,30 +6,13 @@ import math
 import os
 
 from gcsfs.tests.perf.subsystembenchmarks._common import accelerator, limitations
+from gcsfs.tests.perf.subsystembenchmarks._common.nodes import NODES_ENV, int_env
 
-NODES_ENV = "GCSFS_SUBSYSTEM_NODES"
 DEVICES_PER_NODE_ENV = "GCSFS_SUBSYSTEM_DEVICES_PER_NODE"
 COLLECTED_CASES_FILE_ENV = "GCSFS_SUBSYSTEM_COLLECTED_CASES_FILE"
 OUTCOME_FILE_ENV = "GCSFS_SUBSYSTEM_OUTCOME_FILE"
 GROUP_ENV = "GCSFS_SUBSYSTEM_GROUP"
 CASES_ENV = "GCSFS_SUBSYSTEM_CASES"
-
-
-def int_env(name: str, *, min_val: int = 1, max_val: int | None = None) -> int | None:
-    """Parse an integer env var with optional lower/upper bounds, or None if unset."""
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return None
-    try:
-        val = int(raw)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
-    if max_val is not None:
-        if not min_val <= val <= max_val:
-            raise ValueError(f"{name} must be in [{min_val}, {max_val}], got {val}")
-    elif val < min_val:
-        raise ValueError(f"{name} must be >= {min_val}, got {val}")
-    return val
 
 
 def devices_per_node() -> int:
