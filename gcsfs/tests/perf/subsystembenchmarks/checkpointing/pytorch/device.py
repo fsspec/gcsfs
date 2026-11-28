@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     import torch
 
 DEVICE_ENV = "GCSFS_SUBSYSTEM_DEVICE"
-_DEVICES = ("cpu", "cuda")
+_DEVICES = ("cpu", "cuda", "tpu")
 
 
 def _validate_device(device: str) -> str:
@@ -32,6 +32,10 @@ def device_capacity(device: str) -> int:
     _validate_device(device)
     if device == "cpu":
         return MAX_RANKS
+    if device == "tpu":
+        from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
+
+        return accelerator.local_device_count()
     import torch
 
     count = torch.cuda.device_count()
@@ -44,6 +48,8 @@ def backend_for(device: str) -> str:
     _validate_device(device)
     if device == "cpu":
         return "gloo"
+    if device == "tpu":
+        return "tpu_dist"
     return "cpu:gloo,cuda:nccl"
 
 
@@ -53,5 +59,7 @@ def rank_device(device: str, local_rank: int) -> torch.device:
     _validate_device(device)
     if device == "cpu":
         return torch.device("cpu")
+    if device == "tpu":
+        return torch.device("tpu")
     torch.cuda.set_device(local_rank)
     return torch.device("cuda", local_rank)

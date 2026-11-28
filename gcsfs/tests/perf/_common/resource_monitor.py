@@ -5,8 +5,9 @@ import psutil
 
 
 class ResourceMonitor:
-    def __init__(self, interval=0.1):
+    def __init__(self, interval=0.1, pid: int | None = None):
         self.interval = interval
+        self._pid = pid
 
         self.vcpus = psutil.cpu_count() or 1
         self.max_cpu = 0.0
@@ -39,11 +40,13 @@ class ResourceMonitor:
 
     def _tracked(self, proc):
         live_procs = {}
+        root_key = (proc.pid, proc.create_time())
+        live_procs[root_key] = self._procs.get(root_key, proc)
         try:
-            all_procs = [proc] + proc.children(recursive=True)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            all_procs = [proc]
-        for p in all_procs:
+            children = proc.children(recursive=True)
+        except psutil.AccessDenied:
+            children = []
+        for p in children:
             try:
                 proc_key = (p.pid, p.create_time())
                 live_procs[proc_key] = self._procs.get(proc_key, p)
@@ -53,20 +56,28 @@ class ResourceMonitor:
         return list(self._procs.values())
 
     def _monitor(self):
-        current_process = psutil.Process()
-        current_process.cpu_percent(interval=None)
+        try:
+            root = psutil.Process(self._pid)
+            root_key = (root.pid, root.create_time())
+            root.cpu_percent(interval=None)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return
 
         while not self._stop_event.is_set():
             try:
-                # CPU and Memory tracking for current process tree
+                if (root.pid, root.create_time()) != root_key:
+                    return
+                # CPU and Memory tracking for target process tree
                 total_cpu = 0.0
                 current_mem = 0.0
 
-                for proc_obj in self._tracked(current_process):
+                for proc_obj in self._tracked(root):
                     try:
                         current_mem += proc_obj.memory_info().rss
                         total_cpu += proc_obj.cpu_percent(interval=None)
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        if proc_obj is root:
+                            return
                         continue
 
                 # Normalize CPU by number of vcpus
@@ -76,8 +87,8 @@ class ResourceMonitor:
                     self.max_cpu = global_cpu
                 if current_mem > self.max_mem:
                     self.max_mem = current_mem
-            except psutil.NoSuchProcess:
-                pass
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                return
 
             self._stop_event.wait(self.interval)
 

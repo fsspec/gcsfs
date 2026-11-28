@@ -18,7 +18,12 @@ def tests_globs(suite_dir):
 
 
 def build_pytest_args(
-    suite_dir, json_path, filter_expr=None, *, disable_benchmark=False
+    suite_dir,
+    json_path,
+    filter_expr=None,
+    *,
+    disable_benchmark=False,
+    exitfirst: bool = False,
 ):
     """Construct the pytest-benchmark measurement invocation."""
     args = [
@@ -28,6 +33,8 @@ def build_pytest_args(
         "-s",
         f"--timeout={CASE_TIMEOUT_SECONDS}",
     ]
+    if exitfirst:
+        args.append("-x")
     if disable_benchmark:
         args.append("--benchmark-disable")
     else:
@@ -121,7 +128,11 @@ def run_suite(suite_dir, results_dir, filter_expr=None):
     is_follower = node_group is not None and not node_group.is_leader
     json_path = os.path.join(results_dir, "results.json")
     cmd = [sys.executable, "-m", "pytest"] + build_pytest_args(
-        suite_dir, json_path, filter_expr, disable_benchmark=is_follower
+        suite_dir,
+        json_path,
+        filter_expr,
+        disable_benchmark=is_follower,
+        exitfirst=(node_group is not None),
     )
     # Kept out of results_dir, which launchers upload verbatim.
     with tempfile.TemporaryDirectory() as tmp_dir:

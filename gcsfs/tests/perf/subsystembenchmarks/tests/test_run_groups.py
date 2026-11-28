@@ -800,6 +800,76 @@ def test_run_suite_keeps_rc_when_rows_written(monkeypatch, tmp_path):
     assert rc == 0 and csv_path == str(tmp_path / "results.csv")
 
 
+def test_build_pytest_args_exitfirst():
+    from gcsfs.tests.perf.subsystembenchmarks._common.cli import build_pytest_args
+
+    default_args = build_pytest_args("/path/to/suite", "/path/to/results.json")
+    assert "-x" not in default_args
+
+    exitfirst_args = build_pytest_args(
+        "/path/to/suite", "/path/to/results.json", exitfirst=True
+    )
+    assert "-x" in exitfirst_args
+
+
+@pytest.mark.parametrize(
+    "env_vars, expect_exitfirst, expect_benchmark_disable",
+    [
+        ({}, False, False),
+        (
+            {
+                "GCSFS_SUBSYSTEM_NODES": "2",
+                "GCSFS_SUBSYSTEM_NODE_RANK": "0",
+                "GCSFS_SUBSYSTEM_LEADER_ADDR": "pod-0.svc",
+            },
+            True,
+            False,
+        ),
+        (
+            {
+                "GCSFS_SUBSYSTEM_NODES": "2",
+                "GCSFS_SUBSYSTEM_NODE_RANK": "1",
+                "GCSFS_SUBSYSTEM_LEADER_ADDR": "pod-0.svc",
+            },
+            True,
+            True,
+        ),
+    ],
+)
+def test_run_suite_passes_exitfirst_only_on_multi_node(
+    monkeypatch, tmp_path, env_vars, expect_exitfirst, expect_benchmark_disable
+):
+    from gcsfs.tests.perf.subsystembenchmarks._common import nodes, placement
+
+    for key in (
+        placement.NODES_ENV,
+        nodes.NODE_RANK_ENV,
+        nodes.LEADER_ADDR_ENV,
+    ):
+        monkeypatch.delenv(key, raising=False)
+    for key, val in env_vars.items():
+        monkeypatch.setenv(key, val)
+
+    seen_cmds = []
+
+    def fake_run(cmd, env=None, text=None):
+        seen_cmds.append(cmd)
+        with open(env[placement.OUTCOME_FILE_ENV], "w") as f:
+            json.dump({**_LIMITED, "passed": 1}, f)
+        if not expect_benchmark_disable:
+            json_arg = next(a for a in cmd if a.startswith("--benchmark-json="))
+            with open(json_arg.split("=", 1)[1], "w") as f:
+                json.dump({"benchmarks": [{"name": "c", "stats": {}}]}, f)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(run.cli.subprocess, "run", fake_run)
+    rc, _ = run.cli.run_suite("suite", str(tmp_path))
+    assert rc == 0
+    assert len(seen_cmds) == 1
+    assert ("-x" in seen_cmds[0]) is expect_exitfirst
+    assert ("--benchmark-disable" in seen_cmds[0]) is expect_benchmark_disable
+
+
 def test_run_suite_follower_without_rows_is_not_a_failure(monkeypatch, tmp_path):
     from gcsfs.tests.perf.subsystembenchmarks._common import nodes, placement
 
