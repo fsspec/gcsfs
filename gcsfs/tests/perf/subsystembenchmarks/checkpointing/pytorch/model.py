@@ -8,6 +8,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 from torch.distributed.tensor import DTensor
+from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 from transformers import AutoConfig, AutoModelForCausalLM
 
 import gcsfs
@@ -17,6 +18,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parallelize impo
     parallelize,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.reference import (
+    MmapWeightStore,
     local_slice,
     model_dir,
     random_local,
@@ -70,6 +72,20 @@ def expected_local(
     if key.endswith(".exp_avg_sq"):
         return random_local(seed, key, target, device).square_().mul_(1e-6)
     if seed == SETUP_SEED:
+        if isinstance(weights, MmapWeightStore) and isinstance(target, DTensor):
+            full_shape = weights.get_shape(key)
+            if full_shape != tuple(target.shape):
+                raise ValueError(
+                    f"Weight {key!r} shape {full_shape} "
+                    f"!= expected {tuple(target.shape)}"
+                )
+            shape, offset = compute_local_shape_and_global_offset(
+                target.shape, target.device_mesh, target.placements
+            )
+            slices = tuple(slice(o, o + s) for s, o in zip(shape, offset))
+            return weights.get_slice(key, slices).to(
+                device=device, dtype=torch.float32, copy=True
+            )
         full = weights[key]
         if tuple(full.shape) != tuple(target.shape):
             raise ValueError(
