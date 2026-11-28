@@ -252,7 +252,7 @@ def test_tpu_bootstrap_clears_torch_tpu_env_and_calls_set_tpu_launch_env_before_
 def test_tpu_single_rank_clears_torch_tpu_env_without_set_tpu_launch_env(monkeypatch):
     events = []
     monkeypatch.setenv("TORCH_TPU_TOPOLOGY", "stale-topo")
-    monkeypatch.delenv("RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS", raising=False)
+    monkeypatch.setenv("RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS", "1")
 
     monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
     monkeypatch.setattr(accelerator, "local_device_count", lambda: 8)
@@ -272,6 +272,7 @@ def test_tpu_single_rank_clears_torch_tpu_env_without_set_tpu_launch_env(monkeyp
 
     common.ensure_ray_initialized(1)
     assert events == [("ray.init", "local", None, None)]
+    assert "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS" not in os.environ
 
 
 def test_kill_actors_invokes_ray_kill_no_restart(monkeypatch):

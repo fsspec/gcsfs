@@ -156,6 +156,34 @@ def test_reduce_gathered_normalizes_clocks_per_node():
     ]
 
 
+@pytest.mark.parametrize(
+    "node_rank_env, group_rank_env, expected",
+    [
+        (None, None, 0),
+        ("", None, 0),
+        ("", "2", 2),
+        ("  ", "2", 2),
+        (None, "2", 2),
+        ("3", "2", 3),
+        ("3", None, 3),
+    ],
+)
+def test_node_rank_handles_empty_env_and_group_rank_fallback(
+    monkeypatch, node_rank_env, group_rank_env, expected
+):
+    if node_rank_env is None:
+        monkeypatch.delenv(nodes.NODE_RANK_ENV, raising=False)
+    else:
+        monkeypatch.setenv(nodes.NODE_RANK_ENV, node_rank_env)
+
+    if group_rank_env is None:
+        monkeypatch.delenv("GROUP_RANK", raising=False)
+    else:
+        monkeypatch.setenv("GROUP_RANK", group_rank_env)
+
+    assert _worker._node_rank() == expected
+
+
 def test_write_driver_launches_save_and_verify_as_separate_torchrun_calls(
     tmp_path, monkeypatch
 ):

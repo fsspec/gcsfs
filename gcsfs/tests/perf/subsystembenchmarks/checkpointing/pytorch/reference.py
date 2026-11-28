@@ -223,13 +223,21 @@ def ensure_canonical_weights(model_id: str) -> str:
     state = model.state_dict()
     del model
 
-    seen_ptrs: set[int] = set()
+    missing = [key for key in param_shapes if key not in state]
+    if missing:
+        raise KeyError(
+            f"Canonicalizing {model_id}: missing expected parameters in state_dict: {missing}"
+        )
+
+    seen_storage_ptrs: set[int] = set()
     tensors: dict[str, torch.Tensor] = {}
-    for key, tensor in state.items():
-        t = tensor.detach().to(device="cpu", dtype=torch.bfloat16)
-        if not t.is_contiguous() or t.data_ptr() in seen_ptrs:
+    for key in param_shapes:
+        t = state[key].detach().to(device="cpu", dtype=torch.bfloat16)
+        storage_ptr = t.untyped_storage().data_ptr()
+        if not t.is_contiguous() or storage_ptr in seen_storage_ptrs:
             t = t.clone().contiguous()
-        seen_ptrs.add(t.data_ptr())
+            storage_ptr = t.untyped_storage().data_ptr()
+        seen_storage_ptrs.add(storage_ptr)
         tensors[key] = t
     del state
 

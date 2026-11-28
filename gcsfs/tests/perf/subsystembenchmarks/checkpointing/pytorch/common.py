@@ -37,6 +37,10 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.state import (
 WORKER_MODULE = "gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch._worker"
 
 
+def step_prefix(prefix: str, step: int) -> str:
+    return f"{prefix.rstrip('/')}/step-{step}/"
+
+
 def import_fsspec_filesystem():
     """Return (FsspecReader, FsspecWriter) across PyTorch 2.14+ module paths."""
     try:

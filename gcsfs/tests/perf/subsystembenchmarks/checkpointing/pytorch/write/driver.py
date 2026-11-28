@@ -8,10 +8,6 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import common
 
 
-def _step_prefix(prefix: str, step: int) -> str:
-    return f"{prefix.rstrip('/')}/step-{step}/"
-
-
 class PyTorchCheckpointWriteDriver(common.DCPDriver):
     def setup(self, prefix, params):
         self.prepare(params, params.target_layout())
@@ -23,7 +19,7 @@ class PyTorchCheckpointWriteDriver(common.DCPDriver):
         def _verify() -> None:
             common.run_worker(
                 "verify_saved",
-                _step_prefix(prefix, params.rounds - 1),
+                common.step_prefix(prefix, params.rounds - 1),
                 params,
                 world_size=world_size,
                 rdzv_id=f"{params.name}-verify",

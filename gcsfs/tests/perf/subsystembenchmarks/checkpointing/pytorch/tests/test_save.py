@@ -1,4 +1,3 @@
-import contextlib
 import json
 import os
 import struct
@@ -201,14 +200,13 @@ def test_worker_save_skips_post_round_barrier_on_round_zero(
     result_file = tmp_path / f"result-r{rounds}.json"
     params = _params("fake", strategy="fsdp", dp=1, world_size=1, rounds=rounds)
 
-    with contextlib.nullcontext():
-        _worker._run_save(
-            ckpt_dir.as_uri(),
-            params,
-            weights={},
-            device=torch.device("cpu"),
-            result_file=str(result_file),
-        )
+    _worker._run_save(
+        ckpt_dir.as_uri(),
+        params,
+        weights={},
+        device=torch.device("cpu"),
+        result_file=str(result_file),
+    )
 
     data = json.loads(result_file.read_text())
     assert len(data["durations"]) == rounds

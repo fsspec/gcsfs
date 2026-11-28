@@ -21,6 +21,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.common import (
     build_state,
     import_fsspec_filesystem,
     rank_session,
+    step_prefix,
     timed,
     warm_up,
 )
@@ -44,10 +45,6 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.state import (
 )
 
 
-def step_prefix(prefix: str, step: int) -> str:
-    return f"{prefix.rstrip('/')}/step-{step}/"
-
-
 def _reader_for(prefix: str):
     FsspecReader, _ = import_fsspec_filesystem()
     if prefix.startswith(("gs://", "gcs://")):
@@ -56,7 +53,11 @@ def _reader_for(prefix: str):
 
 
 def _node_rank() -> int:
-    return int(os.environ.get(nodes.NODE_RANK_ENV, "0"))
+    raw = (
+        os.environ.get(nodes.NODE_RANK_ENV, "").strip()
+        or os.environ.get("GROUP_RANK", "").strip()
+    )
+    return int(raw) if raw else 0
 
 
 def _reduce_gathered(

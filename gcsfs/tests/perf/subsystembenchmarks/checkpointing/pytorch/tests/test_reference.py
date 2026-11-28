@@ -251,6 +251,93 @@ def test_ensure_canonical_weights_skips_conversion_for_matching_bf16_shards(
         assert len(weights) > 0
 
 
+def test_ensure_canonical_weights_filters_buffers_and_dedups_offset_views(
+    tmp_path, monkeypatch
+):
+    from safetensors import safe_open
+
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import (
+        reference as ref_mod,
+    )
+
+    model_path = tiny_model_dir(tmp_path / "src", kind="llama", num_layers=1)
+    canonical = os.path.join(model_path, ".canonical.safetensors")
+    meta_model = build_model(model_path)
+    param_shapes = {name: tuple(p.shape) for name, p in meta_model.named_parameters()}
+    del meta_model
+
+    # Build a synthetic state_dict that:
+    # (a) includes a persistent buffer absent from named_parameters(), and
+    # (b) backs two parameters as non-overlapping views at different offsets into
+    #     the same underlying storage (different data_ptr, identical untyped_storage().data_ptr()).
+    orig_state = AutoModelForCausalLM.from_pretrained(
+        model_path, dtype=torch.bfloat16, local_files_only=True
+    ).state_dict()
+    keys = list(param_shapes)
+    k0, k1 = keys[0], keys[1]
+    n0, n1 = orig_state[k0].numel(), orig_state[k1].numel()
+    shared_storage = torch.arange(n0 + n1, dtype=torch.bfloat16)
+    view0 = shared_storage[:n0].view(param_shapes[k0])
+    view1 = shared_storage[n0 : n0 + n1].view(param_shapes[k1])
+    assert view0.data_ptr() != view1.data_ptr()
+    assert view0.untyped_storage().data_ptr() == view1.untyped_storage().data_ptr()
+
+    synthetic_state = dict(orig_state)
+    synthetic_state[k0] = view0
+    synthetic_state[k1] = view1
+    synthetic_state["model.rotary_emb.inv_freq"] = torch.ones(8, dtype=torch.bfloat16)
+
+    class _FakeModel:
+        def state_dict(self):
+            return synthetic_state
+
+    load_calls = []
+
+    def _fake_from_pretrained(*args, **kwargs):
+        load_calls.append((args, kwargs))
+        return _FakeModel()
+
+    monkeypatch.setattr(
+        ref_mod.AutoModelForCausalLM, "from_pretrained", _fake_from_pretrained
+    )
+
+    assert ensure_canonical_weights(model_path) == model_path
+    assert len(load_calls) == 1
+    assert os.path.isfile(canonical)
+
+    with safe_open(canonical, framework="pt", device="cpu") as sf:
+        assert set(sf.keys()) == set(param_shapes.keys())
+        assert "model.rotary_emb.inv_freq" not in sf.keys()
+
+    # Subsequent load_weights() reuses .canonical.safetensors without reloading HF model.
+    monkeypatch.setattr(
+        ref_mod.AutoModelForCausalLM,
+        "from_pretrained",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("unexpected reload")),
+    )
+    with load_weights(model_path) as weights:
+        assert set(weights.keys()) == set(param_shapes.keys())
+        assert torch.equal(weights[k0], view0)
+        assert torch.equal(weights[k1], view1)
+
+    # Missing expected parameter raises a clear KeyError.
+    os.unlink(canonical)
+    incomplete_state = dict(orig_state)
+    incomplete_state.pop(k0)
+
+    class _IncompleteModel:
+        def state_dict(self):
+            return incomplete_state
+
+    monkeypatch.setattr(
+        ref_mod.AutoModelForCausalLM,
+        "from_pretrained",
+        lambda *a, **kw: _IncompleteModel(),
+    )
+    with pytest.raises(KeyError, match=re.escape(k0)):
+        ensure_canonical_weights(model_path)
+
+
 def test_random_full_deterministic_and_seed_dependent():
     shape = torch.Size([16, 32])
     device = torch.device("cpu")
