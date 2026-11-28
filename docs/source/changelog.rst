@@ -7,6 +7,10 @@ releasing in step with fsspec.
 Unreleased
 ----------
 
+* Fix generation parsing for object names containing literal ``#``, ``?``,
+  or URL-like text (#1129).
+* Reject generation-qualified overwrites instead of silently using live
+  objects. Zonal append is unchanged (#1129).
 * **gcsfs now requires** ``requests>=2.33.0`` (released 2026-03-25). Older
   releases have known security advisories (CVE-2024-35195, CVE-2024-47081 and
   CVE-2026-25645), and ``google-api-core>=2.31.0`` already requires this

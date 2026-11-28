@@ -23,7 +23,6 @@ from datetime import datetime, timedelta
 from glob import has_magic
 from urllib.parse import parse_qs
 from urllib.parse import quote as quote_urllib
-from urllib.parse import urlsplit
 
 import aiohttp
 import fsspec
@@ -2012,6 +2011,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             content_type = "application/octet-stream"
         consistency = consistency or self.consistency
         bucket, key, generation = self.split_path(path)
+        if generation is not None:
+            raise ValueError("Cannot write to specific object generation")
         if_generation_match = _resolve_generation_match(mode, if_generation_match)
         # Accept any bytes-like object: len() of a typed buffer counts
         # elements, and a numpy array added to the request body broadcasts.
@@ -2603,11 +2604,12 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         ----------
         path : string
             Input path, like `gcs://mybucket/path/to/file`.
-            Path is of the form: '[gs|gcs://]bucket[/key][?querystring][#fragment]'
+            Everything after the bucket delimiter is an object key, not a URL.
 
-        GCS allows object generation (object version) to be specified in either
-        the URL fragment or the `generation` query parameter. When provided,
-        the fragment will take priority over the `generation` query parameter.
+        With version awareness enabled, ``#123`` or ``?generation=123`` selects
+        a generation. A valid numeric suffix after the last ``#`` takes
+        precedence. Invalid selectors remain part of the key. With version
+        awareness disabled, the entire key is literal.
 
         Returns
         -------
@@ -2620,22 +2622,28 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         key = keypart
         generation = None
         if version_aware:
-            parts = urlsplit(keypart)
-            try:
-                if parts.fragment:
-                    generation = parts.fragment
-                elif parts.query:
-                    parsed = parse_qs(parts.query)
-                    if "generation" in parsed:
-                        generation = parsed["generation"][0]
-                # Sanity check whether this could be a valid generation ID. If
-                # it is not, assume that # or ? characters are supposed to be
-                # part of the object name.
-                if generation is not None:
-                    int(generation)
-                    key = parts.path
-            except ValueError:
-                generation = None
+            fragment_key, separator, fragment = keypart.rpartition("#")
+            if separator:
+                try:
+                    int(fragment)
+                except ValueError:
+                    pass
+                else:
+                    key, generation = fragment_key, fragment
+
+            # Keep supporting query selectors with an empty trailing fragment.
+            query_path = key if generation is not None else keypart.removesuffix("#")
+            query_key, _, query = query_path.partition("?")
+            values = parse_qs(query).get("generation", []) if "#" not in query else []
+            if values:
+                try:
+                    int(values[0])
+                except ValueError:
+                    pass
+                else:
+                    key = query_key
+                    if generation is None:
+                        generation = values[0]
         return (
             bucket,
             key,
@@ -2882,7 +2890,17 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             telemetry_manager.default_usage_tracker.get_dimension(Dimension.FRAMEWORK)
             or ""
         )
+        _allow_zero_generation = kwargs.pop("_allow_zero_generation", False)
         self.generation = _coalesce_generation(generation, path_generation)
+        if (
+            self.generation is not None
+            and not (_allow_zero_generation and int(self.generation) == 0)
+            and (
+                mode in {"wb", "xb"}
+                or (mode == "ab" and not kwargs.get("_supports_append", False))
+            )
+        ):
+            raise ValueError("Cannot write to specific object generation")
         self.if_generation_match = _resolve_open_generation_match(
             mode, if_generation_match
         )

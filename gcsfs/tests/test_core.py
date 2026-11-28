@@ -5470,6 +5470,21 @@ def test_get_dirs_and_update_cache_with_directories_and_prefix(gcs):
     assert len(gcs.dircache) == 0
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "suffix", ["#123", "?generation=123", "#variant?generation=123"]
+)
+async def test_merge_rejects_specific_generations_before_request(suffix):
+    fs = CoreGCSFileSystem(token="anon", version_aware=True)
+    destination = f"bucket/destination{suffix}"
+    with mock.patch.object(fs, "_call", new_callable=mock.AsyncMock) as request:
+        with pytest.raises(
+            ValueError, match="Cannot write to specific object generation"
+        ):
+            await fs._merge(destination, ["bucket/source"])
+        request.assert_not_awaited()
+
+
 def test_coalesce_generation_variants():
     from gcsfs.core import _coalesce_generation
 
@@ -5659,7 +5674,7 @@ def test_gcsfile_open_with_generation_pins_size_and_reads(cache_type):
     """GCSFile opened with generation= pins both f.size and f.read() across cache modes."""
     from urllib.parse import parse_qs, urlsplit
 
-    fs = GCSFileSystem(token="anon", skip_instance_cache=True)
+    fs = CoreGCSFileSystem(token="anon", skip_instance_cache=True)
     path = "bucket/file.bin"
     versions = {"111": b"v1-10bytes", "222": b"v2-longer-live-payload"}
     overwritten_after_open = False

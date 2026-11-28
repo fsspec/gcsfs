@@ -215,6 +215,9 @@ class ZonalFile(GCSFile):
                 if_generation_match=if_generation_match,
                 # Zonal buckets support append; this prevents GCSFile from forcing 'w' mode
                 _supports_append="a" in mode,
+                _allow_zero_generation=mode == "wb"
+                and generation is not None
+                and int(generation) == 0,
                 # pass persisted_size here so that Cache is initialized with correct object size
                 size=object_size if object_size is not None else caller_size,
                 **kwargs,
